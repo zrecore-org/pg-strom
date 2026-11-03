@@ -1165,6 +1165,8 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 				case KAGG_ACTION__PSUM_INT64:
 				case KAGG_ACTION__PAVG_INT:
 				case KAGG_ACTION__PAVG_INT64:
+		case KAGG_ACTION__PSUM_NUMERIC:
+		case KAGG_ACTION__PAVG_NUMERIC:
 					st->n[k] += rec[0];
 					st->sum[k] += (__int128) b * 4294967296LL + (__int128) a;
 					break;
@@ -1399,6 +1401,8 @@ acc_merge_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
 		case KAGG_ACTION__PSUM_INT64:
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PAVG_INT64:
+		case KAGG_ACTION__PSUM_NUMERIC:
+		case KAGG_ACTION__PAVG_NUMERIC:
 			acc->n += rec[0];
 			acc->sum += (__int128) b * 4294967296LL + (__int128) a;
 			break;
@@ -1432,6 +1436,8 @@ acc_merge_group_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
 		case KAGG_ACTION__PSUM_INT64:
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PAVG_INT64:
+		case KAGG_ACTION__PSUM_NUMERIC:
+		case KAGG_ACTION__PAVG_NUMERIC:
 		{
 			__int128	u = (__int128) rec[2] + ((__int128) rec[3] << 16) +
 				((__int128) rec[4] << 32) + ((__int128) rec[5] << 48);
@@ -1462,6 +1468,33 @@ acc_merge_group_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
 			break;
 		}
 	}
+}
+
+/* agg_scales_ok() of scan_common.slang for the CPU path: every numeric aggregate argument and key has the plan's scale */
+static int
+cpu_scales_ok(const uint32_t *w, uint32_t aggoff, uint32_t nagg, uint32_t keyoff, uint32_t nkeys, const vm_reg *regs)
+{
+	for (uint32_t k = 0; k < nagg; k++)
+	{
+		uint32_t	sc1 = w[aggoff + 4 * k + 3], ra = w[aggoff + 4 * k + 1], rf = w[aggoff + 4 * k + 2];
+
+		if (sc1 == 0)
+			continue;
+		if (rf != 0xffffffffu && (regs[rf].isnull || regs[rf].v == 0))
+			continue;
+		if (!regs[ra].isnull && regs[ra].sc != sc1 - 1)
+			return 0;
+	}
+	for (uint32_t k = 0; k < nkeys; k++)
+	{
+		uint32_t	sc1 = w[keyoff + nkeys + k];
+
+		if (sc1 == 0)
+			continue;
+		if (!regs[w[keyoff + k]].isnull && regs[w[keyoff + k]].sc != sc1 - 1)
+			return 0;
+	}
+	return 1;
 }
 
 /* add one row's argument to an accumulator (the CPU path of GROUP BY overflow rows) */
@@ -1500,7 +1533,7 @@ typedef struct
 } col_value;
 
 static int
-agg_col_value(uint32_t action, const agg_acc *acc, col_value *cv, char *err, size_t errlen)
+agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, char *err, size_t errlen)
 {
 	int64_t		i64;
 
@@ -1548,6 +1581,25 @@ agg_col_value(uint32_t action, const agg_acc *acc, col_value *cv, char *err, siz
 			}
 			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
 			r->attrs = 0;
+			r->nitems = acc->n;
+			__store_int128_packed(&r->sum, (int128_t) acc->sum);
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		case KAGG_ACTION__PSUM_NUMERIC:
+		case KAGG_ACTION__PAVG_NUMERIC:
+		{
+			/* the same state as the sum of int8, with the display scale of the inputs in attrs */
+			kagg_state__psum_numeric_packed *r = (kagg_state__psum_numeric_packed *) cv->data;
+
+			if (acc->n == 0)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = (uint32_t)(scale < 0 ? 0 : scale) & __PAGG_NUMERIC_ATTRS__WEIGHT;
 			r->nitems = acc->n;
 			__store_int128_packed(&r->sum, (int128_t) acc->sum);
 			cv->len = sizeof(*r);
@@ -2009,6 +2061,17 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 					}
 					continue;
 				}
+				if (!cpu_scales_ok(w, aggoff, nagg, keyoff, nkeys, regs))
+				{
+					/* a numeric of another scale than the plan's: the backend evaluates the row */
+					if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
+								page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+					{
+						snprintf(err, errlen, "out of memory");
+						goto done;
+					}
+					continue;
+				}
 				for (uint32_t k = 0; k < nkeys; k++)
 				{
 					const vm_reg *r = &regs[w[keyoff + k]];
@@ -2111,6 +2174,15 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 				const kern_colmeta *cm = &kds_dst_head->colmeta[j];
 
 				memset(&cols[j], 0, sizeof(cols[j]));
+				if (k >= 0 && prog->key_scale[k] >= 0 && cm->attlen == -1)
+				{
+					/* a numeric key: { unscaled, scale } formed as PostgreSQL stores it */
+					if (g->knull & (1u << k))
+						cols[j].isnull = 1;
+					else
+						cols[j].len = scan_vm_numeric_encode(g->key[k], (uint32_t) prog->key_scale[k], cols[j].data);
+					continue;
+				}
 				if (k < 0 || (cm->attlen != 1 && cm->attlen != 2 && cm->attlen != 4 && cm->attlen != 8))
 				{
 					snprintf(err, errlen, "GROUP BY column %u has an unsupported result type", j + 1);
@@ -2145,7 +2217,7 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 					acc.val = st->val[j];
 					pacc = &acc;
 				}
-				if (agg_col_value(action, pacc, &cols[j], err, errlen) != 0)
+				if (agg_col_value(action, (prog && prog->words && prog->agg_of_col[j] >= 0) ? prog->agg_scale[(int) prog->agg_of_col[j]] : -1, pacc, &cols[j], err, errlen) != 0)
 				{
 					free(resp);
 					return NULL;

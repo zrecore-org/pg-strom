@@ -840,6 +840,8 @@ scan_vm_agg_action_supported(int action)
 		case KAGG_ACTION__PSUM_INT64:		/* sum(int8) */
 		case KAGG_ACTION__PAVG_INT:			/* avg(int1/2/4) */
 		case KAGG_ACTION__PAVG_INT64:		/* avg(int8) */
+		case KAGG_ACTION__PSUM_NUMERIC:		/* sum(numeric) of a known scale */
+		case KAGG_ACTION__PAVG_NUMERIC:
 			return true;
 		default:
 			break;

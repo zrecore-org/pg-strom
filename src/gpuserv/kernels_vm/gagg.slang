@@ -142,6 +142,11 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (lp < nlp)
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
             st_slot[tid] = NO_SLOT;
+            if (hit && !agg_scales_ok(aggoff, naggs, keyoff, nkeys, regs))
+            {
+                hit = false;                        // a numeric of another scale than the plan's:
+                g_recheck = 1;                      // the backend evaluates the row
+            }
             if (hit)
             {
                 int64_t k0 = 0, k1 = 0;

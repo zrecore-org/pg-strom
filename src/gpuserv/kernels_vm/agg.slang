@@ -87,6 +87,12 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             if (!hit)
                 continue;
+            if (!agg_scales_ok(aggoff, naggs, 0, 0, regs))
+            {
+                // a numeric of another scale than the plan's: the backend evaluates the row
+                outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
+                continue;
+            }
             hits += 1;
             for (uint k = 0; k < naggs; k++)
             {

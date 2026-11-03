@@ -927,6 +927,35 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
     return 0;
 }
 
+// Numeric aggregates and GROUP BY keys: the plan fixed the scale of the value (word 3 of the aggregate entry, the
+// word after the key registers: scale + 1, 0 = not numeric), so that the sum of unscaled int64 values and the key
+// equality are exact. A qualifying row whose value has another scale is evaluated by the backend instead.
+bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg regs[VM_MAX_REGS])
+{
+    for (uint k = 0; k < naggs; k++)
+    {
+        uint sc1 = prog[aggoff + 4 * k + 3];
+        if (sc1 == 0u)
+            continue;
+        uint ra = prog[aggoff + 4 * k + 1];
+        uint rf = prog[aggoff + 4 * k + 2];
+        if (rf != 0xffffffffu && (regs[rf].isnull != 0 || regs[rf].v == 0))
+            continue;                               // this aggregate skips the row
+        if (regs[ra].isnull == 0 && regs[ra].sc != sc1 - 1u)
+            return false;
+    }
+    for (uint k = 0; k < nkeys; k++)
+    {
+        uint sc1 = prog[keyoff + nkeys + k];
+        if (sc1 == 0u)
+            continue;
+        uint r = prog[keyoff + k];
+        if (regs[r].isnull == 0 && regs[r].sc != sc1 - 1u)
+            return false;
+    }
+    return true;
+}
+
 // Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
 uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
 {

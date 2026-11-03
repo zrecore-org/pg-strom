@@ -1659,7 +1659,28 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 		}
 		partfn_args = lappend(partfn_args, expr);
 		if (lc == list_head(aggref->args))
+		{
 			groupby_typmod = exprTypmod((Node *)expr);
+			if (aggfn_cat->partial_func_action == KAGG_ACTION__PSUM_NUMERIC ||
+				aggfn_cat->partial_func_action == KAGG_ACTION__PAVG_NUMERIC)
+			{
+				/*
+				 * The Vulkan service sums numerics as unscaled integers of one scale: it must be known
+				 * from the plan (numeric(p,s) columns and what follows from them). The typmod of the
+				 * action carries it, encoded as a numeric typmod.
+				 */
+				int		dscale = pgstrom_numeric_static_dscale((Node *) expr);
+
+				if (dscale < 0 || dscale > 255)
+				{
+					elog(DEBUG2, "the scale of the numeric aggregate argument is not known: %s",
+						 nodeToString(expr));
+					ReleaseSysCache(htup);
+					return NULL;
+				}
+				groupby_typmod = (38 << 16) + dscale + VARHDRSZ;
+			}
+		}
 	}
 	/* last argument for filtering */
 	if (aggref->aggfilter)
@@ -1962,8 +1983,11 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer or bool columns */
-			if (!scan_vm_groupkey_type_supported(dtype->type_code) ||
+			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer, bool or numeric (of a known scale) columns */
+			if ((!scan_vm_groupkey_type_supported(dtype->type_code) &&
+				 !(dtype->type_code == TypeOpCode__numeric &&
+				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
+				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
 				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
@@ -2087,7 +2111,9 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 											   ? KAGG_ACTION__VREF_NOKEY
 											   : KAGG_ACTION__VREF);
 		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
-											   exprTypmod((Node *)key));
+											   exprType((Node *)key) == NUMERICOID
+											   ? (38 << 16) + pgstrom_numeric_static_dscale((Node *) key) + VARHDRSZ
+											   : exprTypmod((Node *)key));
 	}
 	set_pathtarget_cost_width(root, con->target_proj_final);
 	set_pathtarget_cost_width(root, con->target_agg_final);
