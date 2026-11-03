@@ -175,7 +175,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 else
                 {
                     if (out_of_range(x.v, k0))
-                        return k1;
+                        return k1 | (SOP_ERR_INTRANGE << 16);
                     regs[dst].v = x.v;
                 }
             }
@@ -223,6 +223,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             uint    w   = k0 >> 8;
             int64_t r   = 0;
             bool    bad = false;
+            uint    why = SOP_ERR_INTRANGE;
 
             switch (aop)
             {
@@ -248,7 +249,10 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 break;
             case SOP_ARITH_DIV:
                 if (y.v == 0)
+                {
                     bad = true;
+                    why = SOP_ERR_ZERODIV;
+                }
                 else if (y.v == -1)
                 {
                     r = -x.v;
@@ -259,7 +263,10 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 break;
             default:    // SOP_ARITH_MOD
                 if (y.v == 0)
+                {
                     bad = true;
+                    why = SOP_ERR_ZERODIV;
+                }
                 else if (y.v == -1)
                     r = 0;
                 else
@@ -267,7 +274,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 break;
             }
             if (bad)
-                return k1;
+                return k1 | (why << 16);
             regs[dst].v = r;
             regs[dst].isnull = 0;
             break;
@@ -286,6 +293,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             float b = asfloat(uint(y.v));
             float r = 0;
             bool  bad = false;
+            uint  why = SOP_ERR_FLTOVER;
             bool  inf_in = isinf(a) || isinf(b);
 
             switch (k0)
@@ -295,21 +303,54 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             case SOP_ARITH_MUL:
                 r = a * b;
                 bad = (isinf(r) && !inf_in) || (r == 0 && a != 0 && b != 0);
+                if (!isinf(r))
+                    why = SOP_ERR_FLTUNDER;
                 break;
             default:    // SOP_ARITH_DIV
                 if (b == 0)
+                {
                     bad = true;
+                    why = SOP_ERR_ZERODIV;
+                }
                 else
                 {
                     r = a / b;
                     bad = (isinf(r) && !inf_in) || (r == 0 && a != 0 && !isinf(b));
+                    if (!isinf(r))
+                        why = SOP_ERR_FLTUNDER;
                 }
                 break;
             }
             if (bad)
-                return k1;
+                return k1 | (why << 16);
             regs[dst].v = int64_t(asuint(r));
             regs[dst].isnull = 0;
+            break;
+        }
+
+        case SOP_I2F:
+        {
+            Reg x = regs[ra];
+            regs[dst].isnull = x.isnull;
+            if (x.isnull == 0)
+                regs[dst].v = int64_t(asuint(float(x.v)));
+            break;
+        }
+
+        case SOP_F2I:
+        {
+            Reg x = regs[ra];
+            regs[dst].isnull = x.isnull;
+            if (x.isnull == 0)
+            {
+                float f = asfloat(uint(x.v));
+                if (isnan(f) || isinf(f) || f >= 9.2233720368547758e18 || f < -9.2233720368547758e18)
+                    return k1 | (SOP_ERR_INTRANGE << 16);
+                int64_t r = int64_t(round(f));      // round to nearest even, as rint()
+                if (out_of_range(r, k0))
+                    return k1 | (SOP_ERR_INTRANGE << 16);
+                regs[dst].v = r;
+            }
             break;
         }
 

@@ -2259,7 +2259,7 @@ pgstromSharedStateShutdownDSM(CustomScanState *node)
 	memcpy(loc_addr, ps_state, ps_state->ss_length);
 	/* replace dsm pointers by local duplication */
 	pts->ps_state = (pgstromSharedState *)loc_addr;
-	loc_addr += MAXALIGN(sizeof(pgstromSharedScanState));
+	loc_addr += MAXALIGN(sizeof(pgstromSharedState));
 	for (int k=0; k < pts->num_scan_rels; k++)
 	{
 		pgstromTaskScanState *ptss = &pts->scan_rels[k];

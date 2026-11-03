@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/scan_caps.h"
 
 /* -------- static variables --------*/
 #define DEVTYPE_INFO_NSLOTS		128
@@ -1871,6 +1872,12 @@ __codegen_func_expression(codegen_context *context,
 		(dfunc->func_flags & context->xpu_task_flags & DEVKIND__ANY) == 0)
 		__Ereport("function %s is not supported on the target device",
 				  format_procedure(func_oid));
+#ifdef PGSTROM_NO_CUDA
+	/* only what the Vulkan service's VM implements (scan_caps.c) is pushed down */
+	if (!scan_vm_func_supported(dfunc->func_code))
+		__Ereport("function %s is not supported by the Vulkan service",
+				  format_procedure(func_oid));
+#endif
 	dtype = dfunc->func_rettype;
 	context->device_cost += dfunc->func_cost;
 
@@ -3084,6 +3091,24 @@ codegen_expression_walker(codegen_context *context,
 		return codegen_pseudo_const_expression(context, buf, curr_depth, expr);
 
 	context->stack_usage += XPUCODE_STACK_USAGE_NORMAL;
+#ifdef PGSTROM_NO_CUDA
+	/* expression nodes the Vulkan service's VM does not implement yet */
+	switch (nodeTag(expr))
+	{
+		case T_DistinctExpr:
+		case T_BooleanTest:
+		case T_CoerceViaIO:
+		case T_CoalesceExpr:
+		case T_MinMaxExpr:
+		case T_CaseExpr:
+		case T_CaseTestExpr:
+		case T_ScalarArrayOpExpr:
+			__Ereport("expression type %d is not supported by the Vulkan service",
+					  (int) nodeTag(expr));
+		default:
+			break;
+	}
+#endif
 	switch (nodeTag(expr))
 	{
 		case T_Const:

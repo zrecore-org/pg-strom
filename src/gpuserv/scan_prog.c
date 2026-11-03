@@ -15,166 +15,11 @@
 #include <string.h>
 #include "xpu_common.h"
 #include "scan_prog.h"
+#include "scan_caps.h"
 
-enum {
-#define SCANVM_OP(n, v)	SOP_##n = v,
-#include "kernels_vm/scan_vm_ops.inc"
-#undef SCANVM_OP
-	SOP_END
-};
 
 #define PROG_HDR_WORDS		10
 #define NO_REG				(-1)
-
-/* ----------------------------------------------------------------
- * opcode names (to classify the many intNNxx operators by name)
- * ----------------------------------------------------------------
- */
-#define FUNC_OPCODE(a,b,c,NAME,d,e)			[FuncOpCode__##NAME] = #NAME,
-#define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	[FuncOpCode__##NAME] = #NAME,
-static const char *const func_names[FuncOpCode__LoadVars] = {
-#include "xpu_opcodes.h"
-};
-#undef FUNC_OPCODE
-#undef DEVONLY_FUNC_OPCODE
-
-static const char *
-opcode_name(uint32_t opcode)
-{
-	switch (opcode)
-	{
-		case FuncOpCode__ConstExpr:		return "ConstExpr";
-		case FuncOpCode__ParamExpr:		return "ParamExpr";
-		case FuncOpCode__VarExpr:		return "VarExpr";
-		case FuncOpCode__BoolExpr_And:	return "BoolExpr_And";
-		case FuncOpCode__BoolExpr_Or:	return "BoolExpr_Or";
-		case FuncOpCode__BoolExpr_Not:	return "BoolExpr_Not";
-		default:
-			if (opcode < FuncOpCode__LoadVars && func_names[opcode])
-				return func_names[opcode];
-	}
-	return "?";
-}
-
-typedef struct
-{
-	int		cls;			/* 0: unsupported, else SOP_CMPI / SOP_CMPF / SOP_ARITH / ... */
-	int		kind;			/* comparison or arithmetic kind */
-	int		width;			/* result width in bits (ARITH), target width (CAST) */
-} func_class;
-
-static int
-int_width_of_digit(char c)
-{
-	switch (c)
-	{
-		case '1': return 8;
-		case '2': return 16;
-		case '4': return 32;
-		case '8': return 64;
-	}
-	return 0;
-}
-
-static int
-cmp_kind_of(const char *s)
-{
-	if (!strcmp(s, "eq")) return SOP_CMP_EQ;
-	if (!strcmp(s, "ne")) return SOP_CMP_NE;
-	if (!strcmp(s, "lt")) return SOP_CMP_LT;
-	if (!strcmp(s, "le")) return SOP_CMP_LE;
-	if (!strcmp(s, "gt")) return SOP_CMP_GT;
-	if (!strcmp(s, "ge")) return SOP_CMP_GE;
-	return -1;
-}
-
-static int
-arith_kind_of(const char *s)
-{
-	if (!strcmp(s, "pl"))  return SOP_ARITH_PL;
-	if (!strcmp(s, "mi"))  return SOP_ARITH_MI;
-	if (!strcmp(s, "mul")) return SOP_ARITH_MUL;
-	if (!strcmp(s, "div")) return SOP_ARITH_DIV;
-	if (!strcmp(s, "mod")) return SOP_ARITH_MOD;
-	return -1;
-}
-
-/* "int4lt", "int48pl", "float4mul", "int4_to_int8", "booleq", "int4um" ... */
-static func_class
-classify_func(uint32_t opcode)
-{
-	func_class	fc = {0, 0, 0};
-	const char *name = (opcode < FuncOpCode__LoadVars ? func_names[opcode] : NULL);
-	int			w1, w2, k;
-
-	if (!name)
-		return fc;
-	if (!strcmp(name, "booleq")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_EQ; return fc; }
-	if (!strcmp(name, "boolne")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_NE; return fc; }
-	if (!strcmp(name, "int4_to_bool")) { fc.cls = SOP_CAST; fc.width = 1; return fc; }
-	if (!strncmp(name, "float4", 6))
-	{
-		const char *rest = name + 6;
-
-		if ((k = cmp_kind_of(rest)) >= 0)
-		{
-			fc.cls = SOP_CMPF;
-			fc.kind = k;
-		}
-		else if ((k = arith_kind_of(rest)) >= 0 && k != SOP_ARITH_MOD)
-		{
-			fc.cls = SOP_FARITH;
-			fc.kind = k;
-		}
-		else if (!strcmp(rest, "up"))
-		{
-			fc.cls = SOP_MOV;
-		}
-		return fc;
-	}
-	if (strncmp(name, "int", 3) != 0 || (w1 = int_width_of_digit(name[3])) == 0)
-		return fc;
-	{
-		const char *rest = name + 4;
-
-		/* intA_to_intB */
-		if (!strncmp(rest, "_to_int", 7) && (w2 = int_width_of_digit(rest[7])) != 0 && rest[8] == '\0')
-		{
-			fc.cls = SOP_CAST;
-			fc.width = w2;
-			return fc;
-		}
-		/* intAB<op>: the result has the wider width */
-		w2 = int_width_of_digit(rest[0]);
-		if (w2 != 0)
-			rest++;
-		else
-			w2 = w1;
-		if ((k = cmp_kind_of(rest)) >= 0)
-		{
-			fc.cls = SOP_CMPI;
-			fc.kind = k;
-		}
-		else if ((k = arith_kind_of(rest)) >= 0)
-		{
-			fc.cls = SOP_ARITH;
-			fc.kind = k;
-			fc.width = (w1 > w2 ? w1 : w2);
-		}
-		else if (!strcmp(rest, "up") && w2 == w1)
-		{
-			fc.cls = SOP_MOV;
-		}
-		else if (!strcmp(rest, "um") && w2 == w1)
-		{
-			fc.cls = SOP_ARITH;			/* 0 - x */
-			fc.kind = SOP_ARITH_MI;
-			fc.width = w1;
-			fc.cls = -SOP_ARITH;		/* marks the unary minus */
-		}
-	}
-	return fc;
-}
 
 /* ----------------------------------------------------------------
  * builder
@@ -311,6 +156,61 @@ emit_const(builder *b, const kern_expression *kexp, int *next)
 	return dst;
 }
 
+/* a query parameter is a constant for the session: its datum is stored in the session info */
+static int
+emit_param(builder *b, const kern_expression *kexp, int *next)
+{
+	const kern_session_info *session = b->session;
+	uint32_t	id = kexp->u.p.param_id;
+	int			bytes, vt = reg_vtype(kexp->exptype, &bytes);
+	int			dst;
+	int64_t		v = 0;
+	uint32_t	off;
+
+	if (!vt)
+		return fail(b, "parameter of an unsupported type (opcode type %u)", kexp->exptype);
+	if (id >= session->nparams)
+		return fail(b, "parameter %u does not exist", id);
+	off = session->poffset[id];
+	if (off != 0)
+	{
+		const unsigned char *p = (const unsigned char *) session + off;
+
+		switch (bytes)
+		{
+			case 1:
+				v = (vt == SOP_VT_INT) ? (int64_t)(int8_t) p[0] : (int64_t) p[0];
+				break;
+			case 2:
+			{
+				int16_t		x;
+				memcpy(&x, p, 2);
+				v = x;
+				break;
+			}
+			case 4:
+			{
+				int32_t		x;
+				uint32_t	u;
+				memcpy(&x, p, 4);
+				memcpy(&u, p, 4);
+				v = (vt == SOP_VT_FLOAT4) ? (int64_t) u : (int64_t) x;
+				break;
+			}
+			default:
+				memcpy(&v, p, 8);
+				break;
+		}
+	}
+	dst = new_reg(b, next);
+	if (dst < 0)
+		return -1;
+	if (emit(b, SOP_CONST, dst, off == 0 ? 1 : 0, 0,
+			 (uint32_t)((uint64_t) v & 0xffffffffU), (uint32_t)((uint64_t) v >> 32)) < 0)
+		return -1;
+	return dst;
+}
+
 static int
 emit_boolexpr(builder *b, const kern_expression *kexp, int *next)
 {
@@ -356,7 +256,7 @@ static int
 expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 {
 	const kern_expression *karg;
-	func_class	fc;
+	scan_func_class	fc;
 	int			mark = *next;
 	int			ra, rb, dst;
 
@@ -396,7 +296,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			int			bytes;
 
 			if (kexp->nr_args != 1)
-				return fail(b, "malformed %s", opcode_name(kexp->opcode));
+				return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 			kin = KEXP_FIRST_ARG(kexp);
 			if (op != SOP_NOT && kin->opcode == FuncOpCode__VarExpr &&
 				!reg_vtype(kin->exptype, &bytes))
@@ -424,20 +324,21 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		}
 
 		case FuncOpCode__ParamExpr:
-			return fail(b, "query parameters are not supported yet");
+			return emit_param(b, kexp, next);
 
 		default:
 			break;
 	}
 
-	fc = classify_func(kexp->opcode);
+	fc = scan_vm_classify_func(kexp->opcode);
 	if (fc.cls == 0)
-		return fail(b, "%s is not supported by the Vulkan GpuScan yet", opcode_name(kexp->opcode));
+		return fail(b, "%s is not supported by the Vulkan GpuScan yet", scan_vm_opcode_name(kexp->opcode));
 
-	if (fc.cls == SOP_CAST || fc.cls == SOP_MOV || fc.cls == -SOP_ARITH)
+	if (fc.cls == SOP_CAST || fc.cls == SOP_MOV || fc.cls == SOP_I2F || fc.cls == SOP_F2I ||
+		fc.cls == -SOP_ARITH)
 	{
 		if (kexp->nr_args != 1)
-			return fail(b, "malformed %s", opcode_name(kexp->opcode));
+			return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 		ra = expr_to_reg(b, KEXP_FIRST_ARG(kexp), next);
 		if (ra < 0)
 			return -1;
@@ -466,7 +367,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 
 	/* binary operators */
 	if (kexp->nr_args != 2)
-		return fail(b, "malformed %s", opcode_name(kexp->opcode));
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 	karg = KEXP_FIRST_ARG(kexp);
 	ra = expr_to_reg(b, karg, next);
 	if (ra < 0)
@@ -494,7 +395,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return -1;
 			break;
 		default:
-			return fail(b, "%s is not supported by the Vulkan GpuScan yet", opcode_name(kexp->opcode));
+			return fail(b, "%s is not supported by the Vulkan GpuScan yet", scan_vm_opcode_name(kexp->opcode));
 	}
 	return dst;
 }
@@ -623,7 +524,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 
 			if (ksave->opcode != FuncOpCode__SaveExpr || ksave->nr_args != 1)
 			{
-				fail(&b, "unexpected projection element %s", opcode_name(ksave->opcode));
+				fail(&b, "unexpected projection element %s", scan_vm_opcode_name(ksave->opcode));
 				goto error;
 			}
 			kin = KEXP_FIRST_ARG(ksave);

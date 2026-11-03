@@ -14,6 +14,9 @@
  *   CMPF     dst = cmp(a, b) on float4 (NaN sorts last, as in PostgreSQL)
  *   ARITH    dst = a op b on integers;  k0 = SCANVM_ARITH_* | width << 8; k1 = error id
  *   FARITH   dst = a op b on float4;    k0 = SCANVM_ARITH_*; k1 = error id
+ *   I2F      dst = (float4) a;  F2I  dst = rint(a) as an integer of k0 bits (range checked, error id k1)
+ *
+ * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
 SCANVM_OP(AND,      2)
@@ -27,6 +30,13 @@ SCANVM_OP(CMPI,     9)
 SCANVM_OP(CMPF,     10)
 SCANVM_OP(ARITH,    11)
 SCANVM_OP(FARITH,   12)
+SCANVM_OP(I2F,      13)
+SCANVM_OP(F2I,      14)
+/* reasons of an error */
+SCANVM_OP(ERR_ZERODIV,  1)
+SCANVM_OP(ERR_INTRANGE, 2)
+SCANVM_OP(ERR_FLTOVER,  3)
+SCANVM_OP(ERR_FLTUNDER, 4)
 /* comparison kinds */
 SCANVM_OP(CMP_EQ,   0)
 SCANVM_OP(CMP_NE,   1)

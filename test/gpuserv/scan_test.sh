@@ -70,6 +70,21 @@ run() { # table, label, query-with-%T
 	else echo "  FAIL  $tbl: $label (plan GpuScan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 
+run_any() { # like run, but the plan need not use GpuScan (the expression may stay on the CPU)
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g")
+	g=$(q "$GPU" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$g" = "$c" ] && [ "${g#*|}" != "" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
+	else echo "  FAIL  $tbl: $label"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+runprep() { # table, label, prepared query with $1/$2, execute arguments
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); args=$4
+	pre="set plan_cache_mode=force_generic_plan; prepare pq(int, int) as select md5(coalesce(string_agg(x::text, E'\\n' order by x::text), '')), count(*) from ($qry) x; execute pq($args);"
+	g=$($PSQL -d scantest -c "$GPU $pre" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $pre" 2>&1 | tail -1)
+	plan=$($PSQL -d scantest -c "$GPU set plan_cache_mode=force_generic_plan; prepare pe(int, int) as $qry; explain execute pe($args)" 2>&1 | grep -c "Custom Scan (GpuScan)")
+	if [ "$g" = "$c" ] && [ "$plan" -ge 1 ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
+	else echo "  FAIL  $tbl: $label (plan GpuScan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+
 for t in s1 s2 s3; do
 	echo "table $t"
 	run $t "trivial qual, mixed projection" "select a, f, c from %T where i > 0"
@@ -86,6 +101,17 @@ for t in s1 s2 s3; do
 	run $t "varlena pass-through with qual on other column" "select f from %T where a = 123"
 	run $t "10 computed columns (16-register kernel)" "select a+1, a+2, a+3, a+4, a+5, b+1, b+2, b+3, b+4, b+5 from %T where a > 9000"
 	run $t "24 computed columns (32-register kernel)" "select a+1,a+2,a+3,a+4,a+5,a+6,a+7,a+8,a+9,a+10,a+11,a+12, b-1,b-2,b-3,b-4,b-5,b-6,b-7,b-8,b-9,b-10,b-11,b-12 from %T where a > 9500"
+	run $t "int -> float4 -> int casts, rounding to even" "select b, (b::float4 / 2::float4)::int4, b::float4 * 3::float4 from %T where b between -100 and 100"
+	run $t "float4 vs int cast compare" "select i from %T where b::float4 > 1000.5::float4 and a < 0"
+	runprep $t "query parameters (generic plan)" "select a, b from %T where b < \$1 and a > \$2" "500, -100"
+	echo "  -- expressions the VM does not have stay on the CPU"
+	run_any $t "float8 comparison" "select i, d from %T where d > 100.5"
+	run_any $t "text equality" "select i from %T where f = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
+	run_any $t "CASE" "select i, case when b > 0 then a else 0 end from %T where a > 9000"
+	run_any $t "IN list" "select i from %T where a in (1, 5, 9000, 9999)"
+	run_any $t "COALESCE" "select i, coalesce(b, 0) from %T where coalesce(b, 0) > 49000"
+	run_any $t "IS TRUE, and supported + unsupported quals" "select i from %T where e is true and b > 40000 and f like 'a%'"
+	run_any $t "text function in projection" "select i, upper(f) from %T where a > 9990"
 	run $t "IS NULL on a text column" "select i from %T where f is null and a > 0"
 	run $t "IS NOT NULL on a text column" "select f from %T where f is not null and b > 49000"
 done
@@ -94,7 +120,7 @@ echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)
 	c=$($PSQL -d scantest -c "$CPU select c / a from $t where b < 0" 2>&1 | head -1)
-	echo "$g" | grep -q "ERROR" ; check "$t: division by zero is reported on the GPU" $?
+	echo "$g" | grep -q "division by zero" ; check "$t: division by zero is reported on the GPU" $?
 	echo "$c" | grep -q "division by zero" ; check "$t: ... and on the CPU" $?
 done
 

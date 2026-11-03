@@ -14,7 +14,7 @@ STROM_OBJS = main.o githash.o extra.o codegen.o \
              arrow_fdw.o arrow_meta.o \
              parquet_read.o parquet_cache.o \
              misc.o float2.o tinyint.o aggfuncs.o \
-             pg_portable.o gpu_launcher.o gpuserv/gpuserv_proto.o
+             pg_portable.o gpu_launcher.o gpuserv/gpuserv_proto.o gpuserv/scan_caps.o
 ifeq ($(WITH_POSTGIS),1)
 STROM_OBJS += gist.o
 endif

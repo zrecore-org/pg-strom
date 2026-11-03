@@ -17,6 +17,7 @@
 #include "xpu_common.h"
 #include "kernels_spv.h"
 #include "scan_exec.h"
+#include "scan_caps.h"
 
 #define SCAN_WG_MAX		65535U
 
@@ -274,14 +275,41 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const uint32_t *comp,
 }
 
 /* ---------------------------------------------------------------- */
-static const char *
-errcode_label(uint32_t err)
+/* the message of a kernel error code (FuncOpCode | reason << 16, see scan_vm_ops.inc) */
+static void
+describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen)
 {
 	if (err & 0x80000000U)
-		return "malformed GPU program";
-	if (err == 0x7fffffffU)
-		return "unsupported attribute layout";
-	return "evaluation error";
+		snprintf(buf, buflen, "malformed GPU program (instruction %u)", err & 0x7fffffffU);
+	else if (err == 0x7fffffffU)
+		snprintf(buf, buflen, "unsupported attribute layout in block index %u, line pointer %u", page, lp + 1);
+	else
+	{
+		uint32_t	func = err & 0xffffU;
+		uint32_t	why = (err >> 16) & 0xffU;
+		scan_func_class fc = scan_vm_classify_func(func);
+		const char *what = "evaluation error";
+
+		switch (why)
+		{
+			case SOP_ERR_ZERODIV:
+				what = "division by zero";
+				break;
+			case SOP_ERR_INTRANGE:
+				what = (fc.width == 8 ? "tinyint out of range" :
+						fc.width == 16 ? "smallint out of range" :
+						fc.width == 32 ? "integer out of range" : "bigint out of range");
+				break;
+			case SOP_ERR_FLTOVER:
+				what = "value out of range: overflow";
+				break;
+			case SOP_ERR_FLTUNDER:
+				what = "value out of range: underflow";
+				break;
+		}
+		snprintf(buf, buflen, "%s (in %s, block index %u, line pointer %u)",
+				 what, scan_vm_opcode_name(func), page, lp + 1);
+	}
 }
 
 /* ---------------------------------------------------------------- */
@@ -773,8 +801,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	t3 = now_ms();
 	if (out[1] != 0)
 	{
-		snprintf(err, errlen, "GPU kernel error: %s (code %u, block index %u, line pointer %u)",
-				 errcode_label(out[1]), out[1] & 0x7fffffffU, out[2], out[3] + 1);
+		describe_kernel_error(out[1], out[2], out[3], err, errlen);
 		goto error;
 	}
 	flags = out + 4;
