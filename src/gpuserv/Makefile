@@ -59,7 +59,7 @@ LIB_OBJS   += gpusort.o gpu_vk_seq.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
 # kernel sources are embedded for the compiler
 KSRC_FILES := $(sort $(wildcard kernels_vm/*.slang kernels_vm/*.inc))
-LIB_OBJS   += specialize.o spec_mgr.o kernels_src.o
+LIB_OBJS   += specialize.o spec_mgr.o spec_verify.o kernels_src.o
 SLANGC_ABS := $(if $(SLANGC),$(realpath $(SLANGC)))
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
@@ -192,6 +192,9 @@ kernels_src.h: $(KSRC_FILES) gen_ksrc.sh
 	sh ./gen_ksrc.sh kernels_src.c kernels_src.h $(KSRC_FILES)
 
 specialize.o: specialize.c specialize.h scan_prog.h scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+spec_verify.o: spec_verify.c specialize.h scan_exec.h scan_prog.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 spec_mgr.o: spec_mgr.c specialize.h scan_exec.h scan_prog.h scan_caps.h kernels_src.h gpu_vk.h ../xpu_common.h

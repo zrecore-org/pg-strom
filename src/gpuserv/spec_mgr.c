@@ -19,6 +19,8 @@
  *   PGSTROM_GPUSERV_CACHE_DIR = dir | none  the SPIR-V cache (default $XDG_CACHE_HOME/pgstrom or ~/.cache/pgstrom)
  *   PGSTROM_GPUSERV_SLANGC = path           the compiler (default: the one found at build time, then PATH)
  *   PGSTROM_GPUSERV_SPEC_KEEP               keep the scratch directories of the compiler
+ *   PGSTROM_GPUSERV_SPEC_LOG                log what the specializer does (also with PGSTROM_GPUSERV_TRACE)
+ *   PGSTROM_GPUSERV_CACHE_MAX_MB = N        size limit of the cache directory (default 256)
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -29,8 +31,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include "xpu_common.h"
@@ -561,6 +565,7 @@ cache_load(spec_mgr *m, spec_entry *e, size_t *p_len)
 		return NULL;
 	}
 	*p_len = l2;
+	utimes(spvp, NULL);				/* least recently used first when the cache is pruned */
 	return spv;
 }
 
@@ -625,6 +630,102 @@ build_entry(spec_mgr *m, spec_entry *e)
 	__atomic_store_n(&e->state, SPEC_READY, __ATOMIC_RELEASE);
 }
 
+/*
+ * Keep the cache directory bounded: kernels are 20-100 KB of SPIR-V plus their source. When the files of
+ * *.spv / *.src exceed the limit (PGSTROM_GPUSERV_CACHE_MAX_MB, default 256) the least recently used are
+ * removed (a cache hit touches the file); source directories of other builds and temporary files that no
+ * service is writing any more (a day old) are removed.
+ */
+typedef struct
+{
+	char		name[64];
+	time_t		mtime;
+	off_t		size;
+} cache_file;
+
+static int
+cmp_cache_file(const void *a, const void *b)
+{
+	const cache_file *x = a, *y = b;
+
+	return (x->mtime < y->mtime) ? -1 : (x->mtime > y->mtime) ? 1 : 0;
+}
+
+static void
+prune_cache(spec_mgr *m)
+{
+	DIR		   *d;
+	struct dirent *de;
+	cache_file *files = NULL;
+	size_t		nfiles = 0, cap = 0;
+	off_t		total = 0, limit;
+	const char *s = getenv("PGSTROM_GPUSERV_CACHE_MAX_MB");
+	time_t		now = time(NULL);
+
+	if (!m->cache_dir[0])
+		return;
+	limit = (off_t) ((s && atoi(s) > 0) ? atoi(s) : 256) * 1024 * 1024;
+	d = opendir(m->cache_dir);
+	if (!d)
+		return;
+	while ((de = readdir(d)) != NULL)
+	{
+		char		path[1400];
+		struct stat st;
+		size_t		nl = strlen(de->d_name);
+
+		if (de->d_name[0] == '.' || nl >= sizeof(files->name))
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", m->cache_dir, de->d_name);
+		if (stat(path, &st) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode))
+		{
+			/* kernel sources of another build: gone after a month without a start of that build */
+			if (strncmp(de->d_name, "src-", 4) == 0 && now - st.st_mtime > 30 * 86400)
+				remove_tree(path);
+			continue;
+		}
+		if (nl > 4 && strcmp(de->d_name + nl - 4, ".tmp") == 0)
+		{
+			if (now - st.st_mtime > 86400)
+				unlink(path);
+			continue;
+		}
+		if (!(nl > 4 && (strcmp(de->d_name + nl - 4, ".spv") == 0 || strcmp(de->d_name + nl - 4, ".src") == 0)))
+			continue;
+		if (nfiles == cap)
+		{
+			cache_file *nf = realloc(files, sizeof(cache_file) * (cap ? cap * 2 : 256));
+
+			if (!nf)
+				break;
+			files = nf;
+			cap = cap ? cap * 2 : 256;
+		}
+		snprintf(files[nfiles].name, sizeof(files[nfiles].name), "%s", de->d_name);
+		files[nfiles].mtime = st.st_mtime;
+		files[nfiles].size = st.st_size;
+		total += st.st_size;
+		nfiles++;
+	}
+	closedir(d);
+	if (total > limit && nfiles > 0)
+	{
+		qsort(files, nfiles, sizeof(cache_file), cmp_cache_file);
+		for (size_t i = 0; i < nfiles && total > limit - limit / 4; i++)
+		{
+			char		path[1400];
+
+			snprintf(path, sizeof(path), "%s/%s", m->cache_dir, files[i].name);
+			if (unlink(path) == 0)
+				total -= files[i].size;
+		}
+		spec_log(m, 1, "cache %s pruned to %lld MB", m->cache_dir, (long long) (total / (1024 * 1024)));
+	}
+	free(files);
+}
+
 static void *
 worker_main(void *arg)
 {
@@ -634,6 +735,7 @@ worker_main(void *arg)
 	/* signals are for the main thread */
 	sigfillset(&ss);
 	pthread_sigmask(SIG_BLOCK, &ss, NULL);
+	prune_cache(m);
 	pthread_mutex_lock(&m->mu);
 	for (;;)
 	{
@@ -676,7 +778,7 @@ spec_mgr_create(gpu_vk_ctx *vk, int trace)
 	if (!m)
 		return NULL;
 	m->vk = vk;
-	m->trace = trace;
+	m->trace = trace || getenv("PGSTROM_GPUSERV_SPEC_LOG") != NULL;
 	m->mode = SPECM_AUTO;
 	if (env && env[0])
 	{

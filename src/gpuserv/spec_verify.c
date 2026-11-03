@@ -1,0 +1,198 @@
+/*
+ * spec_verify.c
+ *
+ * Self-check of the specialized kernels (PGSTROM_GPUSERV_SPECIALIZE=check): scan_exec.c runs every
+ * dispatch twice on the same input, once with the VM kernel and once with the specialized one, and this
+ * compares the two output buffers.
+ *
+ * The outputs of the scan, aggregation and join-aggregation kernels are deterministic and are compared
+ * word for word. A group table and the match records of a join are filled by atomic appends and slot
+ * races, so their order differs from run to run: the slot records of each workgroup's table, and the
+ * join's match records, are sorted before they are compared. When a group table overflows (rows that
+ * found no slot go to the CPU or to an overflow list) the partition between the table and the
+ * overflow depends on the race too, so such a dispatch is reported as "unchecked".
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "xpu_common.h"
+#include "scan_exec.h"
+#include "scan_prog.h"
+#include "specialize.h"
+
+#define V_GA_NK		2
+
+static size_t	sort_words;
+
+static int
+cmp_rec(const void *pa, const void *pb)
+{
+	const uint32_t *a = pa, *b = pb;
+
+	for (size_t i = 0; i < sort_words; i++)
+		if (a[i] != b[i])
+			return a[i] < b[i] ? -1 : 1;
+	return 0;
+}
+
+/* the multiset of n records of rw words at p equals that at q (both are sorted in place on copies) */
+static int
+multiset_equal(const uint32_t *p, const uint32_t *q, size_t n, size_t rw)
+{
+	uint32_t   *cp = malloc(sizeof(uint32_t) * (n * rw + 1));
+	uint32_t   *cq = malloc(sizeof(uint32_t) * (n * rw + 1));
+	int			same;
+
+	if (!cp || !cq)
+	{
+		free(cp);
+		free(cq);
+		return 1;				/* cannot check */
+	}
+	memcpy(cp, p, sizeof(uint32_t) * n * rw);
+	memcpy(cq, q, sizeof(uint32_t) * n * rw);
+	sort_words = rw;
+	qsort(cp, n, sizeof(uint32_t) * rw, cmp_rec);
+	qsort(cq, n, sizeof(uint32_t) * rw, cmp_rec);
+	same = (memcmp(cp, cq, sizeof(uint32_t) * n * rw) == 0);
+	free(cp);
+	free(cq);
+	return same;
+}
+
+/*
+ * 0: equal, 1: different (msg says where), 2: not comparable (a group table overflowed)
+ * pc: the push constants of the dispatch; groups: its workgroup count
+ */
+int
+spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, const uint32_t *pc,
+					uint32_t groups, const uint32_t *a, const uint32_t *b, size_t words,
+					char *msg, size_t msglen)
+{
+	switch (kind)
+	{
+		case SPEC_SCAN:
+		case SPEC_AGG:
+		case SPEC_JAGG:
+			for (size_t i = 0; i < words; i++)
+				if (a[i] != b[i])
+				{
+					snprintf(msg, msglen, "word %zu: VM %08x, specialized %08x", i, a[i], b[i]);
+					return 1;
+				}
+			return 0;
+
+		case SPEC_GAGG:
+		case SPEC_JGAGG:
+		{
+			size_t		rec = 2 + 2 * V_GA_NK + 6 * (size_t) agg_max;
+			size_t		blk = 1 + (size_t) ga_c * rec;
+			size_t		fb = pc[3];			/* GAGG: flags base; JGAGG: overflow base */
+
+			if (kind == SPEC_GAGG)
+			{
+				for (size_t i = fb; i < words; i++)
+					if ((a[i] & 1u) || (b[i] & 1u))
+						return 2;
+			}
+			else if (a[fb] != 0 || b[fb] != 0)
+				return 2;
+			for (uint32_t g = 0; g < groups; g++)
+			{
+				size_t		base = 4 + ((size_t) pc[1] + g) * blk;
+				const uint32_t *ta = a + base + 1, *tb = b + base + 1;
+				uint32_t   *ra = malloc(sizeof(uint32_t) * (size_t) ga_c * rec + 4);
+				uint32_t   *rb = malloc(sizeof(uint32_t) * (size_t) ga_c * rec + 4);
+				size_t		na = 0, nb = 0;
+				int			same;
+
+				if (a[base] != b[base])
+				{
+					snprintf(msg, msglen, "workgroup %u: row count %u vs %u", pc[1] + g, a[base], b[base]);
+					free(ra);
+					free(rb);
+					return 1;
+				}
+				if (!ra || !rb)
+				{
+					free(ra);
+					free(rb);
+					continue;
+				}
+				for (int s = 0; s < ga_c; s++)
+				{
+					if (ta[s * rec] != 0)
+					{
+						memcpy(ra + na * rec, ta + (size_t) s * rec, sizeof(uint32_t) * rec);
+						na++;
+					}
+					if (tb[s * rec] != 0)
+					{
+						memcpy(rb + nb * rec, tb + (size_t) s * rec, sizeof(uint32_t) * rec);
+						nb++;
+					}
+				}
+				if (na != nb)
+				{
+					snprintf(msg, msglen, "workgroup %u: %zu groups vs %zu", pc[1] + g, na, nb);
+					free(ra);
+					free(rb);
+					return 1;
+				}
+				same = multiset_equal(ra, rb, na, rec);
+				free(ra);
+				free(rb);
+				if (!same)
+				{
+					snprintf(msg, msglen, "workgroup %u: the group tables differ", pc[1] + g);
+					return 1;
+				}
+			}
+			if (kind == SPEC_GAGG)
+			{
+				for (size_t i = fb; i < words; i++)
+					if (a[i] != b[i])
+					{
+						snprintf(msg, msglen, "row flag %zu: %u vs %u", i - fb, a[i], b[i]);
+						return 1;
+					}
+			}
+			return 0;
+		}
+
+		case SPEC_JOIN:
+		{
+			size_t		rw = 2 + (size_t) prog->ndepth + 3 * (size_t) prog->ncomp;
+			size_t		ojw = prog->oj_words;
+			size_t		cap = pc[3];
+			size_t		na = a[0], nb = b[0];
+
+			if (na != nb)
+			{
+				snprintf(msg, msglen, "match count %zu vs %zu", na, nb);
+				return 1;
+			}
+			for (size_t i = 1; i < 4; i++)
+				if (a[i] != b[i])
+				{
+					snprintf(msg, msglen, "header word %zu: %u vs %u", i, a[i], b[i]);
+					return 1;
+				}
+			for (size_t i = 4; i < 4 + ojw; i++)
+				if (a[i] != b[i])
+				{
+					snprintf(msg, msglen, "outer-join map word %zu: %u vs %u", i - 4, a[i], b[i]);
+					return 1;
+				}
+			if (na > cap)
+				na = cap;
+			if (!multiset_equal(a + 4 + ojw, b + 4 + ojw, na, rw))
+			{
+				snprintf(msg, msglen, "the %zu match records differ", na);
+				return 1;
+			}
+			return 0;
+		}
+	}
+	return 0;
+}

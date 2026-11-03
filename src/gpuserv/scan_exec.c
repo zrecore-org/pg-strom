@@ -54,15 +54,60 @@ scan_engine_init(scan_engine *eng, gpu_vk_ctx *vk)
 /*
  * Dispatch of a kernel: the specialized pipeline sp when the program has one ready (sp != vm), else the
  * VM kernel. In check mode (PGSTROM_GPUSERV_SPECIALIZE=check) both run on the same input and the outputs
- * must agree (spec_check.c).
+ * must agree (spec_verify.c); a difference fails the task.
  */
+int		spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, const uint32_t *pc,
+							uint32_t groups, const uint32_t *a, const uint32_t *b, size_t words,
+							char *msg, size_t msglen);
+
 static int
-kdispatch(scan_engine *eng, scan_prog *prog, int kind, gpu_vk_pipeline *vm, gpu_vk_pipeline *sp,
-		  gpu_vk_buffer *const *bufs, const void *pc, uint32_t groups)
+kdispatch(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c,
+		  gpu_vk_pipeline *vm, gpu_vk_pipeline *sp, gpu_vk_buffer *const *bufs, const void *pc,
+		  uint32_t groups)
 {
-	(void) prog;
-	(void) kind;
-	return gpu_vk_dispatch(eng->vk, sp ? sp : vm, bufs, pc, groups, 1, 1, NULL);
+	gpu_vk_ctx *vk = eng->vk;
+
+	if (!sp || sp == vm || !spec_check_enabled(eng))
+		return gpu_vk_dispatch(vk, sp ? sp : vm, bufs, pc, groups, 1, 1, NULL);
+	{
+		gpu_vk_buffer *ob = bufs[1];			/* the kernels write only their output buffer */
+		size_t		words = ob->size / 4;
+		uint32_t   *snap = malloc(ob->size), *res = malloc(ob->size);
+		char		msg[200];
+		int			rc, cmp;
+
+		if (!snap || !res)
+		{
+			free(snap);
+			free(res);
+			return gpu_vk_dispatch(vk, sp, bufs, pc, groups, 1, 1, NULL);
+		}
+		memcpy(snap, ob->map, ob->size);
+		rc = gpu_vk_dispatch(vk, vm, bufs, pc, groups, 1, 1, NULL);
+		if (rc != 0)
+			goto out;
+		memcpy(res, ob->map, ob->size);
+		memcpy(ob->map, snap, ob->size);
+		rc = gpu_vk_dispatch(vk, sp, bufs, pc, groups, 1, 1, NULL);
+		if (rc != 0)
+			goto out;
+		msg[0] = '\0';
+		cmp = spec_verify_compare(kind, prog, agg_max, ga_c, (const uint32_t *) pc, groups,
+								  res, (const uint32_t *) ob->map, words, msg, sizeof(msg));
+		if (cmp == 1)
+		{
+			fprintf(stderr, "pgstrom-gpuserv: specialize: CHECK FAILED (kernel kind %d): %s\n", kind, msg);
+			snprintf(vk->err, sizeof(vk->err), "the specialized kernel differs from the VM: %s", msg);
+			rc = -1;
+		}
+		else
+			fprintf(stderr, "pgstrom-gpuserv: specialize: check %s (kernel kind %d)\n",
+					cmp == 0 ? "ok" : "skipped: a group table overflowed", kind);
+out:
+		free(snap);
+		free(res);
+		return rc;
+	}
 }
 
 /* ---------------------------------------------------------------- */
@@ -967,7 +1012,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 			pc[1] = base;
 			pc[2] = BLCKSZ;
 			pc[3] = total_lps;
-			if (kdispatch(eng, prog, SPEC_SCAN, &eng->pipe[variant], sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, SPEC_SCAN, 0, 0, &eng->pipe[variant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto error;
@@ -1345,7 +1390,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 			pc[1] = base;				/* first workgroup of this dispatch */
 			pc[2] = AGG_PAGES_PER_WG;
 			pc[3] = flags_base;
-			if (kdispatch(eng, prog, SPEC_AGG, &eng->agg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, &eng->agg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;
@@ -2019,7 +2064,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 			pc[1] = base;
 			pc[2] = AGG_PAGES_PER_WG;
 			pc[3] = flags_base;
-			if (kdispatch(eng, prog, SPEC_GAGG, &eng->gagg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, SPEC_GAGG, 4 * (avariant + 1), (avariant == 0 ? 128 : 64), &eng->gagg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;
@@ -2839,7 +2884,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 			pc[2] = BLCKSZ;
 			pc[3] = cap;
 			pc[4] = 0;
-			if (kdispatch(eng, prog, SPEC_JOIN, &eng->join_pipe[variant], sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, SPEC_JOIN, 0, 0, &eng->join_pipe[variant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto error;
@@ -3188,7 +3233,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			pc[2] = ppw;
 			pc[3] = (uint32_t) ovf_base;
 			pc[4] = ovf_cap;
-			if (kdispatch(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, pipe, sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, 4 * (avariant + 1), (avariant == 0 ? 128 : 64), pipe, sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;
