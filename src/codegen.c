@@ -838,19 +838,6 @@ devtype_jsonb_hash(bool isnull, Datum value)
 	return 0;
 }
 
-#ifdef WITH_POSTGIS
-static uint32_t
-devtype_geometry_hash(bool isnull, Datum value)
-{
-	elog(ERROR, "geometry type has no device hash function");
-}
-
-static uint32_t
-devtype_box2df_hash(bool isnull, Datum value)
-{
-	elog(ERROR, "box2df type has no device hash function");
-}
-#endif
 
 static uint32_t
 devtype_cube_hash(bool isnull, Datum value)
@@ -1872,12 +1859,10 @@ __codegen_func_expression(codegen_context *context,
 		(dfunc->func_flags & context->xpu_task_flags & DEVKIND__ANY) == 0)
 		__Ereport("function %s is not supported on the target device",
 				  format_procedure(func_oid));
-#ifdef PGSTROM_NO_CUDA
 	/* only what the Vulkan service's VM implements (scan_caps.c) is pushed down */
 	if (!scan_vm_func_supported(dfunc->func_code))
 		__Ereport("function %s is not supported by the Vulkan service",
 				  format_procedure(func_oid));
-#endif
 	dtype = dfunc->func_rettype;
 	context->device_cost += dfunc->func_cost;
 
@@ -3091,7 +3076,6 @@ codegen_expression_walker(codegen_context *context,
 		return codegen_pseudo_const_expression(context, buf, curr_depth, expr);
 
 	context->stack_usage += XPUCODE_STACK_USAGE_NORMAL;
-#ifdef PGSTROM_NO_CUDA
 	/* expression nodes the Vulkan service's VM does not implement yet */
 	switch (nodeTag(expr))
 	{
@@ -3108,7 +3092,6 @@ codegen_expression_walker(codegen_context *context,
 		default:
 			break;
 	}
-#endif
 	switch (nodeTag(expr))
 	{
 		case T_Const:
@@ -3744,7 +3727,7 @@ __codegen_build_one_gistquals(codegen_context *context,
 	kvdef->kv_type_code = TypeOpCode__internal;
 	kvdef->kv_typbyval  = false;
 	kvdef->kv_typalign  = sizeof(int64_t);
-	kvdef->kv_typlen    = sizeof(CUdeviceptr);
+	kvdef->kv_typlen    = sizeof(uint64_t);
 	kvdef->kv_expr      = (Expr *)makeNullConst(INTERNALOID, -1, InvalidOid);
 	__assign_codegen_kvar_defitem_subfields(kvdef);
 	context->kvecs_usage += KVEC_ALIGN(sizeof(kvec_internal_t));
@@ -4585,43 +4568,6 @@ pgstrom_xpu_expression(Expr *expr,
 	if (p_devcost)
 		*p_devcost = context->device_cost;
 	return true;
-}
-
-/*
- * estimate_cuda_stack_size
- */
-uint32_t
-estimate_cuda_stack_size(codegen_context *context)
-{
-#define CUDA_ALLOCA_ALIGN	16
-	uint32_t	extra_bufsz = Max(context->extra_bufsz, 512);
-	uint32_t	stack_sz;
-	int			kvars_nslots;
-	ListCell   *lc;
-
-	/* only NVIDIA-GPU needs stack configuration */
-	if ((context->xpu_task_flags & DEVKIND__NVIDIA_GPU) == 0)
-		return 0;
-	/* minimum working area */
-	stack_sz = 3200;
-	/* kern_context */
-	stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
-						  offsetof(kern_context, vlbuf) + extra_bufsz);
-	/* kvars_slot[] */
-	kvars_nslots = list_length(context->kvars_deflist);
-	stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
-						  sizeof(xpu_datum_t *) * kvars_nslots);
-	foreach (lc, context->kvars_deflist)
-	{
-		codegen_kvar_defitem *kvdef = lfirst(lc);
-
-		stack_sz += TYPEALIGN(CUDA_ALLOCA_ALIGN,
-							  kvdef->kv_xdatum_sizeof);
-	}
-	/* other expressions */
-	stack_sz += context->stack_usage;
-	return stack_sz;
-#undef CUDA_ALLOCA_ALIGN
 }
 
 /*

@@ -516,25 +516,6 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner->hash_inner_keys = hash_inner_keys;
 	pp_inner->join_quals = join_quals;
 	pp_inner->other_quals = other_quals;
-#ifdef WITH_POSTGIS
-	/* GiST-Index availability checks */
-	if (pgstrom_enable_gpugistindex &&
-		hash_outer_keys == NIL &&
-		hash_inner_keys == NIL)
-	{
-		Path   *orig_inner_path = llast(inner_paths_list);
-		Path   *gist_inner_path
-			= pgstromTryFindGistIndex(root,
-									  orig_inner_path,
-									  restrict_clauses,
-									  pp_prev->xpu_task_flags,
-									  pp_prev->base_relid,
-									  inner_target_list,
-									  pp_inner);
-		if (gist_inner_path)
-			llast(inner_paths_list) = inner_path = gist_inner_path;
-	}
-#endif
 	/*
 	 * Try pinned inner buffer
 	 */
@@ -600,30 +581,6 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		/* cost to evaluate join qualifiers */
 		comp_cost += join_quals_cost.per_tuple * gpu_ratio * outer_nrows;
 	}
-#ifdef WITH_POSTGIS
-	else if (OidIsValid(pp_inner->gist_index_oid))
-	{
-		/*
-		 * GpuNestLoop+GiST-Index
-		 */
-		Expr	   *gist_clause = pp_inner->gist_clause;
-		double		gist_selectivity = pp_inner->gist_selectivity;
-		QualCost	gist_clause_cost;
-
-		/* cost to preload inner heap tuples by CPU */
-		startup_cost += cpu_tuple_cost * inner_path->rows;
-		/* cost to preload the entire index pages once */
-		startup_cost += seq_page_cost * pp_inner->gist_npages;
-		/* cost to evaluate GiST index by GPU */
-		cost_qual_eval_node(&gist_clause_cost, (Node *)gist_clause, root);
-		comp_cost += gist_clause_cost.per_tuple * gpu_ratio * outer_nrows;
-		/* cost to evaluate join qualifiers by GPU */
-		comp_cost += (join_quals_cost.per_tuple * gpu_ratio *
-					  outer_nrows *
-					  gist_selectivity *
-					  inner_path->rows);
-	}
-#endif
 	else
 	{
 		/*
@@ -1477,7 +1434,6 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	pp_info->extra_bufsz = context->extra_bufsz;
 	pp_info->used_params = context->used_params;
 	pp_info->outer_refs  = outer_refs;
-	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	/*
 	 * build CustomScan
 	 */

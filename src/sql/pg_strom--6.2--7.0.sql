@@ -6,6 +6,11 @@
 --- Real capabilities of each Vulkan device, as measured by the probe kernels
 --- (caps) against what the API claimed (reported_caps)
 ---
+---
+--- The license query belonged to the closed-source heterodb-extra module, which is gone
+---
+DROP FUNCTION IF EXISTS pgstrom.license_query();
+
 CREATE FUNCTION pgstrom.gpu_devcaps()
   RETURNS TABLE (dev_id int,
                  device_name text,

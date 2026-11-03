@@ -24,7 +24,6 @@ SELECT lo_orderkey
    Scan Quals OpCode: {ScalarArrayOpAny: elem=<slot=0, type='bpchar'> args=[{Const(array): value='{RAIL,SHIP,MAIL}'}, {Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='lo_shipmode'}, {Var(bpchar): slot=0, expr='NULL::bpchar'}]}]}
    Projection OpCode: {Projection: layout=<2> arg={SaveExpr: <slot=2, type='int8'> arg={Var(int8): kvec=0x3400-5800, expr='lo_orderkey'}}}
    Fallback-desc: [<dest='0', expr='lo_orderkey', depth=0:1>, <dest='1', expr='lo_shipmode', depth=0:0>]
-   CUDA Stack Size: 4320
 (12 rows)
 
 -- IN-list with 4 constants should switch to HashedArrayOp
@@ -45,7 +44,6 @@ SELECT lo_orderkey
    Scan Quals OpCode: {HashedArrayOp: nslots=6 hash=(bpchar)[<hash:e99a53ea|TRUCK|t>, <hash:e7d7a8fc|RAIL|t>, <hash:7ad83bf6|MAIL|t>, <hash:b5b0202c|SHIP|t>, <default:f>] arg={Var(bpchar): slot=0, expr='lo_shipmode'}}
    Projection OpCode: {Projection: layout=<1> arg={SaveExpr: <slot=1, type='int8'> arg={Var(int8): kvec=0x3400-5800, expr='lo_orderkey'}}}
    Fallback-desc: [<dest='0', expr='lo_orderkey', depth=0:1>, <dest='1', expr='lo_shipmode', depth=0:0>]
-   CUDA Stack Size: 4176
 (12 rows)
 
 SET pg_strom.enabled = on;
@@ -96,7 +94,6 @@ SELECT lo_linenumber,
    Scan Quals OpCode: {HashedArrayOp: nslots=6 hash=(bpchar)[<hash:e99a53ea|TRUCK|t>, <hash:e7d7a8fc|RAIL|t>, <hash:7ad83bf6|MAIL|t>, <hash:b5b0202c|SHIP|t>, <default:f>] arg={Var(bpchar): slot=0, expr='lo_shipmode'}}
    Projection OpCode: {Projection: layout=<1,2> args=[{SaveExpr: <slot=1, type='int4'> arg={Var(int4): kvec=0x3400-4800, expr='lo_linenumber'}}, {SaveExpr: <slot=2, type='text'> arg={HashedArrayOp: nslots=6 hash=(int4)[<hash:efbec0af|0|A>, <hash:8e731746|1|B>, <hash:fe534f97|3|D>, <hash:439edcf6|2|C>, <default:X>] arg={Func(int4)::int4mod args=[{Var(int4): kvec=0x3400-4800, expr='lo_linenumber'}, {Const(int4): value='5'}]}}}]}
    Fallback-desc: [<dest='0', expr='lo_linenumber', depth=0:1>, <dest='2', expr='lo_shipmode', depth=0:0>]
-   CUDA Stack Size: 4352
 (12 rows)
 
 SELECT lo_linenumber,

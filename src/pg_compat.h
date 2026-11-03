@@ -210,15 +210,4 @@ __LWLockNewTrancheId(const char *name)
 #define heap_page_prune_opt(a,b,c,d)		heap_page_prune_opt((a),(b))
 #endif
 
-/*
- * MEMO: CUDA 13.0 changed the following APIs. The existing _v2 APIs were renamed
- * to the primary one, and legacy interfaces were deprecated.
- * - cuMemPrefetchAsync
- * - cuMemAdvise
- */
-#if CUDA_VERSION < 13000
-#define cuMemPrefetchAsync(a,b,c,d,e)	cuMemPrefetchAsync_v2((a),(b),(c),(d),(e))
-#define cuMemAdvise(a,b,c,d)			cuMemAdvise_v2((a),(b),(c),(d))
-#endif
-
 #endif	/* PG_COMPAT_H */

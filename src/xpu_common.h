@@ -2011,9 +2011,6 @@ struct xpu_datum_operators {
 #include "xpu_timelib.h"
 #include "xpu_misclib.h"
 #include "xpu_jsonlib.h"
-#ifdef WITH_POSTGIS
-#include "xpu_postgis.h"
-#endif
 
 /*
  * xpu_array_t - array type support
@@ -2843,6 +2840,24 @@ typedef struct kern_session_info
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */
 } kern_session_info;
+
+/*
+ * strom_io_vector - which pages of a file the GPU service reads itself (the pages the
+ * backend did not load): chunk i is nr_pages pages of PAGE_SIZE starting at page fchunk_id
+ * of the file, placed m_offset bytes into the region that follows the loaded blocks.
+ */
+typedef struct
+{
+	unsigned long	m_offset;	/* destination offset from the base address */
+	unsigned int	fchunk_id;	/* source page index of the file. */
+	unsigned int	nr_pages;	/* number of pages to be loaded */
+} strom_io_chunk;
+
+typedef struct
+{
+	unsigned int	nr_chunks;
+	strom_io_chunk	ioc[1];
+} strom_io_vector;
 
 typedef struct {
 	int32_t		scan_relidx;		/* index of the scan relation */

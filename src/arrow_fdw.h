@@ -15,7 +15,6 @@
 #ifndef _ARROW_FDW_H_
 #define _ARROW_FDW_H_
 #include "arrow_defs.h"
-#include <cuda.h>
 
 #ifdef __cplusplus
 #define __EXTERN	extern "C"
@@ -66,10 +65,6 @@ typedef struct parquetCacheWriteAsyncData	parquetCacheWriteAsyncData;
 __EXTERN struct kern_data_store *
 parquetReadOneRowGroup(const char *filename,
 					   const struct kern_data_store *kds_head,
-					   bool  (*malloc_gpu_callback)(void *malloc_private,
-													size_t malloc_size,
-													CUdeviceptr *m_segment,
-													off_t *m_offset),
 					   void *(*malloc_host_callback)(void *malloc_private,
 													 size_t malloc_size),
 					   void *malloc_private,
@@ -93,14 +88,6 @@ __EXTERN void
 parquetCacheRelease(void *entry);
 __EXTERN size_t
 parquetCacheLength(const void *entry);
-__EXTERN ssize_t
-parquetCacheReadChunks(void *entry,
-					   struct kern_colmeta *cmeta,
-					   size_t kds_offset,
-					   CUdeviceptr m_segment,
-					   off_t m_offset,
-					   uint32_t *p_npages_direct_read,
-					   uint32_t *p_npages_vfs_read);
 __EXTERN void
 parquetCacheWriteAsync(parquetCacheWriteAsyncData *data);
 

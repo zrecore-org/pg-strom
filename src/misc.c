@@ -157,7 +157,6 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 	privs = lappend(privs, makeInteger(pp_info->kvecs_bufsz));
 	privs = lappend(privs, makeInteger(pp_info->kvecs_ndims));
 	privs = lappend(privs, makeInteger(pp_info->extra_bufsz));
-	privs = lappend(privs, makeInteger(pp_info->cuda_stack_size));
 	privs = lappend(privs, pp_info->groupby_actions);
 	privs = lappend(privs, pp_info->groupby_typmods);
 	privs = lappend(privs, makeInteger(pp_info->groupby_prepfn_bufsz));
@@ -298,7 +297,6 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 	pp_data.kvecs_bufsz = intVal(list_nth(privs, pindex++));
 	pp_data.kvecs_ndims = intVal(list_nth(privs, pindex++));
 	pp_data.extra_bufsz = intVal(list_nth(privs, pindex++));
-	pp_data.cuda_stack_size = intVal(list_nth(privs, pindex++));
 	pp_data.groupby_actions = list_nth(privs, pindex++);
 	pp_data.groupby_typmods = list_nth(privs, pindex++);
 	pp_data.groupby_prepfn_bufsz = intVal(list_nth(privs, pindex++));

@@ -70,7 +70,6 @@ SELECT pref, city, count(*)
                            Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-3400, expr='pref'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x3400-6800, expr='city'}}]}
                            Fallback-desc: [<dest='0', expr='pref', depth=1:2>, <dest='1', expr='city', depth=1:2>, <dest='2', expr='geom', depth=1:1>, <dest='3', expr='x', depth=0:1>, <dest='4', expr='y', depth=0:1>]
                            Partial Function BufSz: 8
-                           CUDA Stack Size: 4064
                            ->  Parallel Seq Scan on regtest_postgis_temp.giskanto
                                  Output: giskanto.pref, giskanto.city, giskanto.geom, giskanto.ctid
                                  Filter: ((giskanto.pref = '東京都'::text) OR (giskanto.city ~~ '横浜市 %'::text))
@@ -194,7 +193,6 @@ SELECT pref, city, count(*)
                            Projection OpCode: {Projection: layout=<0,1> args=[{SaveExpr: <slot=0, type='text'> arg={Var(text): kvec=0x0000-3400, expr='pref'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x3400-6800, expr='city'}}]}
                            Fallback-desc: [<dest='0', expr='pref', depth=1:2>, <dest='1', expr='city', depth=1:2>, <dest='2', expr='geom', depth=1:1>, <dest='3', expr='x', depth=0:1>, <dest='4', expr='y', depth=0:1>]
                            Partial Function BufSz: 8
-                           CUDA Stack Size: 4064
                            ->  Parallel Seq Scan on regtest_postgis_temp.giskanto
                                  Output: giskanto.pref, giskanto.city, giskanto.geom, giskanto.ctid
                                  Filter: (((giskanto.pref = '東京都'::text) AND (giskanto.city ~~ '%区'::text)) OR ((giskanto.pref = '埼玉県'::text) AND (giskanto.city ~~ '%市%'::text)))
@@ -326,7 +324,6 @@ SELECT gid, pref, city,
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='gid'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,2,3> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-1400, expr='gid'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x1400-4800, expr='pref'}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x4800-7c00, expr='city'}}, {SaveExpr: <slot=3, type='float8'> arg={Func(float8)::st_distance args=[{Var(geometry): kvec=0x7c00-fc00, expr='geom'}, {Const(geometry): value='01010000006974626A26776140E5362BECB3D74140'}]}}]}
    Fallback-desc: [<dest='0', expr='gid', depth=0:1>, <dest='1', expr='pref', depth=0:1>, <dest='2', expr='city', depth=0:1>, <dest='4', expr='geom', depth=0:1>]
-   CUDA Stack Size: 4048
 (12 rows)
 
 SELECT gid, pref, city,
@@ -367,7 +364,6 @@ SELECT gid, pref, city,
    Scan Quals OpCode: {Func(bool)::int4gt args=[{Var(int4): slot=0, expr='gid'}, {Const(int4): value='0'}]}
    Projection OpCode: {Projection: layout=<0,1,2,3> args=[{SaveExpr: <slot=0, type='int4'> arg={Var(int4): kvec=0x0000-1400, expr='gid'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x1400-4800, expr='pref'}}, {SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x4800-7c00, expr='city'}}, {SaveExpr: <slot=3, type='float8'> arg={Func(float8)::st_distance args=[{Var(geometry): kvec=0x7c00-fc00, expr='geom'}, {Const(geometry): value='0101000000392BFDDF6C836140CC43A67C080C4240'}]}}]}
    Fallback-desc: [<dest='0', expr='gid', depth=0:1>, <dest='1', expr='pref', depth=0:1>, <dest='2', expr='city', depth=0:1>, <dest='4', expr='geom', depth=0:1>]
-   CUDA Stack Size: 4048
 (12 rows)
 
 SELECT gid, pref, city,

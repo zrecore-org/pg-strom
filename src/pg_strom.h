@@ -137,9 +137,6 @@
 #include "utils/uuid.h"
 #include "utils/wait_event.h"
 #include <assert.h>
-//#define CUDA_API_PER_THREAD_DEFAULT_STREAM		1
-#include <cuda.h>
-#include <cufile.h>
 #include <ctype.h>
 #include <float.h>
 #include <libgen.h>
@@ -164,7 +161,6 @@
 #include "arrow_fdw.h"
 #include "pg_utils.h"
 #include "pg_compat.h"
-#include "heterodb_extra.h"
 
 /* ------------------------------------------------
  *
@@ -174,22 +170,15 @@
  */
 typedef struct GpuDevAttributes
 {
-	uint32_t	NVIDIA_KMOD_VERSION;
-	uint32_t	NVIDIA_FS_KMOD_VERSION;
-	int			CUDA_DRIVER_VERSION;
 	int32		DEV_ID;
 	char		DEV_NAME[256];
-	char		DEV_UUID[2 * sizeof(CUuuid) + 8];	/* human readable */
+	char		DEV_UUID[40];			/* human readable */
 	size_t		DEV_TOTAL_MEMSZ;
-	size_t		DEV_BAR1_MEMSZ;
-	bool		DEV_SUPPORT_GPUDIRECTSQL;
-#define DEV_ATTR(LABEL,DESC)	\
-	int32		LABEL;
-#include "gpu_devattrs.h"
-#undef DEV_ATTR
+	int32		MAX_THREADS_PER_BLOCK;	/* invocations per workgroup */
+	int32		MAX_SHARED_MEMORY_PER_BLOCK;
+	int32		WARP_SIZE;				/* subgroup size */
 } GpuDevAttributes;
 
-#define DEV_ATTR__UNKNOWN		(-0x7e7e7e7e)
 
 extern GpuDevAttributes *gpuDevAttrs;
 extern int		numGpuDevAttrs;
@@ -328,7 +317,6 @@ typedef struct
 	uint32_t	kvecs_bufsz;	/* unit size of vectorized kernel values */
 	uint32_t	kvecs_ndims;
 	uint32_t	extra_bufsz;
-	uint32_t	cuda_stack_size;/* estimated stack consumption */
 	/* group-by parameters */
 	List	   *groupby_actions;		/* list of KAGG_ACTION__* on the kds_final */
 	List	   *groupby_typmods;		/* typmod if KAGG_ACTION__* needs it */
@@ -634,7 +622,6 @@ extern bool		pgstrom_xpu_expression(Expr *expr,
 									   Index scan_relid,
 									   List *inner_target_list,
 									   int *p_devcost);
-extern uint32_t	estimate_cuda_stack_size(codegen_context *context);
 extern void		pgstrom_explain_kvars_slot(const CustomScanState *css,
 										   ExplainState *es,
 										   List *dcontext);
@@ -781,171 +768,50 @@ extern gpumask_t	GetOptimalGpuForBaseRel(PlannerInfo *root,
 extern gpumask_t	GetSystemAvailableGpus(void);
 extern void		gpuClientOpenSession(pgstromTaskState *pts,
 									 const XpuCommand *session);
-extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
-									int *p_block_sz,
-									CUfunction kern_function,
-									unsigned int dynamic_shmem_per_block);
 extern bool		pgstrom_init_gpu_device(void);
 extern void		pgstrom_init_gpu_launcher(void);
 struct gpuserv_control;
 extern const struct gpuserv_control *pgstrom_gpuserv_control(void);
 
 /*
- * gpu_service.c
+ * gpu_client.c
  */
-typedef struct
-{
-	struct gpuContext *gcontext;	/* gpuContext that owns this pool */
-	pthread_mutex_t	lock;
-	bool			is_managed;	/* true, if managed memory pool */
-	size_t			total_sz;	/* total pool size */
-	size_t			hard_limit;
-	size_t			keep_limit;
-	dlist_head		segment_list;
-} gpuMemoryPool;
+extern int		pgstrom_debug_level;		/* GUC pg_strom.debug_level */
 
-struct gpuContext
-{
-	dlist_node		chain;
-	char			gpu_label[8];	/* for debug output */
-	int				serv_fd;		/* for accept(2) */
-	int				host_numa_id;
-	int				cuda_dindex;
-	gpumask_t		cuda_dmask;		/* = (1UL<<cuda_dindex) */
-	CUdevice		cuda_device;
-	CUmemLocation	cuda_mlocation;
-	CUcontext		cuda_context;
-	CUmodule		cuda_module;
-	HTAB		   *cuda_type_htab;
-	HTAB		   *cuda_func_htab;
-	CUfunction		cufn_kern_gpumain;
-	CUfunction		cufn_prep_gistindex;
-	CUfunction		cufn_merge_outer_join_map;
-	CUfunction		cufn_merge_gpupreagg_buffer;
-	CUfunction		cufn_gpusort_consolidate_buffer;
-	CUfunction		cufn_gpusort_partition_buffer;
-	CUfunction		cufn_gpusort_prep_buffer;
-	CUfunction		cufn_gpusort_exec_bitonic;
-	CUfunction		cufn_kbuf_estimate_limit;
-	CUfunction		cufn_kbuf_simple_limit;
-	CUfunction		cufn_kbuf_partitioning;
-	CUfunction		cufn_kbuf_reconstruction;
-	CUfunction		cufn_gpucache_apply_logs;
-	CUfunction		cufn_gpucache_compaction;
-	CUfunction		cufn_windowrank_prep_hash;
-	CUfunction		cufn_windowrank_exec_row_number;
-	CUfunction		cufn_windowrank_exec_rank;
-	CUfunction		cufn_windowrank_exec_dense_rank;
-	CUfunction		cufn_windowrank_finalize;
-	CUfunction		cufn_global_stair_sum_u32;
-	int				gpumain_shmem_sz_limit;
-	xpu_encode_info *cuda_encode_catalog;
-	gpuMemoryPool	pool_raw;
-	gpuMemoryPool	pool_managed;
-	bool			cuda_profiler_started;
-	volatile uint32_t cuda_stack_limit;	/* current configuration */
-	pthread_mutex_t	cuda_setlimit_lock;
-	/* GPU cache */
-	pg_atomic_uint32 gpucache_worker_phase;
-	pthread_t		gpucache_worker;
-	pthread_rwlock_t gpucache_rwlock;
-	kern_gpucache_master_state *gpucache_master_state;	/* managed memory */
-	/* GPU workers */
-	pthread_mutex_t	worker_lock;
-	dlist_head		worker_list;
-	/* XPU commands */
-	pthread_cond_t	cond;
-	pthread_mutex_t	lock;
-	dlist_head		command_list;
-	pg_atomic_uint32 num_commands;
-};
-typedef struct gpuContext	gpuContext;
-typedef struct gpuClient	gpuClient;
+#define __PgStromLog(LABEL,fmt,...)							\
+	fprintf(stderr, "%s|LOG|%s|%d|%s|" fmt "\n",			\
+			LABEL, __basename(__FILE__), __LINE__,			\
+			__FUNCTION__, ##__VA_ARGS__)
 
-extern void		__gpuClientELog(gpuClient *gclient,
-								int errcode,
-								const char *filename, int lineno,
-								const char *funcname,
-								const char *fmt, ...)	pg_attribute_printf(6,7);
-
-#define gpuClientELog(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_ERROR,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-#define gpuClientFatal(gclient,fmt,...)						\
-	__gpuClientELog((gclient), ERRCODE_DEVICE_FATAL,		\
-					__FILE__, __LINE__, __FUNCTION__,		\
-					(fmt), ##__VA_ARGS__)
-
-extern void		gpuservLoggerReport(const char *fmt, ...)
-					pg_attribute_printf(1, 2);
-#define __gsLogLabel(LABEL,fmt,...)							\
-	gpuservLoggerReport("%s|LOG|%s|%d|%s|" fmt "\n",		\
-						LABEL,								\
-						__basename(__FILE__),				\
-						__LINE__,							\
-						__FUNCTION__,						\
-						##__VA_ARGS__)
-
-#define __Notice(fmt,...)									\
+#define __PgStromReport(LEVEL,LABEL,fmt,...)				\
 	do {													\
 		int		__errno_saved = errno;						\
 		if (MyProcPid != gettid())							\
-			__gsLogLabel("[notice]",fmt,##__VA_ARGS__);		\
+			__PgStromLog(LABEL,fmt,##__VA_ARGS__);			\
 		else												\
 			ereport(LOG,									\
 					(errhidestmt(true),						\
-					 errmsg("[notice] " fmt " (%s:%d)",		\
+					 errmsg(LABEL " " fmt " (%s:%d)",		\
 							##__VA_ARGS__,					\
 							__FILE__, __LINE__)));			\
 		errno = __errno_saved;								\
 	} while(0)
 
+#define __Notice(fmt,...)	__PgStromReport(0,"[notice]",fmt,##__VA_ARGS__)
 #define __Info(fmt,...)										\
 	do {													\
-		int		__errno_saved = errno;						\
-		if (heterodbExtraEreportLevel() >= 1)				\
-		{													\
-			if (MyProcPid != gettid())						\
-				__gsLogLabel("[info]",fmt,##__VA_ARGS__);	\
-			else											\
-				ereport(LOG,								\
-						(errhidestmt(true),					\
-						 errmsg("[info] " fmt " (%s:%d)",	\
-								##__VA_ARGS__,				\
-								__FILE__, __LINE__)));		\
-		}													\
-		errno = __errno_saved;								\
+		if (pgstrom_debug_level >= 1)						\
+			__PgStromReport(1,"[info]",fmt,##__VA_ARGS__);	\
 	} while(0)
 #define __Debug(fmt,...)									\
 	do {													\
-		int		__errno_saved = errno;						\
-		if (heterodbExtraEreportLevel() >= 2)				\
-		{													\
-			if (MyProcPid != gettid())						\
-				__gsLogLabel("[debug]",fmt,##__VA_ARGS__);	\
-			else											\
-				ereport(LOG,								\
-						(errhidestmt(true),					\
-						 errmsg("[debug] " fmt " (%s:%d)",	\
-								##__VA_ARGS__,				\
-								__FILE__, __LINE__)));		\
-		}													\
-		errno = __errno_saved;								\
+		if (pgstrom_debug_level >= 2)						\
+			__PgStromReport(2,"[debug]",fmt,##__VA_ARGS__);	\
 	} while(0)
 
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
-extern const char *cuStrError(CUresult rc);
-extern uint32_t	gpuClientGetTaskFlags(const gpuClient *gclient);
-extern const kern_session_info *gpuClientGetSessionInfo(const gpuClient *gclient);
-extern bool		gpuServiceGoingTerminate(void);
-extern void		gpuservBgWorkerMain(Datum arg);
-extern void		pgstrom_init_gpu_service(void);
-
-extern void		pgstrom_inc_perf_counter(int num);
-extern void		pgstrom_add_perf_counter(int num, const struct timeval *tv_base);
-extern void		pgstrom_print_perf_counter(void);
+extern void		pgstrom_init_gpu_client(void);
 
 /*
  * gpu_scan.c
@@ -963,7 +829,6 @@ extern List	   *buildOuterScanPlanInfo(PlannerInfo *root,
 									   bool consider_partition,
 									   bool allow_host_quals,
 									   bool allow_no_device_quals);
-extern void		gpuservHandleGpuScanExec(gpuClient *gclient, XpuCommand *xcmd);
 extern void		pgstrom_init_gpu_scan(void);
 
 /*
@@ -1097,47 +962,7 @@ extern void		pgstromGpuCacheShutdownDSM(pgstromTaskScanState *ptss,
 extern void		pgstromGpuCacheExplain(pgstromTaskScanState *ptss,
 									   ExplainState *es,
 									   const char *prefix);
-extern void	   *gpuCacheWorkerMain(void *__gcontext);
 extern void		pgstrom_init_gpu_cache(void);
-extern CUdeviceptr gpuCacheGetKdsBuffer(gpuContext *gcontext,
-										uint32_t database_oid,
-										uint32_t table_oid,
-										uint32_t table_sig);
-extern void		gpuCachePutKdsBuffer(gpuContext *gcontext);
-
-/*
- * select_into.c
- */
-
-/*
- * NOTE: This field is embedded in the gpuQueryBuffer; can be accessed by
- *       multiple CPU threads concurrently.
- */
-typedef struct
-{
-	pthread_mutex_t		kds_heap_lock;	/* lock for kds_heap and segment_no */
-	kern_data_store	   *kds_heap;		/* per-segment buffer */
-	uint32_t			kds_heap_segno;	/* current segment number */
-	uint64_t			nblocks_written;/* statistics */
-	pthread_mutex_t		dpage_lock;
-	PageHeaderData	   *dpage;			/* row-by-row buffer */
-	const char		   *base_name;
-} selectIntoState;
-
-extern bool		__initSelectIntoState(selectIntoState *si_state,
-									  const kern_session_info *session);
-extern void		__cleanupSelectIntoState(selectIntoState *si_state);
-
-extern bool		selectIntoWriteOutHeapNormal(gpuClient *gclient,
-											 selectIntoState *si_state,
-											 kern_data_store *kds_dst);
-extern long		selectIntoWriteOutHeapFinal(gpuClient *gclient,
-											kern_session_info *session,
-											selectIntoState *si_state,
-											kern_data_store *kds_dst);
-extern long		selectIntoFinalFlushBuffer(gpuClient *gclient,
-										   selectIntoState *si_state);
-extern void		pgstrom_init_select_into(void);
 
 /*
  * fallback.c

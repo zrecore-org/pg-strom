@@ -21,18 +21,8 @@
 
 #define SCAN_WG_MAX		65535U
 
-/* strom_io_vector of heterodb_extra.h (same layout on LP64) */
-typedef struct
-{
-	unsigned long	m_offset;
-	unsigned int	fchunk_id;
-	unsigned int	nr_pages;
-} io_chunk;
-typedef struct
-{
-	unsigned int	nr_chunks;
-	io_chunk		ioc[1];
-} io_vector;
+typedef strom_io_chunk	io_chunk;
+typedef strom_io_vector	io_vector;
 
 static double
 now_ms(void)

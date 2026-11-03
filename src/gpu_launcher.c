@@ -35,6 +35,7 @@ static char	   *gpuserv_path = NULL;
 static bool		gpu_allow_cpu_device = false;
 static int		gpuserv_probe_timeout = 60000;		/* ms */
 
+static char	   *gpu_visible_devices = NULL;		/* GUC */
 static gpuserv_control *gpuserv_ctl = NULL;
 static char		gpuserv_ctl_name[64];
 static volatile sig_atomic_t launcher_got_sigterm = false;
@@ -434,6 +435,30 @@ gpuserv_socket_path(char *buf, size_t bufsz)
 		snprintf(buf, bufsz, "/tmp/.pg_strom.%d.gpuserv.sock", PostPortNumber);
 }
 
+/* is device 'index' listed in pg_strom.gpu_visible_devices? (empty = all of them) */
+static bool
+gpu_device_is_visible(int index)
+{
+	const char *p = gpu_visible_devices;
+
+	if (!p || !p[0])
+		return true;
+	while (*p)
+	{
+		char	   *end;
+		long		v = strtol(p, &end, 10);
+
+		if (end == p)
+			break;
+		if (v == index)
+			return true;
+		p = (*end == ',' ? end + 1 : end);
+		while (*p == ' ')
+			p++;
+	}
+	return false;
+}
+
 void
 pgstrom_init_gpu_launcher(void)
 {
@@ -450,6 +475,14 @@ pgstrom_init_gpu_launcher(void)
 							   NULL,
 							   &gpuserv_path,
 							   defpath,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.gpu_visible_devices",
+							   "Vulkan devices PG-Strom may use: device indexes separated by commas (empty: all)",
+							   NULL,
+							   &gpu_visible_devices,
+							   NULL,
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
@@ -498,7 +531,7 @@ pgstrom_init_gpu_launcher(void)
 		elog(LOG, "PG-Strom: Vulkan device %d: %s (%s), tier %s%s%s",
 			 i, dc->name, dc->driver_name, gpuserv_tier_name(dc->tier),
 			 dc->tier_reason[0] ? " - " : "", dc->tier_reason);
-		if (selected < 0 && dc->tier != GPUSERV_TIER_NONE)
+		if (selected < 0 && dc->tier != GPUSERV_TIER_NONE && gpu_device_is_visible(i))
 			selected = i;
 	}
 	if (selected < 0)

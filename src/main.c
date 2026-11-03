@@ -19,12 +19,10 @@ static bool	__pgstrom_enabled_guc = true;			/* GUC */
 int			pgstrom_cpu_fallback_elevel = ERROR;	/* GUC */
 bool		pgstrom_regression_test_mode = false;	/* GUC */
 bool		pgstrom_explain_developer_mode = false;	/* GUC */
-static bool	pgstrom_enable_select_into_direct;		/* GUC */
 
 static planner_hook_type	planner_hook_next = NULL;
 static CustomPathMethods	pgstrom_dummy_path_methods;
 static CustomScanMethods	pgstrom_dummy_plan_methods;
-static ExecutorStart_hook_type	executor_start_hook_next = NULL;
 
 /* pg_strom.githash() */
 PG_FUNCTION_INFO_V1(pgstrom_githash);
@@ -128,15 +126,6 @@ pgstrom_init_gucs(void)
 							 NULL,
 							 &pgstrom_explain_developer_mode,
 							 false,
-							 PGC_USERSET,
-							 GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-	/* turns on/off SELECT INTO direct mode */
-	DefineCustomBoolVariable("pg_strom.enable_select_into_direct",
-							 "Enables SELECT INTO direct mode",
-							 NULL,
-							 &pgstrom_enable_select_into_direct,
-							 true,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
@@ -653,140 +642,6 @@ pgstrom_post_planner(Query *parse,
 }
 
 /*
- * see DR_intorel definition in commands/createas.c
- */
-typedef struct
-{
-	DestReceiver	pub;		/* publicly-known function pointers */
-	IntoClause	   *into;		/* target relation specification */
-	/* These fields are filled by intorel_startup: */
-	Relation		rel;		/* relation to write to */
-	ObjectAddress	reladdr;	/* address of rel, for ExecCreateTableAs */
-	CommandId		output_cid;	/* cmin to insert in output tuples */
-	int				ti_options;	/* table_tuple_insert performance options */
-	BulkInsertState	bistate;	/* bulk insert state */
-	/* --- below is PG-Strom original enhancement --- */
-	pgstromTaskState *pts;
-	List		   *select_into_proj;
-	void		  (*rStartup_orig) (DestReceiver *self,
-									int operation,
-									TupleDesc typeinfo);
-} DR_intorel_with_pgstrom;
-
-/*
- * select_into_direct_on_startup
- */
-static void
-select_into_direct_on_startup(DestReceiver *self,
-							  int operation,
-							  TupleDesc typeinfo)
-{
-	DR_intorel_with_pgstrom *dest = (DR_intorel_with_pgstrom *)self;
-	pgstromTaskState   *pts = dest->pts;
-
-	/* call the original dest-receiver startup */
-	dest->rStartup_orig(self, operation, typeinfo);
-
-	/* setup SELECT INTO direct related stuff */
-	if (dest->rel)
-	{
-		CustomScan		*cscan = (CustomScan *)pts->css.ss.ps.plan;
-		pgstromPlanInfo *pp_info = pts->pp_info;
-
-		pp_info->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
-		pp_info->select_into_relid = RelationGetRelid(dest->rel);
-		pp_info->select_into_proj = dest->select_into_proj;
-		form_pgstrom_plan_info(cscan, pp_info);
-	}
-}
-
-/*
- * pgstrom_executor_start
- */
-static void
-pgstrom_executor_start(QueryDesc *queryDesc, int eflags)
-{
-	DR_intorel_with_pgstrom *dest = (DR_intorel_with_pgstrom *)queryDesc->dest;
-
-	if (executor_start_hook_next)
-		executor_start_hook_next(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
-	/*
-	 * check whether SELECT INTO direct mode is possible, or not.
-	 * also, see ExecCreateTableAs() for the related initializations.
-	 */
-	if (IsParallelWorker())
-		return;		/* only main process can check SELECT INTO Direct capability */
-	else if (!pgstrom_enable_select_into_direct)
-		elog(DEBUG2, "SELECT INTO Direct disabled: because of pg_strom.enable_select_into_direct parameter");
-	else if (pgstrom_cpu_fallback_elevel < ERROR)
-		elog(DEBUG2, "SELECT INTO Direct disabled: because CPU-fallback is enabled");
-	else if (dest->pub.mydest != DestIntoRel)
-		elog(DEBUG2, "SELECT INTO Direct disabled: because dest-receiver is not DestIntoRel");
-	else if (queryDesc->plannedstmt->hasReturning)
-		elog(DEBUG2, "SELECT INTO Direct disabled: because of RETURNING clause");
-	else if (dest->into->rel->relpersistence != RELPERSISTENCE_UNLOGGED &&
-			 dest->into->rel->relpersistence != RELPERSISTENCE_TEMP)
-		elog(DEBUG2, "SELECT INTO Direct disabled, because the table is neither temporary nor unlogged");
-	else
-	{
-		/* only heap access method supports SELECT INTO Direct */
-		const char *accessMethod = (dest->into->accessMethod != NULL
-									? dest->into->accessMethod
-									: default_table_access_method);
-		if (get_table_am_oid(accessMethod, true) != HEAP_TABLE_AM_OID)
-			elog(DEBUG2, "SELECT INTO Direct disabled, because the table does not use heap AM");
-		else
-		{
-			/* ok, it looks SELECT INTO allows direct mode */
-			PlanState  *pstate = queryDesc->planstate;
-
-			if (IsA(pstate, GatherState))
-			{
-				if (pstate->ps_ProjInfo)
-				{
-					elog(DEBUG2, "SELECT INTO Direct disabled: Gather has projection");
-					return;
-				}
-				pstate = outerPlanState(pstate);
-			}
-			/* check top-level PlanState except for Gather node */
-			if (pgstrom_is_gpuscan_state(pstate) ||
-				pgstrom_is_gpujoin_state(pstate) ||
-				pgstrom_is_gpupreagg_state(pstate))
-			{
-				pgstromTaskState *pts = (pgstromTaskState *)pstate;
-				List	   *select_into_proj = NIL;
-
-				if ((pts->xpu_task_flags & DEVKIND__ANY) != DEVKIND__NVIDIA_GPU)
-					elog(DEBUG2, "SELECT INTO Direct disabled: because only GPU supports it");
-				else if (pts->css.ss.ps.qual)
-					elog(DEBUG2, "SELECT INTO Direct disabled: because of host qualifiers");
-				else if (tryAddSelectIntoDirectProjection(pts, &select_into_proj))
-				{
-					/* OK, Let's run SELECT INTO Direct in GPU-Direct mode */
-					DR_intorel_with_pgstrom *copy = palloc(sizeof(*copy));
-
-					memcpy(copy, dest, offsetof(DR_intorel_with_pgstrom, pts));
-					copy->pts = pts;
-					copy->select_into_proj = select_into_proj;
-					copy->rStartup_orig = dest->pub.rStartup;
-					copy->pub.rStartup = select_into_direct_on_startup;
-					queryDesc->dest = &copy->pub;
-
-					pts->xpu_task_flags |= DEVTASK__SELECT_INTO_DIRECT;
-				}
-			}
-			else
-			{
-				elog(DEBUG2, "SELECT INTO Direct disabled: because top-level plan is not GPU-aware");
-			}
-		}
-	}
-}
-
-/*
  * pgstrom_sigpoll_handler
  */
 static void
@@ -814,7 +669,6 @@ _PG_init(void)
 				 errmsg("PG-Strom must be loaded via shared_preload_libraries")));
 	/* init pg-strom infrastructure */
 	pgstrom_init_gucs();
-	pgstrom_init_extra();
 	pgstrom_init_codegen();
 	pgstrom_init_relscan();
 	pgstrom_init_brin();
@@ -831,14 +685,14 @@ _PG_init(void)
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{
-		pgstrom_init_gpu_service();
+		pgstrom_init_gpu_client();
 		pgstrom_init_gpu_scan();
-#ifndef PGSTROM_NO_CUDA
-		pgstrom_init_gpu_join();
-		pgstrom_init_gpu_preagg();
+		/*
+		 * The Vulkan service implements GpuScan only so far. GpuPreAgg (A3), GpuJoin (A4) and
+		 * GPU-Cache (A7) come back with their milestones: pgstrom_init_gpu_preagg(),
+		 * pgstrom_init_gpu_join().
+		 */
 		pgstrom_init_gpu_cache();
-		pgstrom_init_select_into();
-#endif	/* the Vulkan service implements GpuScan only so far (A3: PreAgg, A4: Join, A7: GPU-Cache) */
 	}
 	/* callback for the extension checker */
 	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);
@@ -854,10 +708,6 @@ _PG_init(void)
 	/* post planner hook */
 	planner_hook_next = (planner_hook ? planner_hook : standard_planner);
 	planner_hook = pgstrom_post_planner;
-	/* executor hook */
-	executor_start_hook_next = ExecutorStart_hook;
-	ExecutorStart_hook = pgstrom_executor_start;
-
 	/* signal handler for wake up */
 	pqsignal(SIGPOLL, pgstrom_sigpoll_handler);
 }

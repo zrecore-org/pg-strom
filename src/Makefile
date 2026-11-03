@@ -6,34 +6,22 @@ include ../Makefile.common
 #
 # Source of PG-Strom host code
 #
-STROM_OBJS = main.o githash.o extra.o codegen.o \
+STROM_OBJS = main.o githash.o codegen.o \
              executor.o fallback.o \
-             gpu_device.o gpu_service.o gpu_cache.o \
+             gpu_device.o gpu_client.o gpu_cache.o \
              gpu_scan.o gpu_join.o gpu_preagg.o \
-             relscan.o brin.o select_into.o \
+             relscan.o brin.o \
              arrow_fdw.o arrow_meta.o \
              parquet_read.o parquet_cache.o \
              misc.o float2.o tinyint.o aggfuncs.o \
              pg_portable.o gpu_launcher.o gpuserv/gpuserv_proto.o gpuserv/scan_caps.o
-ifeq ($(WITH_POSTGIS),1)
-STROM_OBJS += gist.o
-endif
-GENERATED-HEADERS = gpu_devattrs.h githash.c
+GENERATED-HEADERS = githash.c
 STROM_HEADERS = arrow_defs.h float2.h
 
 #
 # Githash.c checker
 #
 GITHASH_CHECKS := $(shell grep -q \"$(PGSTROM_GITHASH)\" githash.c 2>/dev/null || rm -f githash.c)
-
-#
-# Source of NVIDIA GPU device code
-#
-include Makefile.cuda
-ifdef PGSTROM_NO_CUDA
-# "no GPU" build: the CUDA driver API resolves to the stub that reports no device
-STROM_OBJS += nocuda/cuda_stub.o
-endif
 
 #
 # Installation Scripts
@@ -65,29 +53,12 @@ ifneq ($(shell echo 'int x;' | $(CC) -mfp16-format=ieee -x c -c -o /dev/null - 2
 PGSTROM_FLAGS += -mfp16-format=ieee
 endif
 endif
-ifdef PGSTROM_NO_CUDA
-PGSTROM_FLAGS += -DPGSTROM_NO_CUDA=1
-endif
-ifeq ($(WITH_POSTGIS),1)
-PGSTROM_FLAGS += -DWITH_POSTGIS=1
-endif
 ifneq ($(PGSTROM_GITHASH),)
 PGSTROM_FLAGS += -DPGSTROM_GITHASH=\"$(PGSTROM_GITHASH)\"
 endif
 PGSTROM_FLAGS += -DPGSHAREDIR=\"$(shell $(PG_CONFIG) --sharedir)\"   \
         -DPGINCLUDEDIR=\"$(shell $(PG_CONFIG) --includedir-server)\" \
-        -DCUDA_MAXREGCOUNT=$(MAXREGCOUNT)                 \
-        -DCUDA_MAXTHREADS_PER_BLOCK=$(MAXTHREADS_PER_BLOCK) \
-        -DCUDA_CORE_FILES="\"$(__CUDA_CORE_FILES)\""      \
-        -DCUDA_CORE_HEADERS="\"$(__CUDA_CORE_HEADERS)\""  \
-        -DCUDA_TOOLKIT_BASEDIR="\"$(CUDA_PATH)\""
-#
-# Pre-built Fatbin (only debugging purpose)
-#
-ifeq ($(WITH_FATBIN),1)
-DATA_built = $(CUDA_FATBIN)
-PGSTROM_FLAGS += -DWITH_FATBIN=1
-endif
+        -DCUDA_MAXTHREADS_PER_BLOCK=512
 
 #
 # libarrow / libparquet
@@ -126,20 +97,15 @@ endif
 #
 MODULE_big = pg_strom
 MODULEDIR  = pg_strom
-DATA = $(STROM_SQL) ../LICENSE Makefile.cuda \
-       $(CUDA_SRCS) $(CUDA_HEADERS) $(STROM_HEADERS)
+DATA = $(STROM_SQL) ../LICENSE $(STROM_HEADERS)
 OBJS = $(STROM_OBJS)
 
-EXTRA_CLEAN = $(CUDA_OBJS) $(GENERATED-HEADERS) \
-              $(shell ls -d pgstrom-gpucode-V*-*.fatbin 2>/dev/null)
+EXTRA_CLEAN = $(GENERATED-HEADERS)
 EXTENSION = pg_strom
-PG_CPPFLAGS := $(PGSTROM_FLAGS) -I $(CUDA_IPATH)
+PG_CPPFLAGS := $(PGSTROM_FLAGS)
 # (+=, not :=: the pkgconf --cflags added above must survive; Homebrew's headers are
 #  not in the default search path)
 PG_CXXFLAGS += -std=c++20 -Wno-sign-compare
-ifndef PGSTROM_NO_CUDA
-SHLIB_LINK += -L $(CUDA_LPATH) -lcuda
-endif
 # the module links through the C driver; the C++ runtime (arrow_meta.cpp, parquet_read.cpp)
 # has to be named explicitly on macOS
 ifeq ($(shell uname -s),Darwin)
@@ -189,40 +155,9 @@ include $(PGXS)
 #
 BITCODE_CXXFLAGS += $(PG_CXXFLAGS)
 
-#
-# Device Attributes
-#
 submake-generated-headers: $(GENERATED-HEADERS)
-
-ifdef PGSTROM_NO_CUDA
-gpu_devattrs.h: nocuda/gpu_devattrs.h
-	cp $< $@
-else
-gpu_devattrs.h: $(CUDA_IPATH)/cuda.h
-	cat $(CUDA_IPATH)/cuda.h | \
-	grep -E '^[ ]+CU_DEVICE_ATTRIBUTE_' | \
-	grep -v -E 'CU_DEVICE_ATTRIBUTE_MAX$$' | \
-	grep -v 'Deprecated[,\.]' | \
-	sed -e 's|[ ]*CU_DEVICE_ATTRIBUTE_|DEV_ATTR(|g' \
-	    -e 's| =.*/\*\*<[ ]*|, "|g' \
-	    -e 's|[ ]*\*/|")|g' \
-        -e 's| =.*$$|, NULL)|g' > $@
-endif
 
 githash.c:
 	(echo "extern const char *pgstrom_githash_cstring;"; \
 	 echo ""; \
 	 echo "const char *pgstrom_githash_cstring = \"$(PGSTROM_GITHASH)\";") > githash.c
-
-#
-# GPU Device Code
-#
-ifndef PGSTROM_NO_CUDA
-%.o: %.cu $(CUDA_HEADERS)
-	$(NVCC) $(NVCC_CFLAGS)  --device-c -o $@ $<
-
-$(CUDA_FATBIN): $(CUDA_OBJS)
-	$(NVCC) $(NVCC_LDFLAGS) --device-link --fatbin -o $@ $(CUDA_OBJS)
-
-fatbin: $(CUDA_FATBIN)
-endif

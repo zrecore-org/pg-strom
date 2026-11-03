@@ -35,7 +35,6 @@ select distinct s_city, s_nation
                Group-By KeyComp OpCode: {Bool::AND args=[{Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='s_city'}, {Var(bpchar): slot=3, expr='s_city'}]}, {Func(bool)::bpchareq args=[{Var(bpchar): slot=2, expr='s_nation'}, {Var(bpchar): slot=4, expr='s_nation'}]}]}
                Partial Aggregation OpCode: {AggFuncs <vref[slot=1, expr='s_city'], vref[slot=2, expr='s_nation']> args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='s_city'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x6800-9c00, expr='s_nation'}}]}
                Fallback-desc: [<dest='0', expr='s_city', depth=0:1>, <dest='1', expr='s_nation', depth=0:1>, <dest='2', expr='s_region', depth=0:0>]
-               CUDA Stack Size: 4000
 (21 rows)
 
 select distinct s_city, s_nation
@@ -134,7 +133,6 @@ select distinct c_nation, lo_orderpriority
                Group-By KeyComp OpCode: {Bool::AND args=[{Func(bool)::bpchareq args=[{Var(bpchar): slot=1, expr='c_nation'}, {Var(bpchar): slot=3, expr='c_nation'}]}, {Func(bool)::bpchareq args=[{Var(bpchar): slot=2, expr='lo_orderpriority'}, {Var(bpchar): slot=4, expr='lo_orderpriority'}]}]}
                Partial Aggregation OpCode: {AggFuncs <vref[slot=1, expr='c_nation'], vref[slot=2, expr='lo_orderpriority']> args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='c_nation'}}, {SaveExpr: <slot=2, type='bpchar'> arg={Var(bpchar): kvec=0x6800-9c00, expr='lo_orderpriority'}}]}
                Fallback-desc: [<dest='0', expr='c_nation', depth=1:2>, <dest='1', expr='lo_orderpriority', depth=0:2>, <dest='2', expr='lo_shipmode', depth=0:0>, <dest='3', expr='lo_custkey', depth=0:1>, <dest='4', expr='c_custkey', depth=1:1>]
-               CUDA Stack Size: 4048
                ->  Custom Scan (GpuScan) on public.customer
                      Output: customer.c_nation, customer.c_custkey
                      GPU Projection: c_nation, c_custkey
@@ -146,7 +144,6 @@ select distinct c_nation, lo_orderpriority
                      Scan Quals OpCode: {Func(bool)::bpchareq args=[{Var(bpchar): slot=0, expr='c_region'}, {Const(bpchar): value='AMERICA'}]}
                      Projection OpCode: {Projection: layout=<1,2> args=[{SaveExpr: <slot=1, type='bpchar'> arg={Var(bpchar): kvec=0x3400-6800, expr='c_nation'}}, {SaveExpr: <slot=2, type='int4'> arg={Var(int4): kvec=0x6800-7c00, expr='c_custkey'}}]}
                      Fallback-desc: [<dest='0', expr='c_nation', depth=0:1>, <dest='1', expr='c_custkey', depth=0:1>, <dest='2', expr='c_region', depth=0:0>]
-                     CUDA Stack Size: 3968
 (38 rows)
 
 select distinct c_nation, lo_orderpriority
@@ -212,7 +209,6 @@ select distinct on (p_type) p_type, p_color, p_size
          Group-By KeyComp OpCode: {Func(bool)::texteq args=[{Var(text): slot=2, expr='p_type'}, {Var(text): slot=3, expr='p_type'}]}
          Partial Aggregation OpCode: {AggFuncs <vref[slot=2, expr='p_type'], vref[slot=1, expr='p_color'], vref[slot=4, expr='p_size']> args=[{SaveExpr: <slot=2, type='text'> arg={Var(text): kvec=0x3400-6800, expr='p_type'}}, {SaveExpr: <slot=1, type='text'> arg={Var(text): kvec=0x0000-3400, expr='p_color'}}, {SaveExpr: <slot=4, type='numeric'> arg={Var(numeric): kvec=0x6800-d800, expr='p_size'}}]}
          Fallback-desc: [<dest='0', expr='p_type', depth=0:1>, <dest='1', expr='p_color', depth=0:1>, <dest='2', expr='p_size', depth=0:1>]
-         CUDA Stack Size: 4000
 (18 rows)
 
 select distinct on (p_type) p_type, p_color, p_size

@@ -14,12 +14,10 @@ AutoReqProv: no
 %undefine _debuginfo_subpackages
 
 %define __githash       @@PGSTROM_GITHASH@@
-%define __cuda_path     /usr/local/cuda
 %define __pg_config_15  /usr/pgsql-15/bin/pg_config
 %define __pg_config_16  /usr/pgsql-16/bin/pg_config
 %define __pg_config_17  /usr/pgsql-17/bin/pg_config
 %define __pg_config_18  /usr/pgsql-18/bin/pg_config
-%define __heterodb_extra_min_version 6.5
 
 %define __HAS_PG15      %(test -x %{__pg_config_15} && echo -n 1 || echo -n 0)
 %define __HAS_PG16      %(test -x %{__pg_config_16} && echo -n 1 || echo -n 0)
@@ -29,7 +27,7 @@ AutoReqProv: no
 %define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | awk -F. '{printf "%02u", $1}' || echo -n 00)
 %define __ARROW_PARQUET_MIN_VERSION 23
 
-%define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} CUDA_PATH=%{__cuda_path}
+%define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot}
 
 %description
 PG-Strom is an extension for PostgreSQL, to accelerate large data processing
@@ -48,7 +46,6 @@ BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
 Requires: postgresql15-server
-Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
@@ -79,7 +76,6 @@ BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
 Requires: postgresql16-server
-Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
@@ -110,7 +106,6 @@ BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
 Requires: postgresql17-server
-Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
@@ -141,7 +136,6 @@ BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
 Requires: postgresql18-server
-Recommends: heterodb-extra >= %{__heterodb_extra_min_version}
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
@@ -220,7 +214,7 @@ rm -rf %{buildroot}
 
 %if %{__HAS_PG15}
 pushd ../PG15
-%{__make} -C src         %{__make_options_15} CUDA_PATH=%{__cuda_path} install
+%{__make} -C src         %{__make_options_15} install
 %{__make} -C arrow-tools %{__make_options_15} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_15} install-arrow2csv
 %{__make} -C arrow-tools %{__make_options_15} install-tsv2arrow
@@ -230,7 +224,7 @@ popd
 
 %if %{__HAS_PG16}
 pushd ../PG16
-%{__make} -C src         %{__make_options_16} CUDA_PATH=%{__cuda_path} install
+%{__make} -C src         %{__make_options_16} install
 %{__make} -C arrow-tools %{__make_options_16} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_16} install-arrow2csv
 %{__make} -C arrow-tools %{__make_options_16} install-tsv2arrow
@@ -240,7 +234,7 @@ popd
 
 %if %{__HAS_PG17}
 pushd ../PG17
-%{__make} -C src         %{__make_options_17} CUDA_PATH=%{__cuda_path} install
+%{__make} -C src         %{__make_options_17} install
 %{__make} -C arrow-tools %{__make_options_17} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_17} install-arrow2csv
 %{__make} -C arrow-tools %{__make_options_17} install-tsv2arrow
@@ -250,7 +244,7 @@ popd
 
 %if %{__HAS_PG18}
 pushd ../PG18
-%{__make} -C src         %{__make_options_18} CUDA_PATH=%{__cuda_path} install
+%{__make} -C src         %{__make_options_18} install
 %{__make} -C arrow-tools %{__make_options_18} install-pg2arrow
 %{__make} -C arrow-tools %{__make_options_18} install-arrow2csv
 %{__make} -C arrow-tools %{__make_options_18} install-tsv2arrow

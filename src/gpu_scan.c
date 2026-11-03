@@ -901,7 +901,6 @@ PlanGpuScanPathCommon(PlannerInfo *root,
 	pp_info->xpu_task_flags = context->xpu_task_flags;
 	pp_info->extra_bufsz = context->extra_bufsz;
 	pp_info->used_params = context->used_params;
-	pp_info->cuda_stack_size = estimate_cuda_stack_size(context);
 	__build_explain_tlist_junks(root, baserel, context);
 
 	/*
