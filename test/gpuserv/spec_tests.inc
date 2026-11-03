@@ -88,6 +88,14 @@ spec_restart
 for t in s1 s2; do spec_shapes $t; done
 spec_join_shapes s1
 spec_misc_shapes
+if [ "$(spec_log_count 'compiler \(none\)')" -ge 1 ]; then
+	# no slangc on this host (and nothing cached): the specializer cannot be exercised, only the VM fallback
+	SPEC_HAVE_CC=0
+	echo "  -- no slangc on this host: the checks that need a compiled kernel are skipped"
+else
+	SPEC_HAVE_CC=1
+fi
+if [ "$SPEC_HAVE_CC" = 1 ]; then
 n=$(spec_log_count 'specialize: .* kernel [0-9a-f]+ in use')
 [ "$n" -ge 10 ]; check "force: $n specialized kernels were used" $?
 for k in "scan" "agg" "group" "join" "join agg" "join group"; do
@@ -98,15 +106,18 @@ ncomp=$(spec_log_count 'ready: slangc')
 [ "$ncomp" -ge 6 ]; check "force: $ncomp kernels compiled by slangc" $?
 ls "$PGSTROM_GPUSERV_CACHE_DIR"/*.spv >/dev/null 2>&1; check "force: SPIR-V files are in the cache directory" $?
 [ "$(stat -c %a "$PGSTROM_GPUSERV_CACHE_DIR" 2>/dev/null || stat -f %Lp "$PGSTROM_GPUSERV_CACHE_DIR")" = 700 ]; check "force: the cache directory is private (0700)" $?
+fi
 
 # ---- 2. warm cache after a service restart: no compilation, the same results
 echo "  -- warm cache after a restart"
 spec_restart
 for t in s1; do spec_shapes $t; done
 spec_join_shapes s1
+if [ "$SPEC_HAVE_CC" = 1 ]; then
 nw=$(spec_log_count 'ready: disk cache')
 [ "$nw" -ge 6 ]; check "warm: $nw kernels came from the disk cache" $?
 [ "$(spec_log_count 'ready: slangc')" -eq 0 ]; check "warm: nothing was compiled again" $?
+fi
 
 # ---- 3. check mode (the default of this script) on a program the cache has not seen: both kernels, compared
 echo "  -- check: VM and specialized kernel compared on every dispatch"
@@ -117,8 +128,10 @@ spec_restart
 spec_shapes s3
 spec_join_shapes s2
 spec_misc_shapes
+if [ "$SPEC_HAVE_CC" = 1 ]; then
 nc=$(spec_log_count 'specialize: check ok')
 [ "$nc" -ge 20 ]; check "check: $nc dispatches compared equal" $?
+fi
 [ "$(spec_log_count 'CHECK FAILED')" -eq 0 ]; check "check: no difference between the VM and the specialized kernels" $?
 
 # ---- 4. two sessions that need the same new kernel at once: one compilation
@@ -136,7 +149,9 @@ cmp -s "$ROOT/two1.out" "$ROOT/two2.out" && [ -s "$ROOT/two1.out" ] && ! grep -q
 c=$($PSQL -d scantest -c "$CPU $Q2" 2>&1 | tail -1)
 [ "$(tail -1 "$ROOT/two1.out")" = "$c" ]; check "two sessions: the result is the CPU's" $?
 after=$(spec_log_count 'agg kernel [0-9a-f]+ queued')
+if [ "$SPEC_HAVE_CC" = 1 ]; then
 [ $((after - before)) -eq 1 ]; check "two sessions: the kernel was queued once ($((after - before)))" $?
+fi
 # different programs one after the other on one connection
 QS1="select count(*), sum(a + 1) from s1 where b > 10"; QS2="select count(*), sum(a + 2), max(b) from s1 where b > 20"
 out=$($PSQL -d scantest -c "$GPU" -c "$QS1" -c "$QS2" -c "$QS1" 2>&1 | tr '\n' ' ')
@@ -164,7 +179,7 @@ spec_restart
 spec_shapes s1
 if [ "$(id -u)" != 0 ]; then
 	[ "$(spec_log_count 'is not usable')" -ge 1 ]; check "read-only cache: the service reported the directory" $?
-	[ "$(spec_log_count 'specialize: .* in use')" -ge 3 ]; check "read-only cache: kernels were compiled and used all the same" $?
+	[ "$SPEC_HAVE_CC" = 0 ] || { [ "$(spec_log_count 'specialize: .* in use')" -ge 3 ]; check "read-only cache: kernels were compiled and used all the same" $?; }
 	ls "$PGSTROM_GPUSERV_CACHE_DIR"/*.spv >/dev/null 2>&1; [ $? -ne 0 ]; check "read-only cache: nothing was written there" $?
 fi
 chmod 700 "$PGSTROM_GPUSERV_CACHE_DIR"
