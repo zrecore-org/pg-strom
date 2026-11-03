@@ -44,7 +44,6 @@ typedef struct scan_engine
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 } scan_engine;
 
-scan_map_entry *scan_map_window(scan_engine *eng, const char *pathname, int64_t lo, int64_t hi);
 void	describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen);
 
 /* Arrow_Fdw scans (arrow_exec.c) */

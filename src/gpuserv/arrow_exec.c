@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -365,27 +366,34 @@ typedef struct
 	const scan_prog *prog;
 	const arrow_src *as;
 	const arrow_col *cols;			/* per source column */
+	/* scratch of the row being formed (one entry per result column) */
+	uint8_t	   *kind;
+	const unsigned char **ptr;
+	uint32_t   *len;
+	unsigned char (*tmpv)[8];
 } arrow_form;
 
 /*
  * Form (or only measure, if titem is NULL) the result tuple of one row. 'comp' holds the GPU's
- * values of the row: (isnull, lo, hi) per computed column. Returns the tuple's length, -1 on error.
+ * values of the row: (isnull, lo, hi) per computed column. A call with fetch = 1 reads the row's
+ * columns into the scratch arrays of 'af'; with fetch = 0 it formats what the previous call read
+ * (measure, then write). Returns the tuple's length, -1 on error.
  */
 static int
-arrow_form_tuple(const arrow_form *af, uint32_t row, const uint32_t *comp,
+arrow_form_tuple(arrow_form *af, uint32_t row, const uint32_t *comp, int fetch,
 				 kern_tupitem *titem, uint32_t rowid, char *err, size_t errlen)
 {
 	const scan_prog *prog = af->prog;
 	int			nattrs = prog->nattrs;
-	uint8_t		kind[nattrs ? nattrs : 1];
-	const unsigned char *ptr[nattrs ? nattrs : 1];
-	uint32_t	len[nattrs ? nattrs : 1];
-	unsigned char tmpv[nattrs ? nattrs : 1][8];
+	uint8_t	   *kind = af->kind;
+	const unsigned char **ptr = af->ptr;
+	uint32_t   *len = af->len;
+	unsigned char (*tmpv)[8] = af->tmpv;
 	uint32_t	t_hoff;
 	uint16_t	infomask = 0;
 	int			hasnull = 0;
 
-	for (int j = 0; j < nattrs; j++)
+	for (int j = 0; fetch && j < nattrs; j++)
 	{
 		const scan_proj_attr *pa = &prog->attrs[j];
 		const kern_colmeta *cm = &af->kds_dst_head->colmeta[j];
@@ -457,12 +465,13 @@ arrow_form_tuple(const arrow_form *af, uint32_t row, const uint32_t *comp,
 			snprintf(err, errlen, "column %d: a projection of kind %d on an Arrow table", j + 1, pa->kind);
 			return -1;
 		}
+	}
+	for (int j = 0; j < nattrs; j++)
 		if (kind[j] == FETCH_NULL)
 		{
 			hasnull = 1;
 			infomask |= 1;				/* HEAP_HASNULL */
 		}
-	}
 	t_hoff = offsetof(kern_tupitem, t_bits);
 	if (hasnull)
 		t_hoff += (nattrs + 7) / 8;
@@ -547,59 +556,40 @@ arrow_form_tuple(const arrow_form *af, uint32_t row, const uint32_t *comp,
 }
 
 /* ---------------------------------------------------------------- */
-/* the data of a task: a mapped window of the file, or a copy of the pages */
+/*
+ * The data of a task as the CPU sees it: the task's own bytes (a Parquet row-group the backend
+ * decoded), a read-only mapping of the file range the i/o vector covers (the usual case: pass-through
+ * columns are read from the page cache, nothing is copied), or, if the mapping fails, the pages read
+ * into a buffer laid out as the store. The GPU gets its own packed copy of just the columns the
+ * kernel reads (arrow_pack_gpu).
+ */
 typedef struct
 {
-	gpu_vk_buffer	buf;
-	int				own;
+	void		   *map;
+	size_t			maplen;
+	unsigned char  *copy;
 	arrow_src		as;
 } arrow_data;
 
 static int
-arrow_data_open(scan_engine *eng, arrow_data *ad, const kern_data_store *kds, const char *pathname,
+arrow_data_open(arrow_data *ad, const kern_data_store *kds, const char *pathname,
 				const io_vector *iovec, char *err, size_t errlen)
 {
-	gpu_vk_ctx *vk = eng->vk;
 	int64_t		head = (int64_t) KDS_HEAD_LENGTH(kds) + kds->arrow_virtual_usage;
+	int64_t		lo = INT64_MAX, hi = 0;
+	int			fd;
+	struct stat	st;
 	size_t		len;
 
 	memset(ad, 0, sizeof(*ad));
 	ad->as.kds = kds;
 	ad->as.head = head;
 	ad->as.iovec = iovec;
-	if (!iovec && !pathname)
-	{
-		/* the buffers are in the task (a Parquet row-group the backend decoded): copy the whole store */
-		len = (size_t) kds->length;
-		if (len < 16)
-			len = 16;
-		if ((uint64_t) len > vk->limits.maxStorageBufferRange)
-		{
-			snprintf(err, errlen, "the row group (%zu bytes) is larger than the device's storage buffer limit (%llu)",
-					 len, (unsigned long long) vk->limits.maxStorageBufferRange);
-			return -1;
-		}
-		if (gpu_vk_buffer_create(vk, &ad->buf, len, 0) != 0)
-		{
-			snprintf(err, errlen, "cannot allocate %zu bytes of device memory: %s", len, vk->err);
-			return -1;
-		}
-		ad->own = 1;
-		memcpy(ad->buf.map, kds, kds->length);
-		ad->as.head = 0;
-		ad->as.base = (const unsigned char *) ad->buf.map;
-		return 0;
-	}
 	if (!iovec || iovec->nr_chunks == 0)
 	{
-		/* nothing to load: every column the task needs is virtual or has no buffer */
-		if (gpu_vk_buffer_create(vk, &ad->buf, 16, 0) != 0)
-		{
-			snprintf(err, errlen, "cannot allocate a buffer: %s", vk->err);
-			return -1;
-		}
-		ad->own = 1;
-		ad->as.base = (const unsigned char *) ad->buf.map;
+		/* the buffers are in the task (a Parquet row-group), or no column has a buffer */
+		ad->as.head = (!iovec && !pathname) ? 0 : head;
+		ad->as.base = (const unsigned char *) kds;
 		return 0;
 	}
 	if (!pathname)
@@ -607,113 +597,106 @@ arrow_data_open(scan_engine *eng, arrow_data *ad, const kern_data_store *kds, co
 		snprintf(err, errlen, "no file to read the Arrow columns from");
 		return -1;
 	}
-	/* zero copy: all chunks inside one window of the file */
-	if (!eng->no_map)
+	fd = open(pathname, O_RDONLY);
+	if (fd < 0 || fstat(fd, &st) != 0)
 	{
-		int64_t		lo = INT64_MAX, hi = 0;
-		scan_map_entry *me;
+		snprintf(err, errlen, "cannot open '%s': %s", pathname, strerror(errno));
+		if (fd >= 0)
+			close(fd);
+		return -1;
+	}
+	for (unsigned int c = 0; c < iovec->nr_chunks; c++)
+	{
+		const strom_io_chunk *ioc = &iovec->ioc[c];
+		int64_t		a = (int64_t) ioc->fchunk_id * PAGE_SIZE;
+		int64_t		b = a + (int64_t) ioc->nr_pages * PAGE_SIZE;
 
-		for (unsigned int c = 0; c < iovec->nr_chunks; c++)
-		{
-			const strom_io_chunk *ioc = &iovec->ioc[c];
-			int64_t		a = (int64_t) ioc->fchunk_id * PAGE_SIZE;
-			int64_t		b = a + (int64_t) ioc->nr_pages * PAGE_SIZE;
+		if (a < lo)
+			lo = a;
+		if (b > hi)
+			hi = b;
+	}
+	{
+		int64_t		pg = sysconf(_SC_PAGESIZE);
+		int64_t		lo_al = lo & ~(pg - 1);
 
-			if (a < lo)
-				lo = a;
-			if (b > hi)
-				hi = b;
-		}
-		me = scan_map_window(eng, pathname, lo, hi);
-		if (me)
+		if (lo_al < (int64_t) st.st_size && !getenv("PGSTROM_GPUSERV_NO_MAP"))
 		{
-			ad->buf = me->buf;
-			ad->own = 0;
-			ad->as.mapped = 1;
-			ad->as.win_start = me->win_start;
-			ad->as.base = (const unsigned char *) me->map;
-			return 0;
+			void	   *map = mmap(NULL, (size_t)(hi - lo_al), PROT_READ, MAP_PRIVATE, fd, (off_t) lo_al);
+
+			if (map != MAP_FAILED)
+			{
+				ad->map = map;
+				ad->maplen = (size_t)(hi - lo_al);
+				ad->as.mapped = 1;
+				ad->as.win_start = lo_al;
+				ad->as.base = (const unsigned char *) map;
+				close(fd);
+				return 0;
+			}
 		}
 	}
-	/* copy: a buffer laid out as the store behind its header */
+	/* no mapping: read the pages into a buffer laid out as the store behind its header */
 	if (kds->length < (uint64_t) head)
 	{
 		snprintf(err, errlen, "corrupted Arrow data store");
+		close(fd);
 		return -1;
 	}
 	len = (size_t)(kds->length - head);
-	if (len < 16)
-		len = 16;
-	if ((uint64_t) len > vk->limits.maxStorageBufferRange)
+	ad->copy = calloc(1, len ? len : 1);
+	if (!ad->copy)
 	{
-		snprintf(err, errlen, "the record batch (%zu bytes) is larger than the device's storage buffer limit (%llu)",
-				 len, (unsigned long long) vk->limits.maxStorageBufferRange);
+		snprintf(err, errlen, "out of memory");
+		close(fd);
 		return -1;
 	}
-	if (gpu_vk_buffer_create(vk, &ad->buf, len, 0) != 0)
+	ad->as.base = ad->copy;
+	for (unsigned int i = 0; i < iovec->nr_chunks; i++)
 	{
-		snprintf(err, errlen, "cannot allocate %zu bytes of device memory: %s", len, vk->err);
-		return -1;
-	}
-	ad->own = 1;
-	ad->as.base = (const unsigned char *) ad->buf.map;
-	{
-		int			fd = open(pathname, O_RDONLY);
-		struct stat	st;
+		const strom_io_chunk *ioc = &iovec->ioc[i];
+		size_t		remained = (size_t) ioc->nr_pages * PAGE_SIZE;
+		off_t		file_pos = (off_t) ioc->fchunk_id * PAGE_SIZE;
+		unsigned char *dest = ad->copy + ioc->m_offset;
 
-		if (fd < 0 || fstat(fd, &st) != 0)
+		if (ioc->m_offset + remained > len)
 		{
-			snprintf(err, errlen, "cannot open '%s': %s", pathname, strerror(errno));
-			if (fd >= 0)
-				close(fd);
+			snprintf(err, errlen, "iovec chunk %u exceeds the buffer", i);
+			close(fd);
 			return -1;
 		}
-		memset(ad->buf.map, 0, len);
-		for (unsigned int i = 0; i < iovec->nr_chunks; i++)
+		if (file_pos >= st.st_size)
+			continue;
+		if (file_pos + (off_t) remained > st.st_size)
+			remained = st.st_size - file_pos;
+		while (remained > 0)
 		{
-			const strom_io_chunk *ioc = &iovec->ioc[i];
-			size_t		remained = (size_t) ioc->nr_pages * PAGE_SIZE;
-			off_t		file_pos = (off_t) ioc->fchunk_id * PAGE_SIZE;
-			unsigned char *dest = (unsigned char *) ad->buf.map + ioc->m_offset;
+			ssize_t		n = pread(fd, dest, remained, file_pos);
 
-			if (ioc->m_offset + remained > len)
+			if (n < 0 && errno == EINTR)
+				continue;
+			if (n <= 0)
 			{
-				snprintf(err, errlen, "iovec chunk %u exceeds the buffer", i);
+				snprintf(err, errlen, "failed to read '%s': %s", pathname,
+						 n < 0 ? strerror(errno) : "unexpected end of file");
 				close(fd);
 				return -1;
 			}
-			if (file_pos >= st.st_size)
-				continue;
-			if (file_pos + (off_t) remained > st.st_size)
-				remained = st.st_size - file_pos;
-			while (remained > 0)
-			{
-				ssize_t		n = pread(fd, dest, remained, file_pos);
-
-				if (n < 0 && errno == EINTR)
-					continue;
-				if (n <= 0)
-				{
-					snprintf(err, errlen, "failed to read '%s': %s", pathname,
-							 n < 0 ? strerror(errno) : "unexpected end of file");
-					close(fd);
-					return -1;
-				}
-				dest += n;
-				file_pos += n;
-				remained -= n;
-			}
+			dest += n;
+			file_pos += n;
+			remained -= n;
 		}
-		close(fd);
 	}
+	close(fd);
 	return 0;
 }
 
 static void
-arrow_data_close(scan_engine *eng, arrow_data *ad)
+arrow_data_close(arrow_data *ad)
 {
-	if (ad->own)
-		gpu_vk_buffer_destroy(eng->vk, &ad->buf);
+	if (ad->map)
+		munmap(ad->map, ad->maplen);
+	free(ad->copy);
 	memset(ad, 0, sizeof(*ad));
 }
 
@@ -852,6 +835,72 @@ badtype:
 	return 0;
 }
 
+/*
+ * The GPU's copy: the validity bitmaps and values of the columns the kernel reads, packed one after
+ * the other (8-byte aligned) in one buffer; the table gets the offsets in it. Columns that are only
+ * passed through are not copied (the CPU reads them from the file).
+ */
+static int
+arrow_pack_gpu(gpu_vk_ctx *vk, const arrow_src *as, const scan_prog *prog, const arrow_col *cols,
+			   uint32_t *tab, gpu_vk_buffer *bg, char *err, size_t errlen)
+{
+	uint32_t	coloff = prog->words[0];
+	uint32_t	ncols = prog->words[3];
+	size_t		total = 16;
+	unsigned char *dst;
+
+	for (int pass = 0; pass < 2; pass++)
+	{
+		size_t		pos = 0;
+
+		for (uint32_t c = 0; c < ncols; c++)
+		{
+			uint32_t	slot = (prog->words[coloff + c] >> 16) & 0xff;
+			uint32_t   *t = tab + 8 * c;
+			const arrow_col *ac = &cols[c];
+
+			if (slot == 0xff || t[4] != 0)
+				continue;
+			if (t[0] != 0xffffffffU)
+			{
+				if (pass)
+				{
+					memcpy(dst + pos, as->base + ac->nm_off, ac->nm_len);
+					t[0] = (uint32_t) pos;
+				}
+				pos += (ac->nm_len + 7) & ~(size_t) 7;
+			}
+			if (t[7] > 0)
+			{
+				if (pass)
+				{
+					memcpy(dst + pos, as->base + ac->v_off, ac->v_len);
+					t[2] = (uint32_t) pos;
+				}
+				pos += (ac->v_len + 7) & ~(size_t) 7;
+			}
+		}
+		if (pass == 0)
+		{
+			total = pos > 16 ? pos : 16;
+			if (total > vk->limits.maxStorageBufferRange || total >= 0xffffffffU ||
+				(vk->max_buffer_size != 0 && total > vk->max_buffer_size))
+			{
+				snprintf(err, errlen, "the columns of the record batch (%zu bytes) exceed the device's storage buffer limit (%llu)",
+						 total, (unsigned long long) vk->limits.maxStorageBufferRange);
+				return -1;
+			}
+			if (gpu_vk_buffer_create(vk, bg, total, 0) != 0)
+			{
+				snprintf(err, errlen, "cannot allocate %zu bytes of device memory: %s", total, vk->err);
+				return -1;
+			}
+			dst = (unsigned char *) bg->map;
+		}
+	}
+	return 0;
+}
+
 XpuCommand *
 scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 					 const XpuCommand *task, size_t *p_len, char *err, size_t errlen)
@@ -865,8 +914,8 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	arrow_data	ad;
 	arrow_col  *cols = NULL;
 	uint32_t   *tab = NULL;
-	gpu_vk_buffer bout, bprog, btab, bdummy;
-	int			have_data = 0, have_out = 0, have_prog = 0, have_tab = 0, have_dummy = 0;
+	gpu_vk_buffer bout, bprog, btab, bdummy, bg;
+	int			have_data = 0, have_g = 0, have_out = 0, have_prog = 0, have_tab = 0, have_dummy = 0;
 	uint32_t	nrows, ncomp, ncols, pass_rows, nmatch = 0;
 	int			variant;
 	XpuCommand *resp = NULL;
@@ -930,7 +979,7 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	}
 
 	/* 1. the data and the column table */
-	if (arrow_data_open(eng, &ad, kds_src, pathname, iovec, err, errlen) != 0)
+	if (arrow_data_open(&ad, kds_src, pathname, iovec, err, errlen) != 0)
 		return NULL;
 	have_data = 1;
 	cols = calloc(kds_src->ncols ? kds_src->ncols : 1, sizeof(arrow_col));
@@ -965,6 +1014,9 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 			goto error;
 		}
 	}
+	if (arrow_pack_gpu(vk, &ad.as, prog, cols, tab, &bg, err, errlen) != 0)
+		goto error;
+	have_g = 1;
 	if (gpu_vk_buffer_create(vk, &btab, 4 * 8 * (size_t)(ncols ? ncols : 1), 0) != 0 ||
 		(have_tab = 1, gpu_vk_buffer_create(vk, &bdummy, 16, 0) != 0))
 	{
@@ -1001,6 +1053,15 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	af.prog = prog;
 	af.as = &ad.as;
 	af.cols = cols;
+	af.kind = malloc(prog->nattrs ? prog->nattrs : 1);
+	af.ptr = malloc(sizeof(void *) * (prog->nattrs ? prog->nattrs : 1));
+	af.len = malloc(sizeof(uint32_t) * (prog->nattrs ? prog->nattrs : 1));
+	af.tmpv = malloc(8 * (size_t)(prog->nattrs ? prog->nattrs : 1));
+	if (!af.kind || !af.ptr || !af.len || !af.tmpv)
+	{
+		snprintf(err, errlen, "out of memory");
+		goto error;
+	}
 	head_sz = KDS_HEAD_LENGTH(kds_dst_head);
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
 	idx_cap = 1024;
@@ -1025,7 +1086,7 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		vals = out + 4 + n;
 		memset(out, 0, 16);
 		{
-			gpu_vk_buffer *bufs[5] = {&ad.buf, &bout, &bprog, &btab, &bdummy};
+			gpu_vk_buffer *bufs[5] = {&bg, &bout, &bprog, &btab, &bdummy};
 
 			for (uint32_t g0 = 0; g0 * ARROW_WG < n; g0 += ARROW_WG_MAX)
 			{
@@ -1078,7 +1139,7 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 			}
 			/* measure, then make room (the tuple area starts after the row index, whose size is not known
 			 * yet: tuples are kept in their own buffer region and moved when the chunk is assembled) */
-			sz = arrow_form_tuple(&af, base + r, vals + (size_t) r * 3 * ncomp, NULL, nmatch, err, errlen);
+			sz = arrow_form_tuple(&af, base + r, vals + (size_t) r * 3 * ncomp, 1, NULL, nmatch, err, errlen);
 			if (sz < 0)
 				goto error;
 			if (resp_sz + head_sz + usage + MAXALIGN(sz) + 16 > cap)
@@ -1095,7 +1156,7 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 				cap = ncap;
 			}
 			dest = (char *) resp + resp_sz + head_sz + usage;
-			if (arrow_form_tuple(&af, base + r, vals + (size_t) r * 3 * ncomp,
+			if (arrow_form_tuple(&af, base + r, vals + (size_t) r * 3 * ncomp, 0,
 								 (kern_tupitem *) dest, nmatch, err, errlen) < 0)
 				goto error;
 			rowindex[nmatch] = usage;
@@ -1153,7 +1214,8 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	}
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: arrow task: %u rows, %s, setup %.1f ms, gpu %.1f ms, results %.1f ms (%u rows)\n",
-				nrows, ad.as.mapped ? "mapped" : "copied", t1 - t0, tg, tf, nmatch);
+				nrows, ad.as.mapped ? "mapped" : "read", t1 - t0, tg, tf, nmatch);
+	free(af.kind); free(af.ptr); free(af.len); free(af.tmpv);
 	free(rowindex);
 	free(cols);
 	free(tab);
@@ -1161,10 +1223,12 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	gpu_vk_buffer_destroy(vk, &bprog);
 	gpu_vk_buffer_destroy(vk, &btab);
 	gpu_vk_buffer_destroy(vk, &bdummy);
-	arrow_data_close(eng, &ad);
+	gpu_vk_buffer_destroy(vk, &bg);
+	arrow_data_close(&ad);
 	return resp;
 
 error:
+	free(af.kind); free(af.ptr); free(af.len); free(af.tmpv);
 	free(rowindex);
 	free(resp);
 	free(cols);
@@ -1177,8 +1241,10 @@ error:
 		gpu_vk_buffer_destroy(vk, &btab);
 	if (have_dummy)
 		gpu_vk_buffer_destroy(vk, &bdummy);
+	if (have_g)
+		gpu_vk_buffer_destroy(vk, &bg);
 	if (have_data)
-		arrow_data_close(eng, &ad);
+		arrow_data_close(&ad);
 	if (err[0] == '\0')
 		snprintf(err, errlen, "Arrow scan failed");
 	return NULL;

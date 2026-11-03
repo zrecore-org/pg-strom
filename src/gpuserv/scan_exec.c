@@ -420,8 +420,8 @@ scan_engine_fini(scan_engine *eng)
 }
 
 /* a mapped and imported window of the file that covers [lo, hi) */
-scan_map_entry *
-scan_map_window(scan_engine *eng, const char *pathname, int64_t lo, int64_t hi)
+static scan_map_entry *
+map_window(scan_engine *eng, const char *pathname, int64_t lo, int64_t hi)
 {
 	gpu_vk_ctx *vk = eng->vk;
 	struct stat	st;
@@ -547,7 +547,7 @@ page_set_map(scan_engine *eng, page_set *ps, const kern_data_store *kds_src,
 			goto notpossible;			/* a page nobody provides: the copy path zero-fills it */
 	if (lo > hi)
 		goto notpossible;
-	me = scan_map_window(eng, pathname, lo, hi);
+	me = map_window(eng, pathname, lo, hi);
 	if (!me)
 		goto notpossible;
 	ps->bufF = me->buf;
