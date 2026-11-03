@@ -2540,6 +2540,27 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
+	/*
+	 * Limits of the Vulkan service (scan_caps.h): a program it cannot translate fails the query.
+	 * The partial result has at most SCAN_AGG_MAX columns (keys and partial aggregates), and the
+	 * kernel variables (referenced columns of the outer side and of every inner relation, plus the
+	 * computed arguments and keys) must fit its registers.
+	 */
+	{
+		int			nslots = bms_num_members(pp_input->outer_refs) +
+							 list_length(con.target_partial->exprs);
+
+		foreach (lc, inner_target_list)
+			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
+		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
+			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
+			nslots > SCAN_VM_SLOT_BUDGET)
+		{
+			elog(DEBUG2, "GpuPreAgg: too many columns for the Vulkan service (%d output columns, %d kernel variables)",
+				 list_length(con.target_partial->exprs), nslots);
+			return;
+		}
+	}
 	/* build GpuPreAgg path */
 	cpath = __buildXpuPreAggCustomPath(&con);
 	elog(DEBUG2, "GpuPreAgg: path built, startup %.2f total %.2f rows %.0f",

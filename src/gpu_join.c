@@ -403,6 +403,29 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		Path   *i_path = lfirst(lc);
 		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
 	}
+	/*
+	 * The service keeps every referenced column of the outer side and of the inner relations, and every
+	 * computed value, in a VM register; more kernel variables than SCAN_VM_SLOT_BUDGET would make it refuse
+	 * the program (and fail the query).
+	 */
+	{
+		int		nslots = bms_num_members(pp_prev->outer_refs);
+
+		foreach (lc, inner_target_list)
+			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
+		foreach (lc, root->processed_tlist)
+		{
+			TargetEntry *tle = lfirst(lc);
+
+			if (!IsA(tle->expr, Var) && !IsA(tle->expr, Const) && !IsA(tle->expr, Param))
+				nslots++;
+		}
+		if (nslots > SCAN_VM_SLOT_BUDGET)
+		{
+			elog(DEBUG2, "GpuJoin: %d kernel variables exceed the Vulkan service's registers", nslots);
+			return NULL;
+		}
+	}
 
 	/*
 	 * All the join-clauses must be executable on GPU device.

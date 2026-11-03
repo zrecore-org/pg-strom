@@ -485,12 +485,15 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			return -1;
 		if (fc.cls == -SOP_ARITH)
 		{
-			/* unary minus: 0 - x */
+			/*
+			 * unary minus: 0 - x. The operand may be a computed value in register 'mark' (not a slot):
+			 * the zero must not overwrite it, so it goes above; the result replaces the operand.
+			 */
 			int		zero;
 
 			*next = mark;
-			zero = new_reg(b, next);
 			dst = new_reg(b, next);
+			zero = (ra >= mark) ? new_reg(b, next) : dst;
 			if (zero < 0 || dst < 0 ||
 				emit(b, SOP_CONST, zero, 0, 0, 0, 0) < 0 ||
 				emit(b, SOP_ARITH, dst, zero, ra, SOP_ARITH_MI | (fc.width << 8), kexp->opcode) < 0)

@@ -10,6 +10,9 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/scan_caps.h"
+
+static int gpuscan_slots_upperbound(RelOptInfo *baserel, const Bitmapset *outer_refs);
 
 /* static variables */
 static set_rel_pathlist_hook_type set_rel_pathlist_next = NULL;
@@ -493,6 +496,18 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 			pull_varattnos((Node *)rinfo->clause, baserel->relid, &outer_refs);
 		}
 	}
+	/*
+	 * The service keeps every referenced column in a VM register (kernel variable). A relation that
+	 * needs more than SCAN_VM_SLOT_BUDGET of them (wide select list) cannot run device expressions:
+	 * the quals stay on the CPU, as the service would refuse the program.
+	 */
+	if (dev_quals != NIL &&
+		gpuscan_slots_upperbound(baserel, outer_refs) > SCAN_VM_SLOT_BUDGET)
+	{
+		host_quals = list_concat(host_quals, dev_quals);
+		dev_quals = NIL;
+		dev_costs = NIL;
+	}
 	sort_device_qualifiers(dev_quals, dev_costs);
 
 	/*
@@ -682,7 +697,29 @@ try_fetch_xpuscan_planinfo(const Path *__path)
 
 /*
  * gpuscan_build_projection - make custom_scan_tlist
+ *
+ * gpuscan_computed_ok: false if the plan has too many kernel variables for the Vulkan service to keep
+ * a computed value in a register (SCAN_VM_SLOT_BUDGET); then only plain Vars are projected on the device.
  */
+static bool gpuscan_computed_ok = true;
+
+/* kernel variables (slots) a GpuScan of the relation needs at most: every referenced column and every computed value */
+static int
+gpuscan_slots_upperbound(RelOptInfo *baserel, const Bitmapset *outer_refs)
+{
+	int			nslots = bms_num_members(outer_refs);
+	ListCell   *lc;
+
+	foreach (lc, baserel->reltarget->exprs)
+	{
+		Node   *node = lfirst(lc);
+
+		if (!IsA(node, Var) && !IsA(node, Const) && !IsA(node, Param))
+			nslots++;
+	}
+	return nslots;
+}
+
 static List *
 __gpuscan_build_projection_expr(List *tlist_dev,
 								Node *node,
@@ -696,11 +733,12 @@ __gpuscan_build_projection_expr(List *tlist_dev,
 		return tlist_dev;
 
 	if (IsA(node, Var) ||
-		pgstrom_xpu_expression((Expr *)node,
-							   xpu_task_flags,
-							   scan_relid,
-							   NIL,
-							   NULL))
+		(gpuscan_computed_ok &&
+		 pgstrom_xpu_expression((Expr *)node,
+								xpu_task_flags,
+								scan_relid,
+								NIL,
+								NULL)))
 	{
 		AttrNumber	resno = list_length(tlist_dev) + 1;
 
@@ -733,6 +771,7 @@ gpuscan_build_projection(RelOptInfo *baserel,
 	List	   *vars_list;
 	ListCell   *lc;
 
+	gpuscan_computed_ok = (gpuscan_slots_upperbound(baserel, pp_info->outer_refs) <= SCAN_VM_SLOT_BUDGET);
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)
