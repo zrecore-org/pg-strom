@@ -479,6 +479,15 @@ scan_engine_fini(scan_engine *eng)
 				gpu_vk_pipeline_destroy(eng->vk, &eng->gagg_pipe[i][j]);
 			if (i < 2)
 				eng->gagg_pipe_ready[i][j] = 0;
+			if (i < 2 && eng->jagg_pipe_ready[i][j])
+				gpu_vk_pipeline_destroy(eng->vk, &eng->jagg_pipe[i][j]);
+			if (i < 2 && eng->jgagg_pipe_ready[i][j])
+				gpu_vk_pipeline_destroy(eng->vk, &eng->jgagg_pipe[i][j]);
+			if (i < 2)
+			{
+				eng->jagg_pipe_ready[i][j] = 0;
+				eng->jgagg_pipe_ready[i][j] = 0;
+			}
 		}
 	}
 }
@@ -1113,6 +1122,55 @@ ensure_agg_pipeline(scan_engine *eng, int variant, int avariant, char *err, size
 	return 0;
 }
 
+/*
+ * Add the per-workgroup records of an aggregation kernel without GROUP BY (agg.slang, jagg.slang) to
+ * the session's aggregates: 6 words per aggregate and workgroup, from word 4 of the output.
+ */
+static void
+agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total)
+{
+	uint32_t	nagg = prog->nagg;
+
+	for (uint32_t pg = 0; pg < ngroups_total; pg++)
+	{
+		st->nitems_in += out[4 + (size_t) pg * nagg * 6 + 1];
+		for (uint32_t k = 0; k < nagg; k++)
+		{
+			const uint32_t *rec = &out[4 + ((size_t) pg * nagg + k) * 6];
+			int64_t		a = (int64_t)((uint64_t) rec[2] | ((uint64_t) rec[3] << 32));
+			int64_t		b = (int64_t)((uint64_t) rec[4] | ((uint64_t) rec[5] << 32));
+
+			switch (prog->agg_action[k])
+			{
+				case KAGG_ACTION__NROWS_ANY:
+				case KAGG_ACTION__NROWS_COND:
+					st->n[k] += rec[0];
+					break;
+				case KAGG_ACTION__PSUM_INT:
+				case KAGG_ACTION__PSUM_INT64:
+				case KAGG_ACTION__PAVG_INT:
+				case KAGG_ACTION__PAVG_INT64:
+					st->n[k] += rec[0];
+					st->sum[k] += (__int128) b * 4294967296LL + (__int128) a;
+					break;
+				case KAGG_ACTION__PMIN_INT32:
+				case KAGG_ACTION__PMIN_INT64:
+					if (rec[0] && (!st->n[k] || a < st->val[k]))
+						st->val[k] = a;
+					if (rec[0])
+						st->n[k] = 1;
+					break;
+				default:		/* PMAX_* */
+					if (rec[0] && (!st->n[k] || a > st->val[k]))
+						st->val[k] = a;
+					if (rec[0])
+						st->n[k] = 1;
+					break;
+			}
+		}
+	}
+}
+
 int
 scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 				   agg_state *st, const XpuCommand *task, char *err, size_t errlen)
@@ -1278,44 +1336,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 		}
 	}
 	/* add the per-page records to the session's aggregates */
-	for (uint32_t pg = 0; pg < ngroups_total; pg++)
-	{
-		st->nitems_in += out[4 + (size_t) pg * nagg * 6 + 1];
-		for (uint32_t k = 0; k < nagg; k++)
-		{
-			const uint32_t *rec = &out[4 + ((size_t) pg * nagg + k) * 6];
-			int64_t		a = (int64_t)((uint64_t) rec[2] | ((uint64_t) rec[3] << 32));
-			int64_t		b = (int64_t)((uint64_t) rec[4] | ((uint64_t) rec[5] << 32));
-
-			switch (prog->agg_action[k])
-			{
-				case KAGG_ACTION__NROWS_ANY:
-				case KAGG_ACTION__NROWS_COND:
-					st->n[k] += rec[0];
-					break;
-				case KAGG_ACTION__PSUM_INT:
-				case KAGG_ACTION__PSUM_INT64:
-				case KAGG_ACTION__PAVG_INT:
-				case KAGG_ACTION__PAVG_INT64:
-					st->n[k] += rec[0];
-					st->sum[k] += (__int128) b * 4294967296LL + (__int128) a;
-					break;
-				case KAGG_ACTION__PMIN_INT32:
-				case KAGG_ACTION__PMIN_INT64:
-					if (rec[0] && (!st->n[k] || a < st->val[k]))
-						st->val[k] = a;
-					if (rec[0])
-						st->n[k] = 1;
-					break;
-				default:		/* PMAX_* */
-					if (rec[0] && (!st->n[k] || a > st->val[k]))
-						st->val[k] = a;
-					if (rec[0])
-						st->n[k] = 1;
-					break;
-			}
-		}
-	}
+	agg_merge_workgroups(prog, st, out, ngroups_total);
 	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: agg task: %u pages, pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms, merge %.1f ms\n",
@@ -1731,6 +1752,52 @@ ensure_group_pipeline(scan_engine *eng, int variant, int avariant, char *err, si
 	return 0;
 }
 
+/*
+ * Merge the workgroups' group tables of a GROUP BY kernel (gagg.slang, jgagg.slang) into the session's
+ * groups. Each block is { hits, cap records of rec_words }. -1 on out of memory.
+ */
+static int
+group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
+				   uint32_t cap, uint32_t rec_words, uint32_t blk_words)
+{
+	uint32_t	nagg = prog->nagg;
+	uint32_t	agg_col[SCAN_AGG_MAX];
+
+	for (uint32_t a = 0; a < nagg; a++)
+	{
+		uint32_t	col;
+
+		for (col = 0; col < (uint32_t) prog->nattrs; col++)
+			if (prog->agg_of_col[col] == (int8_t) a)
+				break;
+		agg_col[a] = col;
+	}
+	for (uint32_t wg = 0; wg < ngroups_total; wg++)
+	{
+		const uint32_t *blk = &out[4 + (size_t) wg * blk_words];
+
+		st->nitems_in += blk[0];
+		for (uint32_t s = 0; s < cap; s++)
+		{
+			const uint32_t *rec = blk + 1 + (size_t) s * rec_words;
+			int64_t		key[SCAN_GROUP_KEYS];
+			group_entry *e;
+
+			if (!rec[0])
+				continue;
+			for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+				key[i] = (int64_t)((uint64_t) rec[2 + 2 * i] | ((uint64_t) rec[3 + 2 * i] << 32));
+			e = group_lookup(&st->groups, key, rec[1]);
+			if (!e)
+				return -1;
+			for (uint32_t a = 0; a < nagg; a++)
+				acc_merge_group_record(&e->acc[a], prog->agg_action[agg_col[a]],
+									   rec + 2 + 2 * SCAN_GROUP_KEYS + 6 * a);
+		}
+	}
+	return 0;
+}
+
 int
 scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 					 agg_state *st, const XpuCommand *task, char *err, size_t errlen)
@@ -1749,7 +1816,6 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	const uint32_t *out;
 	int			rv = -1;
 	const uint32_t *w;
-	uint32_t	agg_col[SCAN_AGG_MAX];
 	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
 
@@ -1871,40 +1937,10 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	}
 	t2 = now_ms();
 	/* merge the workgroups' tables */
-	for (uint32_t a = 0; a < nagg; a++)
+	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
 	{
-		uint32_t	col;
-
-		for (col = 0; col < (uint32_t) prog->nattrs; col++)
-			if (prog->agg_of_col[col] == (int8_t) a)
-				break;
-		agg_col[a] = col;
-	}
-	for (uint32_t wg = 0; wg < ngroups_total; wg++)
-	{
-		const uint32_t *blk = &out[4 + (size_t) wg * blk_words];
-
-		st->nitems_in += blk[0];
-		for (uint32_t s = 0; s < cap; s++)
-		{
-			const uint32_t *rec = blk + 1 + (size_t) s * rec_words;
-			int64_t		key[SCAN_GROUP_KEYS];
-			group_entry *e;
-
-			if (!rec[0])
-				continue;
-			for (int i = 0; i < SCAN_GROUP_KEYS; i++)
-				key[i] = (int64_t)((uint64_t) rec[2 + 2 * i] | ((uint64_t) rec[3 + 2 * i] << 32));
-			e = group_lookup(&st->groups, key, rec[1]);
-			if (!e)
-			{
-				snprintf(err, errlen, "out of memory");
-				goto done;
-			}
-			for (uint32_t a = 0; a < nagg; a++)
-				acc_merge_group_record(&e->acc[a], prog->agg_action[agg_col[a]],
-									   rec + 2 + 2 * SCAN_GROUP_KEYS + 6 * a);
-		}
+		snprintf(err, errlen, "out of memory");
+		goto done;
 	}
 	t3 = now_ms();
 	/* the rows that found no slot: on the CPU */
@@ -2658,4 +2694,279 @@ error:
 	if (err[0] == '\0')
 		snprintf(err, errlen, "join failed");
 	return NULL;
+}
+
+/* ----------------------------------------------------------------
+ * GpuPreAgg on top of GpuJoin: the join kernel aggregates the joined rows itself (jagg.slang without
+ * GROUP BY, jgagg.slang with it), so they never leave the device; the results merge into the
+ * session's agg_state exactly like those of a scan.
+ * ----------------------------------------------------------------
+ */
+#define JAGG_PAGES_PER_WG	8U		/* outer pages one such workgroup runs over */
+
+static int
+ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int avariant, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	static const struct { const unsigned char *spv; const unsigned int *len; } jtab[2][3] = {
+		{{kspv_jagg16_4, &kspv_jagg16_4_len}, {kspv_jagg16_8, &kspv_jagg16_8_len},
+		 {kspv_jagg16_12, &kspv_jagg16_12_len}},
+		{{kspv_jagg32_4, &kspv_jagg32_4_len}, {kspv_jagg32_8, &kspv_jagg32_8_len},
+		 {kspv_jagg32_12, &kspv_jagg32_12_len}},
+	};
+	static const struct { const unsigned char *spv; const unsigned int *len; } gtab[2][3] = {
+		{{kspv_jgagg16_4, &kspv_jgagg16_4_len}, {kspv_jgagg16_8, &kspv_jgagg16_8_len},
+		 {kspv_jgagg16_12, &kspv_jgagg16_12_len}},
+		{{kspv_jgagg32_4, &kspv_jgagg32_4_len}, {kspv_jgagg32_8, &kspv_jgagg32_8_len},
+		 {kspv_jgagg32_12, &kspv_jgagg32_12_len}},
+	};
+	int		   *ready = (grouped ? &eng->jgagg_pipe_ready[variant][avariant]
+							  : &eng->jagg_pipe_ready[variant][avariant]);
+	gpu_vk_pipeline *pipe = (grouped ? &eng->jgagg_pipe[variant][avariant]
+									 : &eng->jagg_pipe[variant][avariant]);
+
+	if (!*ready)
+	{
+		const unsigned char *spv = (grouped ? gtab[variant][avariant].spv : jtab[variant][avariant].spv);
+		unsigned int len = (grouped ? *gtab[variant][avariant].len : *jtab[variant][avariant].len);
+
+		if (gpu_vk_pipeline_create(vk, pipe, spv, len, 6, 20) != 0)
+		{
+			snprintf(err, errlen, "cannot create the join aggregation pipeline: %s", vk->err);
+			return -1;
+		}
+		*ready = 1;
+	}
+	return 0;
+}
+
+int
+scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+					   join_inner *ji, agg_state *st, const XpuCommand *task, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const kern_session_info *session = &session_cmd->u.session;
+	const kern_data_store *kds_src;
+	const char *pathname = NULL;
+	const io_vector *iovec = NULL;
+	gpu_vk_buffer bout, bprog, btab;
+	page_set	ps;
+	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant, grouped;
+	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0;
+	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
+	size_t		out_words, ovf_base = 0;
+	const uint32_t *out = NULL;
+	int			rv = -1;
+	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
+
+	memset(&ps, 0, sizeof(ps));
+	err[0] = '\0';
+	if (!ji->ready)
+	{
+		snprintf(err, errlen, "the inner buffer is not attached");
+		return -1;
+	}
+	if (!task->u.task.kds_src_offset)
+	{
+		snprintf(err, errlen, "no source data store in the task");
+		return -1;
+	}
+	kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
+	if (kds_src->format != KDS_FORMAT_BLOCK)
+	{
+		snprintf(err, errlen, "source format '%c' is not implemented by the Vulkan GpuPreAgg over GpuJoin yet",
+				 kds_src->format);
+		return -1;
+	}
+	if (task->u.task.kds_src_pathname)
+		pathname = (const char *) task + task->u.task.kds_src_pathname;
+	if (task->u.task.kds_src_iovec)
+		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
+	npages = kds_src->nitems;
+	nloaded = kds_src->block_nloaded;
+	if (nloaded > npages || kds_src->block_offset + (size_t) nloaded * BLCKSZ > task->length)
+	{
+		snprintf(err, errlen, "corrupted block data store");
+		return -1;
+	}
+	if (!prog->words &&
+		scan_prog_build_join(session, kds_src, ji->rels, ji->nrels, prog, err, errlen) != 0)
+		return -1;
+	if (!prog->join_mode || !prog->agg_mode)
+	{
+		snprintf(err, errlen, "not a join aggregation program");
+		return -1;
+	}
+	nagg = prog->nagg;
+	grouped = (prog->nkeys > 0);
+	if (st->nagg == 0)
+	{
+		st->nagg = nagg;
+		memset(st->n, 0, sizeof(st->n));
+		memset(st->sum, 0, sizeof(st->sum));
+		memset(st->val, 0, sizeof(st->val));
+	}
+	variant = (prog->nregs <= 16 ? 0 : 1);
+	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
+	if (grouped)
+	{
+		cap = ga_variant_cap[avariant];
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * ga_variant_na[avariant];
+		blk_words = 1 + cap * rec_words;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * ga_variant_na[avariant];
+	}
+	if (ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
+		return -1;
+	if (npages == 0)
+		return 0;
+
+	if (task_pages_open(eng, &ps, kds_src, pathname, iovec, &mapped, err, errlen) != 0)
+		goto done;
+	t1 = now_ms();
+	if (gpu_vk_buffer_create(vk, &btab, sizeof(uint32_t) * 2 * npages, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the page table: %s", vk->err);
+		goto done;
+	}
+	have_tab = 1;
+	for (uint32_t i = 0; i < npages; i++)
+	{
+		uint16_t	pd_lower;
+
+		memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
+		((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
+		((uint32_t *) btab.map)[2 * i + 1] = 0;
+		if (pd_lower > 24)
+			total_lps += (pd_lower - 24) / 4;
+	}
+	st->nitems_raw += total_lps;
+	ngroups_total = (npages + JAGG_PAGES_PER_WG - 1) / JAGG_PAGES_PER_WG;
+	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
+		goto done;
+	}
+	have_prog = 1;
+	memcpy(bprog.map, prog->words, prog->nwords * 4);
+
+	/*
+	 * Run. With GROUP BY the rows that found no slot in their workgroup's table are appended to an
+	 * overflow list; if it was too small, run again with room for all (nothing is merged before).
+	 */
+	ovf_cap = 4096;
+	for (int attempt = 0; attempt < 4; attempt++)
+	{
+		gpu_vk_pipeline *pipe = (grouped ? &eng->jgagg_pipe[variant][avariant]
+										 : &eng->jagg_pipe[variant][avariant]);
+		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
+
+		if (grouped)
+		{
+			ovf_base = 4 + (size_t) ngroups_total * blk_words;
+			out_words = ovf_base + 1 + (size_t) ovf_cap * ov_rec;
+		}
+		else
+			out_words = 4 + (size_t) ngroups_total * nagg * 6;
+		if (out_words > 0xffffffffULL / 8 ||
+			gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate the output buffer (%zu words): %s", out_words, vk->err);
+			goto done;
+		}
+		have_out = 1;
+		out = (const uint32_t *) bout.map;
+		memset(bout.map, 0, 16);
+		if (grouped)
+			((uint32_t *) bout.map)[ovf_base] = 0;
+		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
+		{
+			uint32_t	groups = ngroups_total - base;
+			uint32_t	pc[5];
+
+			if (groups > SCAN_WG_MAX)
+				groups = SCAN_WG_MAX;
+			pc[0] = npages;
+			pc[1] = base;
+			pc[2] = JAGG_PAGES_PER_WG;
+			pc[3] = (uint32_t) ovf_base;
+			pc[4] = ovf_cap;
+			if (gpu_vk_dispatch(vk, pipe, bufs, pc, groups, 1, 1, NULL) != 0)
+			{
+				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+				goto done;
+			}
+		}
+		if (out[1] != 0)
+		{
+			describe_kernel_error(out[1], out[2], out[3], err, errlen);
+			goto done;
+		}
+		ovf_count = grouped ? out[ovf_base] : 0;
+		if (ovf_count <= ovf_cap)
+			break;
+		ovf_cap = ovf_count + ovf_count / 2 + 1024;		/* the count may vary a little between runs */
+		gpu_vk_buffer_destroy(vk, &bout);
+		have_out = 0;
+	}
+	if (!have_out)
+	{
+		snprintf(err, errlen, "the join aggregation overflowed its list repeatedly");
+		goto done;
+	}
+	t2 = now_ms();
+	if (!grouped)
+		agg_merge_workgroups(prog, st, out, ngroups_total);
+	else
+	{
+		const uint32_t *w = prog->words;
+		uint32_t	aggoff = w[11];
+
+		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
+		{
+			snprintf(err, errlen, "out of memory");
+			goto done;
+		}
+		/* the joined rows that found no slot: their staged key and argument values */
+		for (uint32_t r = 0; r < ovf_count; r++)
+		{
+			const uint32_t *rec = out + ovf_base + 1 + (size_t) r * ov_rec;
+			int64_t		key[SCAN_GROUP_KEYS];
+			group_entry *g;
+
+			for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+				key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
+			g = group_lookup(&st->groups, key, rec[0]);
+			if (!g)
+			{
+				snprintf(err, errlen, "out of memory");
+				goto done;
+			}
+			for (uint32_t a = 0; a < nagg; a++)
+			{
+				const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS + 3 * a;
+
+				if (!av[0])
+					continue;
+				acc_add_value(&g->acc[a], w[aggoff + 4 * a],
+							  (int64_t)((uint64_t) av[1] | ((uint64_t) av[2] << 32)));
+			}
+		}
+	}
+	t3 = now_ms();
+	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
+	if (eng->trace)
+		fprintf(stderr, "pgstrom-gpuserv: join%s agg task: %u pages, pages-in %.1f ms, gpu %.1f ms, merge %.1f ms, overflow rows %u\n",
+				grouped ? " group" : "", npages, t1 - t0, t2 - t1, t3 - t2, ovf_count);
+	rv = 0;
+done:
+	if (have_prog)
+		gpu_vk_buffer_destroy(vk, &bprog);
+	if (have_out)
+		gpu_vk_buffer_destroy(vk, &bout);
+	if (have_tab)
+		gpu_vk_buffer_destroy(vk, &btab);
+	page_set_release(vk, &ps);
+	if (rv != 0 && err[0] == '\0')
+		snprintf(err, errlen, "aggregation over a join failed");
+	return rv;
 }

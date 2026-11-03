@@ -1135,6 +1135,176 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 }
 
 /*
+ * Aggregation over a join (GpuPreAgg on top of GpuJoin): in place of the projection, the section
+ * after the join computes the GROUP BY key expressions, the aggregate arguments and the FILTER
+ * conditions into registers, evaluated at the point where a joined row is complete (every variable
+ * of the outer relation and of each inner relation is in its register then). Fills the aggregate
+ * table and the key register table of the program; the kernels read them as agg.slang / gagg.slang do.
+ */
+static uint32_t
+join_agg_class(uint32_t action)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__NROWS_ANY:	return 1;
+		case KAGG_ACTION__NROWS_COND:	return 2;
+		case KAGG_ACTION__PSUM_INT:
+		case KAGG_ACTION__PSUM_INT64:
+		case KAGG_ACTION__PAVG_INT:
+		case KAGG_ACTION__PAVG_INT64:	return 3;
+		case KAGG_ACTION__PMIN_INT32:
+		case KAGG_ACTION__PMIN_INT64:	return 4;
+		case KAGG_ACTION__PMAX_INT32:
+		case KAGG_ACTION__PMAX_INT64:	return 5;
+		default:
+			break;
+	}
+	return 0;
+}
+
+/* a kernel variable slot read directly (not through an expression): mark the column it comes from */
+static int
+join_use_slot(builder *b, uint32_t slot)
+{
+	int			bytes;
+	const kern_varslot_desc *vs = SESSION_KVARS_SLOT_DESC(b->session);
+
+	if (slot >= b->nslots || !reg_vtype(vs[slot].vs_type_code, &bytes) ||
+		reg_vtype(vs[slot].vs_type_code, &bytes) == SOP_VT_STR)
+		return fail(b, "aggregate argument of an unsupported type");
+	if (b->slot_resno[slot] > 0)
+	{
+		b->slot_used[slot] = 1;
+		b->slot_valread[slot] = 1;
+	}
+	else if (b->slot_iresno[slot] > 0)
+		b->slot_iused[slot] = 1;
+	else
+		return fail(b, "aggregate slot %u has no value", slot);
+	return (int) slot;
+}
+
+static int
+join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg_tab,
+			   int *p_nagg, int *p_nkeys)
+{
+	const kern_session_info *session = b->session;
+	const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	const kern_expression *ksave = KEXP_FIRST_ARG(kagg);
+	int			slot_reg[SCAN_MAX_REGS];
+	int			key_slot[SCAN_GROUP_KEYS];
+	int			perm = b->nslots;
+	int			nagg = 0, nkeys = 0, nattrs_out = kagg->u.pagg.nattrs;
+
+	for (int i = 0; i < SCAN_MAX_REGS; i++)
+		slot_reg[i] = -1;
+	if (nattrs_out < 1 || nattrs_out > SCAN_AGG_MAX)
+		return fail(b, "%d output columns (up to %d are supported)", nattrs_out, SCAN_AGG_MAX);
+	prog->nattrs = nattrs_out;
+	/* the GROUP BY keys: the SaveExpr arguments of the key hash */
+	if (session->xpucode_groupby_keyhash)
+	{
+		const kern_expression *khash = (const kern_expression *)
+			((const char *) session + session->xpucode_groupby_keyhash);
+		const kern_expression *kk = KEXP_FIRST_ARG(khash);
+
+		if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS)
+			return fail(b, "%u GROUP BY keys (up to %d are supported)", khash->nr_args, SCAN_GROUP_KEYS);
+		for (uint32_t j = 0; j < khash->nr_args; j++, kk = KEXP_NEXT_ARG(kk))
+		{
+			int		bytes, vt, r, nx = perm;
+
+			if (kk->opcode != FuncOpCode__SaveExpr || kk->nr_args != 1 || kk->u.save.sv_slot_id >= b->nslots)
+				return fail(b, "unexpected GROUP BY key element %s", scan_vm_opcode_name(kk->opcode));
+			vt = reg_vtype(kk->exptype, &bytes);
+			if (vt != SOP_VT_INT && vt != SOP_VT_BOOL)
+				return fail(b, "GROUP BY key of an unsupported type (opcode type %u)", kk->exptype);
+			r = expr_to_reg(b, KEXP_FIRST_ARG(kk), &nx);
+			if (r < 0)
+				return -1;
+			if (r >= (int) b->nslots)
+				perm = r + 1;
+			slot_reg[kk->u.save.sv_slot_id] = r;
+			key_slot[nkeys] = (int) kk->u.save.sv_slot_id;
+			key_reg_tab[nkeys] = (uint32_t) r;
+			nkeys++;
+		}
+	}
+	/* the argument values: SaveExpr slots */
+	for (uint32_t j = 0; j < kagg->nr_args; j++, ksave = KEXP_NEXT_ARG(ksave))
+	{
+		int		nx = perm, r;
+
+		if (ksave->opcode != FuncOpCode__SaveExpr || ksave->nr_args != 1)
+			return fail(b, "unexpected aggregate argument element %s", scan_vm_opcode_name(ksave->opcode));
+		if (ksave->u.save.sv_slot_id >= b->nslots)
+			return fail(b, "aggregate argument slot %u is out of range", ksave->u.save.sv_slot_id);
+		r = expr_to_reg(b, KEXP_FIRST_ARG(ksave), &nx);
+		if (r < 0)
+			return -1;
+		if (r >= (int) b->nslots)
+			perm = r + 1;
+		slot_reg[ksave->u.save.sv_slot_id] = r;
+	}
+	/* the aggregate table (the key columns of the output are not aggregates) */
+	for (int i = 0; i < nattrs_out; i++)
+	{
+		const kern_aggregate_desc *d = &kagg->u.pagg.desc[i];
+		int			sources[2] = {d->arg0_slot_id, d->filter_slot_id};
+		int			regs_of[2] = {-1, -1};
+		uint32_t	cls;
+
+		prog->agg_action[i] = d->action;
+		prog->agg_of_col[i] = -1;
+		prog->key_of_col[i] = -1;
+		if (d->action == KAGG_ACTION__VREF)
+		{
+			int		kidx = -1;
+
+			for (int k = 0; k < nkeys; k++)
+				if (key_slot[k] == d->arg0_slot_id)
+					kidx = k;
+			if (kidx < 0)
+				return fail(b, "output column %d refers to a slot that is not a GROUP BY key", i + 1);
+			prog->key_of_col[i] = (int8_t) kidx;
+			continue;
+		}
+		if (d->action == KAGG_ACTION__VREF_NOKEY)
+			return fail(b, "a column that depends on the GROUP BY key (VREF_NOKEY) is not supported yet");
+		cls = join_agg_class(d->action);
+		if (cls == 0)
+			return fail(b, "aggregate action %u is not implemented by the Vulkan service", d->action);
+		prog->agg_of_col[i] = (int8_t) nagg;
+		for (int k = 0; k < 2; k++)
+		{
+			int		sl = sources[k];
+
+			if (sl < 0)
+				continue;
+			if (sl >= (int) b->nslots)
+				return fail(b, "aggregate slot %d is out of range", sl);
+			if (slot_reg[sl] >= 0)
+				regs_of[k] = slot_reg[sl];
+			else if ((regs_of[k] = join_use_slot(b, (uint32_t) sl)) < 0)
+				return -1;
+		}
+		if ((cls == 2 || cls >= 3) && regs_of[0] < 0)
+			return fail(b, "aggregate in column %d has no argument", i + 1);
+		agg_tab[4 * nagg + 0] = cls;
+		agg_tab[4 * nagg + 1] = regs_of[0] < 0 ? 0xffffffffU : (uint32_t) regs_of[0];
+		agg_tab[4 * nagg + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
+		agg_tab[4 * nagg + 3] = 0;
+		nagg++;
+	}
+	prog->agg_mode = 1;
+	prog->nagg = nagg;
+	prog->nkeys = nkeys;
+	*p_nagg = nagg;
+	*p_nkeys = nkeys;
+	return 0;
+}
+
+/*
  * Join program layout (words): header (PROG_HDR_WORDS), the outer column table, the column table
  * of each inner relation, the depth table (JDT_WORDS per inner relation), the instructions, the
  * registers of the computed values. Instructions: scan quals [0, nq), then for each depth its hash
@@ -1151,7 +1321,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 					 scan_prog *prog, char *err, size_t errlen)
 {
 	builder		b;
-	const kern_expression *kquals, *kproj;
+	const kern_expression *kquals, *kproj = NULL;
 	const kern_varslot_desc *vs = SESSION_KVARS_SLOT_DESC(session);
 	const kern_data_store *kds_dst = SESSION_KDS_DST_HEAD(session);
 	int			qreg = -1;
@@ -1161,6 +1331,9 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	uint32_t	nattrs = 0, ncomp = 0, nwords;
 	uint32_t   *comp_regs = NULL, *w;
 	int			max_src = 0;
+	int			agg_mode, nagg = 0, nkeys = 0;
+	uint32_t	agg_tab[4 * SCAN_AGG_MAX];
+	uint32_t	key_reg_tab[SCAN_GROUP_KEYS];
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));
@@ -1172,15 +1345,25 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	b.nslots = session->kcxt_kvars_nslots;
 	b.no_strings = 1;
 
-	if ((session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__JOIN)
+	agg_mode = ((session->xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG);
+	if (!agg_mode && (session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__JOIN)
 	{
 		fail(&b, "not a GpuJoin session");
 		goto error;
 	}
-	if (session->xpucode_groupby_actions || session->xpucode_gpusort_keydesc)
+	if (session->xpucode_gpusort_keydesc || (agg_mode != (session->xpucode_groupby_actions != 0)))
 	{
-		fail(&b, "aggregation or sort on top of a join is not implemented by the Vulkan service yet");
+		fail(&b, "sort on top of a join, or a join session with aggregate actions, is not implemented by the Vulkan service");
 		goto error;
+	}
+	if (agg_mode)
+	{
+		for (int i = 0; i < nrels; i++)
+			if (rels[i].right_outer)
+			{
+				fail(&b, "aggregation over a RIGHT or FULL join is not implemented by the Vulkan service");
+				goto error;
+			}
 	}
 	if (nrels < 1 || nrels > SCAN_JOIN_MAXDEPTH || session->kcxt_kvecs_ndims != nrels + 1)
 	{
@@ -1188,7 +1371,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			 (int) session->kcxt_kvecs_ndims - 1, SCAN_JOIN_MAXDEPTH);
 		goto error;
 	}
-	if (b.nslots > SCAN_MAX_REGS || !kds_dst || !SESSION_KEXP_PROJECTION(session))
+	if (b.nslots > SCAN_MAX_REGS || !kds_dst || (!agg_mode && !SESSION_KEXP_PROJECTION(session)))
 	{
 		fail(&b, "unsupported join session (slots %u)", b.nslots);
 		goto error;
@@ -1262,21 +1445,38 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	}
 	proj_begin = b.ninsn;
 
-	kproj = SESSION_KEXP_PROJECTION(session);
-	nattrs = kproj->u.proj.nattrs;
-	prog->attrs = calloc(nattrs ? nattrs : 1, sizeof(scan_proj_attr));
-	comp_regs = calloc(nattrs ? nattrs : 1, sizeof(uint32_t));
-	if (!prog->attrs || !comp_regs)
+	if (agg_mode)
 	{
-		fail(&b, "out of memory");
-		goto error;
+		/* aggregation: key expressions, aggregate arguments and FILTERs instead of a projection */
+		if (join_build_agg(&b, prog, agg_tab, key_reg_tab, &nagg, &nkeys) != 0)
+			goto error;
+		nattrs = 0;
+		comp_regs = calloc(1, sizeof(uint32_t));
+		if (!comp_regs)
+		{
+			fail(&b, "out of memory");
+			goto error;
+		}
 	}
-	prog->nattrs = nattrs;
-	if (kds_dst->ncols < nattrs || kproj->nr_args != nattrs)
+	else
 	{
-		fail(&b, "projection has %u columns but the result store has %u", nattrs, kds_dst->ncols);
-		goto error;
+		kproj = SESSION_KEXP_PROJECTION(session);
+		nattrs = kproj->u.proj.nattrs;
+		prog->attrs = calloc(nattrs ? nattrs : 1, sizeof(scan_proj_attr));
+		comp_regs = calloc(nattrs ? nattrs : 1, sizeof(uint32_t));
+		if (!prog->attrs || !comp_regs)
+		{
+			fail(&b, "out of memory");
+			goto error;
+		}
+		prog->nattrs = nattrs;
+		if (kds_dst->ncols < nattrs || kproj->nr_args != nattrs)
+		{
+			fail(&b, "projection has %u columns but the result store has %u", nattrs, kds_dst->ncols);
+			goto error;
+		}
 	}
+	if (!agg_mode)
 	{
 		const kern_expression *ksave = KEXP_FIRST_ARG(kproj);
 		int		perm = b.nslots;
@@ -1388,7 +1588,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	}
 	for (int depth = 1; depth <= nrels; depth++)
 		inc_total += incols[depth];
-	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp;
+	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;
 	if (nwords > 16384)
 	{
 		fail(&b, "the join program is too large");
@@ -1477,6 +1677,18 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		w[17] = prog->oj_words;
 		memcpy(w + insnoff, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 		memcpy(w + insnoff + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
+		if (agg_mode)
+		{
+			/* the aggregate table and the key registers follow the computed values (none here) */
+			uint32_t	aggoff = insnoff + 6 * b.ninsn + ncomp;
+
+			w[10] = nagg;
+			w[11] = aggoff;
+			w[12] = nkeys;
+			w[13] = aggoff + 4 * nagg;
+			memcpy(w + aggoff, agg_tab, sizeof(uint32_t) * 4 * nagg);
+			memcpy(w + aggoff + 4 * nagg, key_reg_tab, sizeof(uint32_t) * nkeys);
+		}
 	}
 	prog->words = w;
 	prog->nwords = nwords;
