@@ -15,17 +15,16 @@ from plineorder
 where lo_orderdate between 19930101 and 19931231
 and lo_discount between 1 and 3
 and lo_quantity < 25;
-                                                                                             QUERY PLAN                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                 QUERY PLAN                                                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Finalize Aggregate
    ->  Gather
          Workers Planned: 2
          ->  Partial Aggregate
                ->  Parallel Append
                      ->  Parallel Custom Scan (GpuScan) on plineorder_p1993_heap plineorder_1
-                           Filter: ((lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
-                           GPU Projection: lo_extendedprice, lo_discount, lo_quantity
-                           GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231))
+                           GPU Projection: lo_extendedprice, lo_discount
+                           GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
                      ->  Parallel Foreign Scan on plineorder_p1993_parquet plineorder_2
                            Filter: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
                            referenced: lo_orderdate, lo_quantity, lo_extendedprice, lo_discount
@@ -36,7 +35,7 @@ and lo_quantity < 25;
                            referenced: lo_orderdate, lo_quantity, lo_extendedprice, lo_discount
                            Stats-Hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
                            file0: plineorder_p1993_rem2.arrow (read: 6593.54KB, size: 21.56MB)
-(19 rows)
+(18 rows)
 
 select sum(lo_extendedprice*lo_discount) as revenue
 from plineorder
@@ -56,8 +55,8 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
    and lo_quantity < 25
  group by lo_orderpriority
  order by lo_orderpriority,revenue;
-                                                                                                   QUERY PLAN                                                                                                    
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                       QUERY PLAN                                                                                                        
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Incremental Sort
    Sort Key: plineorder.lo_orderpriority, (sum((plineorder.lo_extendedprice * plineorder.lo_discount)))
    Presorted Key: plineorder.lo_orderpriority
@@ -71,9 +70,8 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
                            Group Key: plineorder.lo_orderpriority
                            ->  Parallel Append
                                  ->  Parallel Custom Scan (GpuScan) on plineorder_p1993_heap plineorder_1
-                                       Filter: ((lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
-                                       GPU Projection: lo_orderpriority, lo_extendedprice, lo_discount, lo_quantity
-                                       GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231))
+                                       GPU Projection: lo_orderpriority, lo_extendedprice, lo_discount
+                                       GPU Scan Quals: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
                                  ->  Parallel Foreign Scan on plineorder_p1993_parquet plineorder_2
                                        Filter: ((lo_orderdate >= 19930101) AND (lo_orderdate <= 19931231) AND (lo_discount >= '1'::numeric) AND (lo_discount <= '3'::numeric) AND (lo_quantity < '25'::numeric))
                                        referenced: lo_orderdate, lo_orderpriority, lo_quantity, lo_extendedprice, lo_discount
@@ -84,7 +82,7 @@ select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
                                        referenced: lo_orderdate, lo_orderpriority, lo_quantity, lo_extendedprice, lo_discount
                                        Stats-Hint: (lo_orderdate >= 19930101), (lo_orderdate <= 19931231)
                                        file0: plineorder_p1993_rem2.arrow (read: 8.30MB, size: 21.56MB)
-(26 rows)
+(25 rows)
 
 select lo_orderpriority, sum(lo_extendedprice*lo_discount) as revenue
   from plineorder
@@ -268,12 +266,12 @@ select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenu
                                              Filter: (lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[]))
                                              GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, lo_suppkey
                                              GPU Scan Quals: ((lo_orderdate >= 19920701) AND (lo_orderdate <= 19970630))
-                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1997_heap plineorder_11
+                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1992_heap plineorder_1
                                              Filter: (lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[]))
                                              GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, lo_suppkey
                                              GPU Scan Quals: ((lo_orderdate >= 19920701) AND (lo_orderdate <= 19970630))
                                              Brin Quals: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
-                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1992_heap plineorder_1
+                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1997_heap plineorder_11
                                              Filter: (lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[]))
                                              GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, lo_suppkey
                                              GPU Scan Quals: ((lo_orderdate >= 19920701) AND (lo_orderdate <= 19970630))

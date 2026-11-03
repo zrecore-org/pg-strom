@@ -38,7 +38,7 @@
 #                count in upstream's file differs; the GPU and CPU counts inside the test agree with each other.
 #
 # ---------------------------------------------------------------------------------------------------------------
-# Real bugs the first run found (GPU result or error differing from PostgreSQL); both are fixed in this commit series
+# Real bugs the first run found (GPU result or error differing from PostgreSQL); three were fixed in this commit series, a fourth (numeric, below) belongs to the numeric code
 # ---------------------------------------------------------------------------------------------------------------
 # 1. sum/min/max(money): the planner offered GpuPreAgg (the money aggregates share the int8 actions) and the service
 #    rejected the program at run time ("aggregate argument of an unsupported type (opcode type 19)"), so the query
@@ -50,8 +50,26 @@
 #    values were allocated above all kernel-variable slots, which include one unused slot per SaveExpr. Fixed in
 #    scan_prog.c: a computed value now lives in its own SaveExpr slot register.
 #
+# 3. EXPLAIN of an Arrow foreign scan (SELECT * from an Arrow_Fdw table) segfaulted in pgstromExplainArrowFdwFiles:
+#    chunk_sz was an alloca'd array of natts entries indexed by attnum 1..natts (one element too few). It showed up when
+#    the CPU oracle ran test arrow_index. Fixed in arrow_fdw.c.
+#
 # ---------------------------------------------------------------------------------------------------------------
-# Open (found while writing this; NOT fixed): the planner does not know the service's limits, and the service
-# has no CPU fallback, so a query the service cannot translate FAILS instead of running on the CPU.
+# OPEN: GPU result differs from the CPU (found after merging the numeric work of vulkan-gpu; NOT fixed)
 # ---------------------------------------------------------------------------------------------------------------
-# see the "Open" section at the end of this file once the last run is in.
+# 4. numeric multiplication on the GPU is wrong for some operands, silently (test dtype_numeric, test03: thousands of rows
+#    differ; it is therefore in pending_schedule). Reproducer (the plan is Custom Scan (GpuScan), GPU Projection: x * z):
+#      create table m(id int, x numeric, z numeric);
+#      insert into m values (1, 826563.6313334870, 467842.677), (2, 826563.6313334870, 2), (3, 1000000.5, 1000000.5);
+#      set enable_seqscan = off;  select id, x * z from m where id > 0;
+#    GPU: 801302.3189363433294 for row 1; PostgreSQL: 386701741993.8996378246990. Rows 2 and 3 are right. Operands whose
+#    product has 13 fractional digits (a 10-digit and a 3-digit fraction) go wrong, products with 8 or fewer are right;
+#    x + y, y - z, unary -, abs, and comparisons of the same test match. Looks like an overflow in the digit-wise
+#    multiplication or the scale handling.
+#
+# ---------------------------------------------------------------------------------------------------------------
+# OPEN (not fixed): the planner does not know the service's limits and the service has no CPU fallback, so a query the
+# service cannot translate FAILS instead of running on the CPU.
+# ---------------------------------------------------------------------------------------------------------------
+# More than 32 variable slots ("too many kernel variables") in a scan program, and similar translation limits in
+# scan_prog.c. Bugs 1 and 2 above were instances. A planner-side check (or the CPU fallback of A2.x) is the real fix.

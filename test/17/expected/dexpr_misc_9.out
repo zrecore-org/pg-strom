@@ -122,11 +122,11 @@ SELECT id, not a > b v1,
   INTO test10g
   FROM regtest_data
  WHERE id > 0;
-                                                                             QUERY PLAN                                                                             
---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                                            QUERY PLAN                                                                                                                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dexpr_misc_temp.regtest_data
-   Output: id, (a <= b), ((((a + b) > (c + d)) OR ((a - b) < (c - d))) AND (memo ~~ '%abc%'::text)), ((((a + d) > (b + c)) AND (b < d)) OR (memo ~~ '%xyz%'::text))
-   GPU Projection: regtest_data.id, regtest_data.a, regtest_data.b, regtest_data.c, regtest_data.d, regtest_data.memo
+   Output: id, ((a <= b)), (((((a + b) > (c + d)) OR ((a - b) < (c - d))) AND (memo ~~ '%abc%'::text))), (((((a + d) > (b + c)) AND (b < d)) OR (memo ~~ '%xyz%'::text)))
+   GPU Projection: regtest_data.id, (regtest_data.a <= regtest_data.b), ((((regtest_data.a + regtest_data.b) > (regtest_data.c + regtest_data.d)) OR ((regtest_data.a - regtest_data.b) < (regtest_data.c - regtest_data.d))) AND (regtest_data.memo ~~ '%abc%'::text)), ((((regtest_data.a + regtest_data.d) > (regtest_data.b + regtest_data.c)) AND (regtest_data.b < regtest_data.d)) OR (regtest_data.memo ~~ '%xyz%'::text))
    GPU Scan Quals: (regtest_data.id > 0)
 (4 rows)
 
