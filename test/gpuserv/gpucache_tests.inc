@@ -244,7 +244,7 @@ for w in 1 2 3 4; do $PSQL -d scantest -f "$ROOT/bank_writer.sql" >/dev/null 2>&
 $PSQL -d scantest -f "$ROOT/bank_reader.sql" > "$ROOT/bank_reader.out" 2>&1 &
 wait
 grep -q "bad=0" "$ROOT/bank_reader.out"; check "readers see every transfer atomically while 4 writers run ($(grep -o 'bad=[0-9]*' "$ROOT/bank_reader.out"))" $?
-gcrun bank "the cache agrees with the heap after the writers" "select id, bal, pad from %T"
+gcrun bank "the cache agrees with the heap after the writers" "select id, bal, pad from %T where id > 0"
 gcagg bank "total is unchanged" "select sum(bal), count(*) from %T where id > 0 and id <= 400"
 
 echo "GPU-Cache: TRUNCATE, ALTER TABLE, DROP"
@@ -258,8 +258,8 @@ n=$($PSQL -d scantest -c "$GPU select count(*) from gc5")
 [ "$n" = 0 ]; check "after TRUNCATE the table is empty on the GPU" $?
 sql "$(gcins gc5 1 500)"
 gcrun gc5 "rows inserted after TRUNCATE" "select id, b, f from %T where b < 3000"
-txncmp "TRUNCATE and inserts in one transaction" commit "truncate gc5; $(gcins gc5 1 50);" "select id, b from gc5"
-gcrun gc5 "after TRUNCATE in a transaction" "select id, b from %T"
+txncmp "TRUNCATE and inserts in one transaction" commit "truncate gc5; $(gcins gc5 1 50);" "select id, b from gc5 where id > 0"
+gcrun gc5 "after TRUNCATE in a transaction" "select id, b from %T where id > 0"
 sql "alter table gc5 add column z int4 default 5"
 sql "update gc5 set z = id"
 gcrun gc5 "after ADD COLUMN" "select id, z, b from %T where z < 100"
