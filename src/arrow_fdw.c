@@ -3277,6 +3277,38 @@ __arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
 	}
 }
 
+/*
+ * The Arrow loader of the Vulkan service reads integer, float4 and bool values only (a date, time,
+ * timestamp or text column is passed through, or tested with IS [NOT] NULL): an expression that
+ * reads the value of one, or produces one, stays on the CPU.
+ */
+static bool
+__arrowQualNeedsUnsupportedValue(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, NullTest) && IsA(((NullTest *) node)->arg, Var))
+		return false;			/* only the NULL-ness of the column is needed */
+	if (IsA(node, RestrictInfo))
+		return __arrowQualNeedsUnsupportedValue((Node *)((RestrictInfo *) node)->clause, context);
+	if (IsA(node, List))
+		return expression_tree_walker(node, __arrowQualNeedsUnsupportedValue, context);
+	switch (exprType(node))
+	{
+		case TEXTOID:
+		case VARCHAROID:
+		case BPCHAROID:
+		case DATEOID:
+		case TIMEOID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			return true;
+		default:
+			break;
+	}
+	return expression_tree_walker(node, __arrowQualNeedsUnsupportedValue, context);
+}
+
 bool
 arrowFdwGpuScanSupported(RelOptInfo *baserel)
 {
@@ -3287,6 +3319,8 @@ arrowFdwGpuScanSupported(RelOptInfo *baserel)
 
 	if (!baseRelIsArrowFdw(baserel) ||
 		list_length(baserel->fdw_private) != 2)
+		return false;
+	if (__arrowQualNeedsUnsupportedValue((Node *) baserel->baserestrictinfo, NULL))
 		return false;
 	af_states = linitial(baserel->fdw_private);
 	referenced = lsecond(baserel->fdw_private);

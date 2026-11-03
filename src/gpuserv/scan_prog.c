@@ -46,6 +46,7 @@ typedef struct
 	int			slot_used[SCAN_MAX_REGS];
 	int			slot_vtype[SCAN_MAX_REGS];
 	int			slot_bytes[SCAN_MAX_REGS];
+	int			slot_valread[SCAN_MAX_REGS];/* a column slot whose value is read (not only IS [NOT] NULL) */
 	int			slot_strval[SCAN_MAX_REGS];	/* a string slot whose value (not only its NULL-ness) is read */
 	unsigned char *pool;			/* constant pool: string literals (header word 20 = its word offset) */
 	uint32_t	pool_len;
@@ -379,7 +380,10 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				b->slot_strval[slot] = 1;
 			}
 			if (b->slot_resno[slot] > 0)
+			{
 				b->slot_used[slot] = 1;
+				b->slot_valread[slot] = 1;
+			}
 			else if (b->slot_iresno[slot] > 0)
 				b->slot_iused[slot] = 1;
 			else
@@ -407,7 +411,9 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 			kin = KEXP_FIRST_ARG(kexp);
 			if (op != SOP_NOT && kin->opcode == FuncOpCode__VarExpr &&
-				(!reg_vtype(kin->exptype, &bytes) || reg_vtype(kin->exptype, &bytes) == SOP_VT_STR))
+				(!reg_vtype(kin->exptype, &bytes) || reg_vtype(kin->exptype, &bytes) == SOP_VT_STR ||
+			  kin->exptype == TypeOpCode__date || kin->exptype == TypeOpCode__time ||
+			  kin->exptype == TypeOpCode__timestamp || kin->exptype == TypeOpCode__timestamptz))
 			{
 				/* IS [NOT] NULL of a column of any type needs only its NULL-ness */
 				uint32_t	slot = kin->u.v.var_slot_id;
@@ -1007,7 +1013,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
 			b.slot_bytes[s] = bytes;
-			if (b.slot_vtype[s] == SOP_VT_STR && !b.slot_strval[s])
+			if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
+				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* a date/time column that only IS [NOT] NULL reads */
+			else if (b.slot_vtype[s] == SOP_VT_STR && !b.slot_strval[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* only IS [NOT] NULL reads it */
 			else if (b.slot_vtype[s] == SOP_VT_STR)
 			{
@@ -1345,6 +1353,8 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
 			if (b.slot_vtype[s] == SOP_VT_STR)		/* join programs read the NULL-ness of strings only */
+				b.slot_vtype[s] = SOP_VT_NULLONLY;
+			else if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_vtype[s] && b.slot_nullonly[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
