@@ -344,6 +344,12 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->timeout_ms = GPU_VK_DEFAULT_TIMEOUT_MS;
+	{
+		const char *e = getenv("PGSTROM_GPUSERV_TIMEOUT_MS");	/* slow CPU Vulkan devices (lavapipe JIT) */
+
+		if (e && atoi(e) > 0)
+			ctx->timeout_ms = (uint32_t) atoi(e);
+	}
 	ctx->unified_memtype = ctx->hostvis_memtype = -1;
 	ft = &ctx->feat;
 
@@ -365,6 +371,10 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 	fill_devinfo(&ctx->info, index, ctx->phys, in.api);
 	vkGetPhysicalDeviceProperties(ctx->phys, &props);
 	ctx->limits = props.limits;
+	/* a CPU Vulkan device (lavapipe) compiles a kernel at its first dispatch, which takes long for the big ones */
+	if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU && ctx->timeout_ms < 300000 &&
+		!getenv("PGSTROM_GPUSERV_TIMEOUT_MS"))
+		ctx->timeout_ms = 300000;
 	api = min_u32(props.apiVersion, in.api);
 	have12 = (api >= VK_API_VERSION_1_2);
 	have13 = (api >= VK_API_VERSION_1_3);
