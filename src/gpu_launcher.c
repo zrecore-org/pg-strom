@@ -33,6 +33,8 @@
 /* GUC variables */
 static char	   *gpuserv_path = NULL;
 static bool		gpu_allow_cpu_device = false;
+static char	   *gpu_specialize = NULL;			/* "", off, auto, force, check */
+static char	   *gpu_kernel_cache_dir = NULL;
 static int		gpuserv_probe_timeout = 60000;		/* ms */
 
 static char	   *gpu_visible_devices = NULL;		/* GUC */
@@ -280,6 +282,16 @@ launcher_spawn_service(int *p_lifeline_write)
 	argv[argc++] = gpuserv_ctl->socket_path;
 	if (gpu_allow_cpu_device)
 		argv[argc++] = "--allow-cpu";
+	if (gpu_specialize && gpu_specialize[0])
+	{
+		argv[argc++] = "--specialize";
+		argv[argc++] = gpu_specialize;
+	}
+	if (gpu_kernel_cache_dir && gpu_kernel_cache_dir[0])
+	{
+		argv[argc++] = "--kernel-cache-dir";
+		argv[argc++] = gpu_kernel_cache_dir;
+	}
 	argv[argc] = NULL;
 
 	pid = fork();
@@ -494,6 +506,24 @@ pgstrom_init_gpu_launcher(void)
 							 PGC_POSTMASTER,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.gpu_specialize",
+							   "Kernels generated per query: off, auto, force or check (empty: the service's default, auto)",
+							   "auto compiles a kernel for a query that runs more than one task, in the background, and "
+							   "switches to it when it is ready; force waits for it at the first task; check also runs the "
+							   "interpreter and compares (testing). Needs slangc, or the kernel in the cache directory.",
+							   &gpu_specialize,
+							   NULL,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.gpu_kernel_cache_dir",
+							   "Directory where the GPU service keeps compiled kernels (empty: $XDG_CACHE_HOME/pgstrom or ~/.cache/pgstrom; none: no cache)",
+							   NULL,
+							   &gpu_kernel_cache_dir,
+							   NULL,
+							   PGC_POSTMASTER,
+							   GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.gpuserv_probe_timeout",
 							"Time limit of the GPU capability probe at startup",
 							NULL,

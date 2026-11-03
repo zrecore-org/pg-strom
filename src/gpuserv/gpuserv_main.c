@@ -310,6 +310,10 @@ main(int argc, char **argv)
 			device = strtol(argv[++i], NULL, 10);
 		else if (!strcmp(argv[i], "--lifeline") && i + 1 < argc)
 			lifeline = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--specialize") && i + 1 < argc)
+			setenv("PGSTROM_GPUSERV_SPECIALIZE", argv[++i], 1);		/* pg_strom.gpu_specialize */
+		else if (!strcmp(argv[i], "--kernel-cache-dir") && i + 1 < argc)
+			setenv("PGSTROM_GPUSERV_CACHE_DIR", argv[++i], 1);		/* pg_strom.gpu_kernel_cache_dir */
 		else
 		{
 			fprintf(stderr,
