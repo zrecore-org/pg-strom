@@ -229,6 +229,21 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 						  "            regs[%u].v = 1;\n            regs[%u].isnull = 0;\n            j%u = true;\n        }\n",
 						  ra, dst, ra, dst, dst, i);
 		}
+		else if (getenv("PGSTROM_GPUSERV_SPEC_NUMINLINE") && op == SOP_NUMCONST)
+		{
+			sb_printf(o,
+					  "        regs[%u].v = int64_t(uint64_t(%uu) | (uint64_t(%uu) << 32));\n"
+					  "        regs[%u].sc = %uu;\n        regs[%u].isnull = %uu;\n", dst, k0, k1, dst, rb, dst, ra);
+		}
+		else if (getenv("PGSTROM_GPUSERV_SPEC_NUMINLINE") && op == SOP_NUMCMP)
+		{
+			sb_printf(o,
+					  "        Reg x = regs[%u];\n        Reg y = regs[%u];\n"
+					  "        if ((x.isnull | y.isnull) != 0)\n            regs[%u].isnull = 1;\n"
+					  "        else\n        {\n            regs[%u].isnull = 0;\n"
+					  "            regs[%u].v = b2l(cmp_result(num_cmp(x.v, x.sc, y.v, y.sc), %uu));\n        }\n",
+					  ra, rb, dst, dst, dst, k0);
+		}
 		else
 		{
 			sb_printf(o,
@@ -824,6 +839,8 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 		return -1;
 	}
 	g.nregs = instruction_registers(w, prog->nwords, g.nregs);
+	if (getenv("PGSTROM_GPUSERV_SPEC_MINREGS") && g.nregs < (uint32_t) atoi(getenv("PGSTROM_GPUSERV_SPEC_MINREGS")))
+		g.nregs = (uint32_t) atoi(getenv("PGSTROM_GPUSERV_SPEC_MINREGS"));
 	if (g.nregs > SCAN_MAX_REGS)
 	{
 		gen_fail(&g, "the program names %u registers", g.nregs);

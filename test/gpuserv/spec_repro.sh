@@ -50,7 +50,7 @@ SQL
 for v in ${VARIANTS:--}; do
 	stop
 	: > "$ROOT/log"
-	unset PGSTROM_GPUSERV_SPEC_ANDOR
+	unset PGSTROM_GPUSERV_SPEC_ANDOR PGSTROM_GPUSERV_SPEC_NUMINLINE PGSTROM_GPUSERV_SPEC_MINREGS
 	[ "$v" != - ] && export "$v"
 	start
 	echo "=== service variant: $v (mode $PGSTROM_GPUSERV_SPECIALIZE)"
