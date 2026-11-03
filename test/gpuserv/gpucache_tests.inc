@@ -327,6 +327,50 @@ gcrun gc3 "changes after the restart" "select id, b from %T where id > 39000"
 gcrun gc2 "another cache after the restart" "select id, b, f from %T where b < 100"
 gcagg bank "aggregate after the restart" "select sum(bal), count(*) from %T where id > 0 and id <= 400"
 
+echo "GPU-Cache: isolation between sessions, row shapes"
+sql "create table gc8 (id int4, a int4, f text)"
+sql "insert into gc8 select i, i, 'old' from generate_series(1, 1000) i"
+sql "create trigger gc_sync after insert or update or delete on gc8 for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=20000')"
+sql "analyze gc8"
+GC8Q="select count(*), sum(a), count(f) from gc8 where id > 0"
+$PSQL -d scantest -c "$GPU $GCAGGSET $GC8Q" >/dev/null
+$PSQL -d scantest -c "begin; insert into gc8 select i, i, 'new' from generate_series(2001, 2100) i; update gc8 set a = -1 where id <= 10; delete from gc8 where id between 11 and 20; select pg_sleep(4); commit" >/dev/null 2>&1 &
+sleep 1.5
+g=$($PSQL -d scantest -c "$GPU $GCAGGSET $GC8Q" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $GC8Q" 2>&1 | tail -1)
+[ "$g" = "$c" ] && [ "$g" = "1000|500500|1000" ]; check "another session's uncommitted INSERT, UPDATE and DELETE are invisible ($g)" $?
+wait
+g=$($PSQL -d scantest -c "$GPU $GCAGGSET $GC8Q" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $GC8Q" 2>&1 | tail -1)
+[ "$g" = "$c" ] && [ "$g" != "1000|500500|1000" ]; check "... and visible after its COMMIT ($g)" $?
+$PSQL -d scantest -c "begin; delete from gc8 where id > 2000; select pg_sleep(3); rollback" >/dev/null 2>&1 &
+sleep 1
+g=$($PSQL -d scantest -c "$GPU $GCAGGSET $GC8Q" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $GC8Q" 2>&1 | tail -1)
+[ "$g" = "$c" ]; check "an uncommitted DELETE of another session leaves the rows visible ($g)" $?
+wait
+g=$($PSQL -d scantest -c "$GPU $GCAGGSET $GC8Q" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $GC8Q" 2>&1 | tail -1)
+[ "$g" = "$c" ]; check "... and after its ROLLBACK ($g)" $?
+gcrun gc8 "whole-row reference" "select t from gc8 t where id < 30"
+gcrun gc8 "DELETE ... RETURNING and UPDATE ... RETURNING through the cache" "select id from gc8 where id < 0 or id > 3000"
+g=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; with d as (delete from gc8 where id between 2050 and 2060 returning id) select count(*), sum(id) from d")
+c=$($PSQL -d scantest -c "$CPU select count(*), sum(id) from gc8 where id between 2050 and 2060")
+[ "$g" = "11|22605" ]; check "DELETE ... RETURNING scans the cache ($g)" $?
+gcrun gc8 "after the DELETE ... RETURNING" "select id, a from gc8 where id > 2000"
+$PSQL -d scantest -c "$GPU set enable_seqscan=off; begin; select id from gc8 where id < 5 for update; commit" >/dev/null 2>&1; check "SELECT ... FOR UPDATE on a cached table" $?
+sql "create table gcp (id int4, a int4, f text) partition by range (id)"
+sql "create table gcp1 partition of gcp for values from (0) to (5000)"
+sql "create table gcp2 partition of gcp for values from (5000) to (10000)"
+sql "insert into gcp select i, i % 100, 'p' || i from generate_series(1, 9000) i"
+sql "create trigger gc_sync after insert or update or delete on gcp1 for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=20000')"
+sql "analyze gcp"
+gcrun_any gcp "partitioned table, one partition cached" "select id, a, f from %T where a < 20"
+sql "update gcp set a = a + 1000 where id % 7 = 0"
+gcrun_any gcp "after an UPDATE through the partitioned table" "select id, a, f from %T where a < 20 or a > 1000"
+gcagg gcp1 "aggregate over the cached partition" "select count(*), sum(a) from %T where id > 0"
+sql "create table gcw (id int4, a1 int4, a2 int4, a3 int4, a4 int4, a5 int4, a6 int4, a7 int4, a8 int4, a9 int4, a10 int4, a11 int4, a12 int4, a13 int4, a14 int4, a15 int4, a16 int4, a17 int4, a18 int4, a19 int4, a20 int4, a21 int4, a22 int4, a23 int4, a24 int4, a25 int4, a26 int4, a27 int4, a28 int4, a29 int4, a30 int4, a31 int4, a32 int4, a33 int4, a34 int4, a35 int4, t text)"
+sql "create trigger gc_sync after insert or update or delete on gcw for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=20000')"
+sql "insert into gcw select i, i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i, repeat('t', i % 300) from generate_series(1, 5000) i"
+sql "analyze gcw"
+gcrun gcw "36 columns, a text column and quals on the last ones" "select id, a35, t from %T where a35 > 4990 or length(t) = 0"
+
 echo "GPU-Cache: a large table"
 sql "create table gcbig ($GCDEF)"
 sql "create trigger gc_sync after insert or update or delete on gcbig for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=$((NROWS * 2)),cache_size=1g')"

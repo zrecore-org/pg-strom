@@ -244,6 +244,8 @@ COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_
 COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
 INTO TEMPORARY normal_result FROM normal_table WHERE id%3=0;
 --clms=("a" "b" "c" "d" "e" "f" "g") ; mtds=("count" "sum" "avg" "max" "min"); for a in ${clms[@]}; do for m in ${mtds[@]}; do echo ",ABS(c.${a}_${m} - n.${a}_${m}) < 1 AS ${a}_${m}_ok" ; done ; done;
+-- Vulkan build: a GpuJoin of two 35-column tables needs more registers than the scan VM has (planner limit)
+SET pg_strom.enable_gpujoin = off;
 VACUUM ANALYZE cache_test_table;
 SELECT 
 ABS(c.a_count - n.a_count) < 1 AS a_count_ok
@@ -284,6 +286,7 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
  FROM cached_result AS c,
 normal_result AS n
 WHERE c.a_count = n.a_count;
+RESET pg_strom.enable_gpujoin;
 
 ---
 --- TRUNCATE
