@@ -1196,6 +1196,8 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, co
 	int			arrow = ((kind & SPEC_ARROW) != 0);
 
 	kind &= ~SPEC_ARROW;
+	memset(&in, 0, sizeof(in));
+	memset(&sh, 0, sizeof(sh));
 	in.arrow = arrow;
 	in.kind = kind;
 	in.agg_max = agg_max;
