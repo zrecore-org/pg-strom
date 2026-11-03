@@ -427,7 +427,10 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			{
 				char		msg[256];
 				size_t		len = 0;
-				XpuCommand *resp = scan_exec_agg_final(wc->session, &wc->prog, &wc->agg, &len, msg, sizeof(msg));
+				XpuCommand *resp = (wc->session->u.session.xpucode_gpusort_keydesc
+								   ? scan_exec_agg_final_sorted(&ws->scan, wc->session, &wc->prog, &wc->agg, &len,
+																msg, sizeof(msg))
+								   : scan_exec_agg_final(wc->session, &wc->prog, &wc->agg, &len, msg, sizeof(msg)));
 
 				if (!resp)
 				{
