@@ -77,11 +77,13 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 - Without GROUP BY (`count`, `sum`, `avg`, `min`, `max` of integers): 2.6x to 4x faster than 8-process
   PostgreSQL on a 16.8M-row table (plan A3).
 - With GROUP BY on **up to two** keys of type `int1/2/4/8`, `date`, `time`, `timestamp` or
-  `timestamptz` (a `bool` key is not offloaded). **GROUP BY is only worth it for few groups:** 1.3x faster
-  at 7 groups, 0.8x at 100, 0.3x at 1,000 (most rows overflow to a CPU path). The planner therefore keeps
-  queries with more than `pg_strom.gpupreagg_max_groups` (default 16) estimated groups on PostgreSQL.
-- Aggregation over a join is `Aggregate (CPU) -> GpuJoin`: every joined row is shipped to the backend
-  (a GPU-side join-then-aggregate was designed in the plan but is not built as of this commit).
+  `timestamptz` (a `bool` key is not offloaded). **GROUP BY is only worth it for up to about a hundred
+  groups:** with the specialized kernels (plan A6) 5x faster than 8-process PostgreSQL at 7 groups and 4x at
+  100 (dense integer keys; a direct-mapped table), 2.6x for a GROUP BY over a join; with the interpreter
+  alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
+  queries with more than `pg_strom.gpupreagg_max_groups` (default 128) estimated groups on PostgreSQL.
+- Aggregation over a join runs on the device as well (`GpuPreAgg` on the join; plan A4): without GROUP BY
+  4x faster than 8-process PostgreSQL with the specialized kernels (29 ms against 126 ms on 16.8M rows).
 - GpuPreAgg and GpuJoin run directly on an Arrow or Parquet outer source (`Custom Scan (GpuPreAgg) on <arrow table>`,
   GpuJoin whose outer relation is the Arrow table, and aggregation over such a join), with the same shapes as for heap
   tables. Quals, join keys and group keys may read integer, float4, bool, date, time, timestamp (every unit), utf8,
@@ -114,7 +116,10 @@ side (`EXPLAIN ANALYZE` execution time):
 |---|---|---|
 | Selective heap scan (0.9% of 16.8M rows) | about 90 ms vs 124 ms (1.4x) | plan gate was 2.9x and is **not met** |
 | Unselective heap scan (50% of rows) | 980 ms vs 195 ms (slower) | forming and shipping 8.4M tuples through the socket dominates |
-| Aggregation without GROUP BY | 35-67 ms vs 115-172 ms | |
+| Aggregation without GROUP BY | 35-67 ms vs 115-172 ms; with a specialized kernel 40-50 ms vs 130-180 ms (16.8M rows, whatever the quals) | |
+| GROUP BY 7 / 100 dense integer keys | 48 ms / 68 ms vs 245 ms / 285 ms | specialized, direct-mapped table |
+| GROUP BY 1,000 keys | 860 ms vs 280 ms (slower) | most rows overflow to the CPU; the planner keeps it on PostgreSQL |
+| Aggregate / GROUP BY over a join (1,000-row dimension) | 29 ms / 120 ms vs 126 ms / 316 ms | |
 | Selective Arrow scan (2.2 GB file) | 59-65 ms vs 196-367 ms | an unselective one loses to 8 workers |
 
 Nothing is known about speed on other GPUs. The acceptance criterion in the plan is relative to

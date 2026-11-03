@@ -99,7 +99,7 @@ tier, which asks for 64-bit atomics, fp64 and the memory model.) If the log show
 4. Is everything in the query something the GPU can do? One unsupported function (`float8`
    comparison, `upper()`, `CASE`, a `LIKE` with `_`, ...) keeps that qual or column on the CPU; a
    qual that stays on the CPU is typically visible as a `Filter:` line on the Custom Scan. See [features.md](features.md).
-5. GROUP BY: more than `pg_strom.gpupreagg_max_groups` (16) estimated groups stays on PostgreSQL.
+5. GROUP BY: more than `pg_strom.gpupreagg_max_groups` (128) estimated groups stays on PostgreSQL.
 6. Joins: only hash joins, up to four inner relations, integer/bool/temporal keys; an outer join whose
    WHERE clause tests the null-extended side stays on PostgreSQL.
 7. Arrow tables: every referenced column must have a supported Arrow type, otherwise the plain

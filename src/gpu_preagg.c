@@ -3660,9 +3660,9 @@ pgstrom_init_gpu_preagg(void)
 	/* pg_strom.gpupreagg_max_groups */
 	DefineCustomIntVariable("pg_strom.gpupreagg_max_groups",
 							"Largest estimated number of groups for which GROUP BY runs on the GPU",
-							"The GPU wins for few groups (the service keeps each workgroup's groups in shared memory); with more groups most rows are aggregated on the CPU",
+							"The GPU wins for up to about a hundred groups (the service keeps each workgroup's groups in shared memory, in a table sized for the groups it has seen); with more groups most rows are aggregated on the CPU",
 							&pgstrom_gpupreagg_max_groups,
-							16,
+							128,
 							1,
 							INT_MAX,
 							PGC_USERSET,
