@@ -52,10 +52,15 @@ void	spec_mgr_destroy(spec_mgr *mgr);
  * The pipeline a task of 'prog' should dispatch: the specialized one when it is ready, else vm_pipe.
  * Called once per task; the first calls of a session only count (a one-task query never compiles),
  * a later one queues the compilation, which a worker thread does while the VM serves the tasks.
- * agg_max / ga_c: the variant's numbers (spec_shape).
+ *
+ * agg_max / ga_c: the VM variant's aggregate capacity and group table slots (the layout of its output).
+ * A specialized GROUP BY kernel has the exact aggregate count and a table sized for the groups the session has
+ * seen (groups_seen), so its output layout is its own: *out_shape tells the layout of the pipeline returned
+ * (the variant's numbers for the VM kernel). out_shape may be NULL for the other kinds.
  */
 gpu_vk_pipeline *spec_pipe(struct scan_engine *eng, struct scan_prog *prog, int kind,
-						   int agg_max, int ga_c, gpu_vk_pipeline *vm_pipe);
+						   int agg_max, int ga_c, uint32_t groups_seen, spec_shape *out_shape,
+						   gpu_vk_pipeline *vm_pipe);
 /* drop the program's reference to its compiled entry (scan_prog_free) */
 void	spec_release(struct scan_prog *prog);
 

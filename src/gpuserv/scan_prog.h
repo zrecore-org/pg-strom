@@ -58,6 +58,8 @@ typedef struct scan_prog
 	int16_t			key_scale[SCAN_GROUP_KEYS];
 	/* A6 specialization (specialize.h): the compiled kernel of this program, if any */
 	void		   *spec;				/* a spec_entry owned by the manager (we hold a reference) */
+	void		   *spec_next;			/* GROUP BY: a bigger kernel being compiled (spec_pipe) */
+	int				spec_grow_failed;
 	void		   *spec_owner;
 	int				spec_state;			/* 2: the generator refused the program or the compiler failed */
 	int				spec_tasks;			/* tasks seen (the compilation starts at the N-th) */

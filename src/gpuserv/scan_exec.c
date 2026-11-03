@@ -999,7 +999,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	/* 3. run */
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
-		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, &eng->pipe[variant]);
+		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, 0, NULL, &eng->pipe[variant]);
 
 		for (uint32_t base = 0; base < npages; base += SCAN_WG_MAX)
 		{
@@ -1377,7 +1377,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	t2 = now_ms();
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
-		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, &eng->agg_pipe[variant][avariant]);
+		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, 0, NULL, &eng->agg_pipe[variant][avariant]);
 
 		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
 		{
@@ -1950,6 +1950,8 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant;
 	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, cap, rec_words, blk_words;
+	gpu_vk_pipeline *sp;
+	spec_shape	sh;
 	uint32_t   *lp_base = NULL;
 	size_t		out_words;
 	const uint32_t *out;
@@ -1995,10 +1997,16 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	w = prog->words;
 	variant = (prog->nregs <= 16 ? 0 : 1);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
-	cap = ga_variant_cap[avariant];
-	rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * ga_variant_na[avariant];
+	/* the kernel of this task: the specialized one has its own table capacity and aggregate count (spec_shape) */
+	sh.agg_max = ga_variant_na[avariant];
+	sh.ga_c = ga_variant_cap[avariant];
+	sp = spec_pipe(eng, prog, SPEC_GAGG, sh.agg_max, sh.ga_c, st->groups ? st->groups->nents : 0, &sh,
+				   &eng->gagg_pipe[variant][avariant]);
+	cap = sh.ga_c;
+	rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
 	blk_words = 1 + cap * rec_words;
-	if (ensure_group_pipeline(eng, variant, avariant, err, errlen) != 0)
+	if ((sp == &eng->gagg_pipe[variant][avariant] || spec_check_enabled(eng)) &&
+		ensure_group_pipeline(eng, variant, avariant, err, errlen) != 0)
 		return -1;
 	if (npages == 0)
 		return 0;
@@ -2050,8 +2058,6 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
 		uint32_t	flags_base = 4 + ngroups_total * blk_words;
-		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_GAGG, 4 * (avariant + 1), (avariant == 0 ? 128 : 64),
-										&eng->gagg_pipe[variant][avariant]);
 
 		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
 		{
@@ -2064,7 +2070,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 			pc[1] = base;
 			pc[2] = AGG_PAGES_PER_WG;
 			pc[3] = flags_base;
-			if (kdispatch(eng, prog, SPEC_GAGG, 4 * (avariant + 1), (avariant == 0 ? 128 : 64), &eng->gagg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, SPEC_GAGG, sh.agg_max, sh.ga_c, &eng->gagg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;
@@ -2858,7 +2864,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 
 	/* run; if there are more matches than the output holds, run again with room for all */
 	cap = (total_lps > 4096 ? total_lps : 4096);
-	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, &eng->join_pipe[variant]);
+	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, 0, NULL, &eng->join_pipe[variant]);
 	for (int attempt = 0; attempt < 2; attempt++)
 	{
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
@@ -3094,6 +3100,8 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant, grouped;
 	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, ppw;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
+	gpu_vk_pipeline *sp, *vmpipe;
+	spec_shape	sh;
 	size_t		out_words, ovf_base = 0;
 	const uint32_t *out = NULL;
 	int			rv = -1;
@@ -3148,14 +3156,20 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	}
 	variant = (prog->nregs <= 16 ? 0 : 1);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
+	vmpipe = (grouped ? &eng->jgagg_pipe[variant][avariant] : &eng->jagg_pipe[variant][avariant]);
+	sh.agg_max = ga_variant_na[avariant];
+	sh.ga_c = ga_variant_cap[avariant];
+	sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, sh.agg_max, sh.ga_c,
+				   st->groups ? st->groups->nents : 0, &sh, vmpipe);
 	if (grouped)
 	{
-		cap = ga_variant_cap[avariant];
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * ga_variant_na[avariant];
+		cap = sh.ga_c;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * ga_variant_na[avariant];
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
 	}
-	if (ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
+	if ((sp == vmpipe || spec_check_enabled(eng)) &&
+		ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
 		return -1;
 	if (npages == 0)
 		return 0;
@@ -3197,10 +3211,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	ovf_cap = 4096;
 	for (int attempt = 0; attempt < 4; attempt++)
 	{
-		gpu_vk_pipeline *pipe = (grouped ? &eng->jgagg_pipe[variant][avariant]
-										 : &eng->jagg_pipe[variant][avariant]);
-		gpu_vk_pipeline *sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, 4 * (avariant + 1),
-										(avariant == 0 ? 128 : 64), pipe);
+		gpu_vk_pipeline *pipe = vmpipe;
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
 
 		if (grouped)
@@ -3233,7 +3244,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			pc[2] = ppw;
 			pc[3] = (uint32_t) ovf_base;
 			pc[4] = ovf_cap;
-			if (kdispatch(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, 4 * (avariant + 1), (avariant == 0 ? 128 : 64), pipe, sp, bufs, pc, groups) != 0)
+			if (kdispatch(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, sh.agg_max, sh.ga_c, pipe, sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;

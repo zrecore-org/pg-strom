@@ -973,25 +973,92 @@ entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
 	return e;
 }
 
+/*
+ * The shape of a specialized kernel. The aggregation kernels without GROUP BY keep their output layout whatever
+ * AGG_MAX is, so it is the exact number of aggregates (less shared memory). The GROUP BY kernels' layout depends
+ * on the aggregate count and the table capacity: the exact aggregate count, and a table sized for the groups the
+ * session has seen so far (a small table leaves room for more workgroups on a core; the VM variants have 128 or
+ * 64 slots whatever the query). In check mode the shape stays the VM variant's, so the outputs can be compared.
+ */
+static int
+shape_slot_bytes(int na)
+{
+	return 4 + 4 + 8 * 2 + 20 * na;		/* owner, null mask, two keys, count and four limbs per aggregate */
+}
+
+static int
+shape_stage_bytes(int na)
+{
+	return 64 * (12 + 16 + 12 * na);	/* the staging arrays of the 64 threads of a workgroup */
+}
+
+static void
+pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, uint32_t groups_seen, spec_shape *out)
+{
+	int			na = prog->nagg > 0 ? prog->nagg : 1;
+
+	*out = *in;
+	out->kind = kind;
+	if (kind == SPEC_AGG || kind == SPEC_JAGG)
+	{
+		out->agg_max = na;
+		return;
+	}
+	if (kind != SPEC_GAGG && kind != SPEC_JGAGG)
+		return;
+	if (m->mode == SPECM_CHECK)
+		return;
+	{
+		const char *env = getenv("PGSTROM_GPUSERV_SPEC_GA_C");
+		int			limit = (int) ((m->vk->info.max_shared_memory ? m->vk->info.max_shared_memory : 32768) * 3 / 4);
+		int			cmax = (limit - shape_stage_bytes(na)) / shape_slot_bytes(na);
+		int			c;
+
+		out->agg_max = na;
+		if (cmax < 16)
+		{
+			/* the aggregates do not leave room for a useful table: the VM's layout */
+			*out = *in;
+			out->kind = kind;
+			return;
+		}
+		if (env && atoi(env) > 0)
+			c = atoi(env);
+		else if (groups_seen == 0)
+			c = in->ga_c;
+		else
+		{
+			c = 16;
+			while (c < (int) (2 * groups_seen) && c < 4096)
+				c *= 2;
+		}
+		out->ga_c = c > cmax ? cmax : c;
+	}
+}
+
 gpu_vk_pipeline *
-spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, gpu_vk_pipeline *vm_pipe)
+spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, uint32_t groups_seen,
+		  spec_shape *out_shape, gpu_vk_pipeline *vm_pipe)
 {
 	spec_mgr   *m = eng->spec;
 	spec_entry *e;
+	spec_shape	in, sh;
 
+	in.kind = kind;
+	in.agg_max = agg_max;
+	in.ga_c = ga_c;
+	if (out_shape)
+		*out_shape = in;
 	if (!m || m->mode == SPECM_OFF || !m->thr_started || prog->spec_state == 2)
 		return vm_pipe;
 	if (!prog->spec)
 	{
-		spec_shape	sh;
 		char	   *defs = NULL, *body = NULL, err[256];
 
 		prog->spec_tasks++;
 		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold)
 			return vm_pipe;
-		sh.kind = kind;
-		sh.agg_max = agg_max;
-		sh.ga_c = ga_c;
+		pick_shape(m, prog, kind, &in, groups_seen, &sh);
 		if (spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) != 0)
 		{
 			spec_log(m, 0, "%s program stays on the VM: %s", kind_name(kind), err);
@@ -1007,6 +1074,53 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, gp
 		e->refs++;
 		prog->spec = e;
 		prog->spec_owner = m;
+	}
+	else if (kind == SPEC_GAGG || kind == SPEC_JGAGG)
+	{
+		/*
+		 * A GROUP BY kernel sized for the groups seen at the time may be too small now: a bigger one is
+		 * compiled while the current one (rows that find no slot are aggregated on the CPU) keeps serving.
+		 */
+		spec_entry *cur = prog->spec, *nx = prog->spec_next;
+
+		if (nx)
+		{
+			int			st = __atomic_load_n(&nx->state, __ATOMIC_ACQUIRE);
+
+			if (st == SPEC_READY)
+			{
+				cur->refs--;
+				prog->spec = nx;
+				prog->spec_next = NULL;
+			}
+			else if (st == SPEC_FAILED)
+			{
+				nx->refs--;
+				prog->spec_next = NULL;
+				prog->spec_grow_failed = 1;
+			}
+		}
+		else if (!prog->spec_grow_failed && m->mode != SPECM_CHECK &&
+				 __atomic_load_n(&cur->state, __ATOMIC_ACQUIRE) == SPEC_READY &&
+				 groups_seen * 3 / 2 > (uint32_t) cur->ga_c)
+		{
+			char	   *defs = NULL, *body = NULL, err[256];
+
+			pick_shape(m, prog, kind, &in, groups_seen, &sh);
+			if (sh.ga_c > cur->ga_c &&
+				spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) == 0)
+			{
+				spec_entry *ne = entry_find_or_add(m, &sh, defs, body);
+
+				if (ne && ne != cur)
+				{
+					ne->refs++;
+					prog->spec_next = ne;
+				}
+			}
+			else
+				prog->spec_grow_failed = 1;
+		}
 	}
 	e = prog->spec;
 	if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q && m->mode >= SPECM_FORCE)
@@ -1024,7 +1138,13 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, gp
 			if (!e->announced)
 			{
 				e->announced = 1;
-				spec_log(m, 0, "%s kernel %.8s in use", kind_name(e->kind), e->keyhex);
+				spec_log(m, 0, "%s kernel %.8s in use (%d aggregates, %d slots)", kind_name(e->kind), e->keyhex,
+						 e->agg_max, e->ga_c);
+			}
+			if (out_shape)
+			{
+				out_shape->agg_max = e->agg_max;
+				out_shape->ga_c = e->ga_c;
 			}
 			return &e->pipe;
 		case SPEC_FAILED:
@@ -1039,7 +1159,10 @@ spec_release(scan_prog *prog)
 {
 	if (prog->spec)
 		((spec_entry *) prog->spec)->refs--;
+	if (prog->spec_next)
+		((spec_entry *) prog->spec_next)->refs--;
 	prog->spec = NULL;
+	prog->spec_next = NULL;
 	prog->spec_owner = NULL;
 }
 
