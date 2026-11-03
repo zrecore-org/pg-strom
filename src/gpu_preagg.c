@@ -2392,29 +2392,22 @@ consider_sorted_groupby_path(PlannerInfo *root,
 							 nodeToString(f_expr));
 						continue;
 					}
-					/* check whether the referenced raw key is device executable */
-					if (kind == KSORT_KEY_KIND__VREF)
+					/*
+					 * A GROUP BY key (action 0) must be device executable; the Vulkan service sorts
+					 * the integer representation of bool, int1-8 and the date/time types, so the
+					 * device compare handler of the type is not needed. count(*)/count(x) are VREF
+					 * kinds of an aggregate action: nothing to check.
+					 */
+					if (kind == KSORT_KEY_KIND__VREF && action == 0 &&
+						!pgstrom_xpu_expression((Expr *)f_expr,
+												pp_info->xpu_task_flags,
+												pp_info->base_relid,
+												inner_target_list,
+												NULL))
 					{
-						devtype_info *dtype;
-
-						if (!pgstrom_xpu_expression((Expr *)f_expr,
-													pp_info->xpu_task_flags,
-													pp_info->base_relid,
-													inner_target_list,
-													NULL))
-						{
-							elog(DEBUG1, "gpusort: key expression is not device executable: %s",
-								 nodeToString(f_expr));
-							continue;
-						}
-						/* check compare functions */
-						dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
-						if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
-						{
-							elog(DEBUG1, "gpusort: type '%s' is not device supported",
-								 format_type_be(exprType((Node *)em_expr)));
-							continue;
-						}
+						elog(DEBUG1, "gpusort: key expression is not device executable: %s",
+							 nodeToString(f_expr));
+						continue;
 					}
 					/* the Vulkan service sorts on a subset of the keys (the others stay on the CPU) */
 					{
@@ -3448,9 +3441,31 @@ GpuPreAggAddCustomPath(PlannerInfo *root,
 				{
 					Path   *__path = lfirst(lc);
 
+					FinalPathExtraData *fextra = extra;
+					Query	   *parse = root->parse;
+
+					/* WITH TIES needs the rows after the limit too */
+					if (parse->limitOption == LIMIT_OPTION_WITH_TIES)
+						continue;
 					__path = tryGpuSortWithLimitPath(root, extra, __path, false);
 					if (__path)
+					{
+						/*
+						 * The sorter keeps the first limit+offset rows; the Limit node (the planner has
+						 * not put one on this path: it only adds it to the paths of its own list) drops
+						 * the OFFSET rows and enforces the count.
+						 */
+						if (fextra->limit_needed)
+							__path = (Path *)create_limit_path(root,
+															   upper_rel,
+															   __path,
+															   parse->limitOffset,
+															   parse->limitCount,
+															   parse->limitOption,
+															   fextra->offset_est,
+															   fextra->count_est);
 						pathlist = lappend(pathlist, __path);
+					}
 				}
 				foreach (lc, pathlist)
 					add_path(upper_rel, (Path *)lfirst(lc));

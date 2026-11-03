@@ -48,8 +48,8 @@ for T in s1 s2; do
 	runsort $T "order by count(*), key" "select a, count(*) from %T group by a order by 2 desc, 1 desc"
 	runsort $T "order by max, min" "select a % 97 as k, max(b), min(c) from %T group by 1 order by 2 desc nulls last, 3 nulls first, 1"
 	# two group keys (bool and an integer expression): NULL keys, ASC/DESC per key
-	runsort $T "two keys, mixed directions" "select e, a % 7 as m, count(*), sum(b) from %T group by e, a % 7 order by e desc, m"
-	runsort $T "two keys, by an aggregate between them" "select e, a % 5 as m, sum(b) from %T group by e, 2 order by 1, 3 desc nulls last, 2"
+	runsort $T "two keys, mixed directions" "select a % 3 as e2, a % 7 as m, count(*), sum(b) from %T group by 1, 2 order by e2 desc, m"
+	runsort $T "two keys, by an aggregate between them" "select a % 3 as e2, a % 5 as m, sum(b) from %T group by 1, 2 order by 1, 3 desc nulls last, 2"
 	# LIMIT / OFFSET pushed into the sort
 	runsort $T "LIMIT" "select a, count(*), sum(b) from %T group by a order by 3 desc nulls last, 1 limit 10"
 	runsort $T "LIMIT with OFFSET" "select a, sum(b) from %T group by a order by a limit 7 offset 5"
@@ -74,7 +74,7 @@ done
 JS="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
 runsort s1 "over a join: order by sum DESC" "select d.grp, count(*), sum(t.b) from %T t join sd d on t.b = d.k group by d.grp order by 3 desc nulls last, 1" "$JS"
 runsort s1 "over a join: order by the key, LIMIT" "select d.grp, sum(t.a) from %T t join sd d on t.b = d.k group by d.grp order by 1 limit 5" "$JS"
-runsort s2 "over a join: two keys" "select d.grp, t.e, count(*) from %T t join sd d on t.b = d.k group by d.grp, t.e order by 3, 1, 2" "$JS"
+runsort s2 "over a join: two keys" "select d.grp, t.a % 2 as e2, count(*) from %T t join sd d on t.b = d.k group by d.grp, 2 order by 3, 1, 2" "$JS"
 
 # window-rank filter: rank() / dense_rank() / row_number() below N per partition
 runsort_set s1 "rank() <= 3 per partition" "select * from (select a / 2000 as p, a, sum(b) as sb, rank() over (partition by a / 2000 order by sum(b)) r from %T group by a / 2000, a) z where r <= 3"
@@ -82,6 +82,7 @@ runsort_set s1 "dense_rank() < 3 per partition, DESC" "select * from (select a /
 runsort s1 "row_number() <= 4 per partition (total order)" "select * from (select a / 1000 as p, a, sum(c) as sc, row_number() over (partition by a / 1000 order by sum(c), a) r from %T group by a / 1000, a) z where r <= 4 order by p, r"
 # a window on top of GROUP BY the planner cannot feed from the sorter stays on the CPU
 runsort_cpu s1 "avg() key: the sorter has no average" "select a % 40 as k, avg(b) from %T group by 1 order by 2 desc nulls last, 1"
+runsort_cpu s1 "bool group key (GpuPreAgg does not take bool keys)" "select e, count(*) from %T group by e order by e desc"
 runsort_cpu s1 "float4 NaN key" "select d, count(*) from %T group by d order by d"
 runsort_cpu s1 "sort key is not in the result of the GROUP BY (expression)" "select a % 40 as k, count(*) from %T group by 1 order by (a % 40) * 2 desc, 1"
 
@@ -91,9 +92,11 @@ n=$($PSQL -d scantest -c "$GS set pg_strom.enable_gpusort=off; explain select a,
 # cpu_fallback on: the sorter cannot hand rows to the CPU, so the planner does not offer it
 n=$($PSQL -d scantest -c "$GS set pg_strom.cpu_fallback=on; explain select a, sum(b) from s1 group by a order by 2 desc, 1" | grep -c "GPU-Sort keys")
 [ "$n" -eq 0 ]; check "cpu_fallback=on: no GPU-Sort in the plan" $?
-# parallel plans keep the Aggregate and the CPU sort (a session of the service sees only its own rows)
-n=$($PSQL -d scantest -c "$GS set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0; explain select a, sum(b) from s1 group by a order by 2 desc, 1" | grep -c "GPU-Sort keys")
-[ "$n" -eq 0 ]; check "parallel plan: no GPU-Sort in the plan" $?
+# parallel settings: the non-parallel GPU-Sort path may still be chosen (a Gather never sits above it); the rows must match
+PARSET2="set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+g=$(qo "$GS $PARSET2" "select a, sum(b) from s1 group by a order by 2 desc, 1")
+c=$(qo "$GSCPU" "select a, sum(b) from s1 group by a order by 2 desc, 1")
+[ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; check "parallel settings: sorted GROUP BY result matches" $?
 
 # every group once: the sum of the counts is the number of rows (the GROUP BY result is complete)
 g=$($PSQL -d scantest -c "$GS select sum(n), count(*) from (select a, count(*) as n from s1 group by a order by a) z" | tail -1)
