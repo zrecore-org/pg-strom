@@ -291,11 +291,11 @@ SELECT id, ((v)->>'num1')::numeric + ((v)->'comp'->>'ival')::numeric v1,
   INTO test06g
   FROM rt_jsonb_o
  WHERE id > 0;
-                                                                                                                                                                              QUERY PLAN                                                                                                                                                                              
-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                                                QUERY PLAN                                                                                                                                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_jsonb_temp.rt_jsonb_o
-   Output: id, (((v ->> 'num1'::text))::numeric + (((v -> 'comp'::text) ->> 'ival'::text))::numeric), (((v ->> 'num2'::text))::numeric + (((v -> 'comp'::text) ->> 'fval'::text))::numeric), ("substring"((v ->> 'str1'::text), 2, 16) || "substring"(((v -> 'comp'::text) ->> 'sval_1'::text), 2, 16)), "substring"(((v -> 'comp'::text) ->> 'sval_2'::text), 2, 16)
-   GPU Projection: rt_jsonb_o.id, rt_jsonb_o.v
+   Output: id, ((((v ->> 'num1'::text))::numeric + (((v -> 'comp'::text) ->> 'ival'::text))::numeric)), ((((v ->> 'num2'::text))::numeric + (((v -> 'comp'::text) ->> 'fval'::text))::numeric)), ("substring"((v ->> 'str1'::text), 2, 16) || "substring"(((v -> 'comp'::text) ->> 'sval_1'::text), 2, 16)), "substring"(((v -> 'comp'::text) ->> 'sval_2'::text), 2, 16)
+   GPU Projection: rt_jsonb_o.id, (((rt_jsonb_o.v ->> 'num1'::text))::numeric + (((rt_jsonb_o.v -> 'comp'::text) ->> 'ival'::text))::numeric), (((rt_jsonb_o.v ->> 'num2'::text))::numeric + (((rt_jsonb_o.v -> 'comp'::text) ->> 'fval'::text))::numeric), rt_jsonb_o.v
    GPU Scan Quals: (rt_jsonb_o.id > 0)
 (4 rows)
 

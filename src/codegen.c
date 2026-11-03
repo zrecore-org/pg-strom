@@ -4843,9 +4843,15 @@ pgstrom_xpu_expression(Expr *expr,
 		case VARCHAROID:
 		case BPCHAROID:
 		case JSONBOID:
-			if (!IsA(expr, Var))
+		{
+			Expr   *e = expr;
+
+			while (IsA(e, RelabelType))		/* varchar -> text of a column is the column */
+				e = ((RelabelType *) e)->arg;
+			if (!IsA(e, Var))
 				return false;
 			break;
+		}
 		default:
 			break;
 	}
