@@ -2702,7 +2702,8 @@ error:
  * session's agg_state exactly like those of a scan.
  * ----------------------------------------------------------------
  */
-#define JAGG_PAGES_PER_WG	8U		/* outer pages one such workgroup runs over */
+#define JAGG_PAGES_PER_WG	8U		/* outer pages one such workgroup runs over (without GROUP BY) */
+#define JGAGG_PAGES_PER_WG	32U		/* ... with GROUP BY (the group table is set up and written out per workgroup) */
 
 static int
 ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int avariant, char *err, size_t errlen)
@@ -2752,7 +2753,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	gpu_vk_buffer bout, bprog, btab;
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant, grouped;
-	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0;
+	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, ppw;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	size_t		out_words, ovf_base = 0;
 	const uint32_t *out = NULL;
@@ -2840,7 +2841,8 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			total_lps += (pd_lower - 24) / 4;
 	}
 	st->nitems_raw += total_lps;
-	ngroups_total = (npages + JAGG_PAGES_PER_WG - 1) / JAGG_PAGES_PER_WG;
+	ppw = (grouped ? JGAGG_PAGES_PER_WG : JAGG_PAGES_PER_WG);
+	ngroups_total = (npages + ppw - 1) / ppw;
 	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
@@ -2887,7 +2889,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 				groups = SCAN_WG_MAX;
 			pc[0] = npages;
 			pc[1] = base;
-			pc[2] = JAGG_PAGES_PER_WG;
+			pc[2] = ppw;
 			pc[3] = (uint32_t) ovf_base;
 			pc[4] = ovf_cap;
 			if (gpu_vk_dispatch(vk, pipe, bufs, pc, groups, 1, 1, NULL) != 0)

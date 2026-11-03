@@ -54,19 +54,24 @@
         }
 
 #if JW_MODE == 2
-        // the whole workgroup goes on until all lanes are done: sh_more is the OR of "d != 0"
-        bool more;
-        if (d != 0)
+        // The whole workgroup goes on until all lanes are done. Every round publishes two bits in
+        // sh_flags[round % 3]: bit 0 "some lane still walks", bit 1 "some lane has a row to
+        // aggregate" (a round without one skips the table work). A slot is read by everybody right
+        // after the round's first barrier and cleared by thread 0 in the next round after its first
+        // barrier, so three slots are enough to have no reset race even when a round has no
+        // further barrier.
+        bool more, any_row;
         {
             uint pv;
-            InterlockedOr(sh_more, 1u, pv);
+            uint s = ri % 3u;
+            if (d != 0)
+                InterlockedOr(sh_flags[s], 1u, pv);
+            GroupMemoryBarrierWithGroupSync();
+            more = ((sh_flags[s] & 1u) != 0);
+            if (lid.x == 0)
+                sh_flags[(s + 2u) % 3u] = 0;
+            ri++;
         }
-        GroupMemoryBarrierWithGroupSync();
-        more = (sh_more != 0);
-        GroupMemoryBarrierWithGroupSync();
-        if (lid.x == 0)
-            sh_more = 0;
-        GroupMemoryBarrierWithGroupSync();
         [loop]
         while (more)
 #else
@@ -284,15 +289,23 @@
             }
             else
                 st_kn[tid] = 0;
-            if (d != 0)
             {
                 uint pv;
-                InterlockedOr(sh_more, 1u, pv);
+                uint s = ri % 3u;
+                uint bits = (d != 0 ? 1u : 0u) | (emit ? 2u : 0u);
+                if (bits != 0)
+                    InterlockedOr(sh_flags[s], bits, pv);
+                GroupMemoryBarrierWithGroupSync();
+                uint fl = sh_flags[s];
+                more = ((fl & 1u) != 0);
+                any_row = ((fl & 2u) != 0);
+                if (tid == 0)
+                    sh_flags[(s + 2u) % 3u] = 0;
+                ri++;
             }
-            GroupMemoryBarrierWithGroupSync();
-
+            if (any_row)
+            {
             // B: find or claim the slot of the row's key
-            more = (sh_more != 0);
             uint slot = NO_SLOT;
             bool fits = true;                               // min/max arguments must fit 32 bits
             if (emit)
@@ -409,8 +422,6 @@
                     }
                 }
             }
-            if (tid == 0)
-                sh_more = 0;            // everybody has read it (before the barrier above)
             for (uint s = tid; s < GA_C; s += SCAN_WG)
             {
                 uint o = sh_owner[s];
@@ -424,6 +435,7 @@
                 }
             }
             GroupMemoryBarrierWithGroupSync();
+            }
 #endif
         }
     }

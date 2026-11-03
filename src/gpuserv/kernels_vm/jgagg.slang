@@ -50,7 +50,7 @@ groupshared uint    sh_l1[GA_C * GA_NA];
 groupshared uint    sh_l2[GA_C * GA_NA];
 groupshared uint    sh_l3[GA_C * GA_NA];
 groupshared uint    sh_hits;
-groupshared uint    sh_more;                        // some lane of the workgroup still walks
+groupshared uint    sh_flags[3];                    // per round: bit 0 some lane walks, bit 1 some lane has a row
 
 groupshared uint    st_kn[SCAN_WG];                 // null mask | 0x80000000 if the lane has a row
 groupshared uint    st_hash[SCAN_WG];
@@ -120,10 +120,11 @@ void jgagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (tid == 0)
     {
         sh_hits = 0;
-        sh_more = 0;
+        sh_flags[0] = 0; sh_flags[1] = 0; sh_flags[2] = 0;
     }
     GroupMemoryBarrierWithGroupSync();
 
+    uint ri = 0;                                    // round counter (selects the slot of sh_flags)
     for (uint page = first_page; page < last_page; page++)
     {
 #include "join_walk.inc"

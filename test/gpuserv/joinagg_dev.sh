@@ -34,6 +34,7 @@ pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
 trap stop EXIT INT TERM
+[ -f /tmp/a4c_trace ] && export PGSTROM_GPUSERV_TRACE=1
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
@@ -89,7 +90,8 @@ runagg_any() { :; }
 [ -z "$ADHOC" ] && [ -f /tmp/a4c_adhoc.sql ] && ADHOC=/tmp/a4c_adhoc.sql
 if [ -n "$ADHOC" ]; then
 	$PSQL -d scantest -f "$ADHOC" 2>&1
-	exit 0
+	[ -f /tmp/a4c_trace ] && grep "pgstrom-gpuserv: .*task" "$ROOT/log" | tail -${TRACE_LINES:-40}
+	[ -f /tmp/a4c_skip_tests ] && exit 0
 fi
 . "${0%/*}/joinagg_tests.inc"
 echo

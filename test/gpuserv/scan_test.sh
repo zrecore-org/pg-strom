@@ -308,6 +308,9 @@ runjoin s1 "RIGHT JOIN with a WHERE qual on the nullable side stays on the CPU" 
 runjoin s1 "RIGHT JOIN, parallel workers (not offloaded: the unmatched rows are reported once)" "select t.i, d.k, d.grp from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 JOINSET="$JOINSET_SAVE"
 
+# ---- aggregation over a join (GpuPreAgg on GpuJoin), with and without GROUP BY
+. "${0%/*}/joinagg_tests.inc"
+
 echo "arrow (Arrow_Fdw)"
 # The foreign tables read Arrow IPC files written by arrow_gen.cpp (the arrow-tools do not build on macOS).
 ARROWDIR="$ROOT/arrow"; mkdir -p "$ARROWDIR"
