@@ -1,0 +1,123 @@
+# What runs on the GPU (Vulkan build)
+
+Basis: the branch at commit `0996f3b3` and the status sections of `.claude/hw-acceleration.md`
+("the plan"): A2 (GpuScan), A3 (GpuPreAgg), A4 (GpuJoin), A5 (Arrow/Parquet), A6 (types). Later
+work (numeric types, aggregation over a join) is tracked in the plan, not here; when this file and
+the plan disagree, the plan and the code win.
+
+The rule that makes the rest safe: **anything the GPU cannot do stays on PostgreSQL.** The planner
+side (`src/codegen.c`) asks `src/gpuserv/scan_caps.c`, the single description of what the scan VM
+implements, and refuses to push down a function, type or node it lacks. Such a query returns the CPU's
+result; at worst it is not faster. Every GPU result is compared with the CPU's in
+`test/gpuserv/scan_test.sh` (GPU versus `pg_strom.enabled = off`, by md5 of the sorted result).
+
+How the GPU work is done: a **scan VM** (one opcode-switch interpreter written in Slang) evaluates
+the planner's expression trees; there are kernels for scanning, aggregation, GROUP BY, join and Arrow
+columns (`src/gpuserv/kernels_vm/`). Specialized kernels generated per query (plan item A6) are not
+done, which is why a trivial qual costs more than it would in generated code.
+
+## Summary
+
+| | On the GPU | Stays on the CPU |
+|---|---|---|
+| Sources | Heap tables (page by page); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, and as the inner side of a GpuJoin) | GPU-Cache (a stub); GpuJoin / GpuPreAgg with an Arrow outer source. BRIN-index assisted scans: not tested on this branch |
+| Scan (`GpuScan`) | Quals and computed projections over the types below; pass-through columns of any type; UPDATE and DELETE scans; query parameters | See "types" |
+| Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float, numeric and text aggregates; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
+| Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
+| Other | | GPU-Sort and window functions, GPU-Cache, jsonb, PostGIS (dropped), SELECT INTO direct (dropped) |
+
+## Types
+
+The VM computes with these types (plan A2.4, A6). Columns of every other type are still **passed
+through** (copied from the source tuple on the CPU) and can appear in the result of a GPU scan or join.
+
+| Type | On the GPU | Not on the GPU |
+|---|---|---|
+| `bool`, `int1`/`int2`/`int4`/`int8` | Comparison, arithmetic with PostgreSQL's overflow, divide-by-zero and modulo rules, casts between integer widths, three-valued AND/OR/NOT, `IS [NOT] NULL` | |
+| `float4` | Comparison and arithmetic with PostgreSQL's NaN rules (no modulo), casts to and from the integers (round half to even), `IS [NOT] NULL` | |
+| `float8` (double precision) | pass-through only | every operator and aggregate; the base tier has no fp64 and the code never emulates it |
+| `numeric` | pass-through only | everything (no device numeric yet) |
+| `date`, `time`, `timestamp`, `timestamptz` | Comparison within a type, `date` against `timestamp`, `date + int4`, `date - int4`, `date - date`, `date <-> timestamp` casts, `min`/`max`, GROUP BY and join keys | `timestamptz` compared with `date`/`timestamp` (session time zone), `interval` anything, `timetz`, `extract`, `date_trunc`, `timestamptz::date`, `overlaps` |
+| `text`, `varchar`, `bpchar` | `=` and `<>` (bytewise; deterministic collations only), `<`, `<=`, `>`, `>=` in the C collation only, `LIKE`/`NOT LIKE` with a constant pattern of the shape `abc`, `abc%`, `%abc`, `%abc%` (UTF-8 or single-byte databases), `length()` in UTF-8, `IS NULL`, `count(col)` | `_` and inner `%` in `LIKE`, `ILIKE`, regular expressions, `upper`, `substr`, concatenation, `IN` lists, text GROUP BY keys and join keys, **any string expression inside a GpuJoin program (including the scan quals of the join's outer relation)** |
+| Compressed or TOAST-ed text | Evaluated by the backend: the kernel flags the row and the backend re-runs the whole row on the CPU | (`client_min_messages = debug1` shows "CPU re-evaluation of N tuples") |
+| `jsonb`, arrays, ranges, `inet`, `macaddr`, geometry, everything else | pass-through only | everything |
+
+`CASE`, `COALESCE`, `GREATEST`/`LEAST`, `IN (...)`, `IS TRUE`/`IS DISTINCT FROM` (`BooleanTest`,
+`DistinctExpr`), `CoerceViaIO` are not pushed down (`codegen.c` in the Vulkan build).
+
+## GpuScan
+
+- Heap pages: one workgroup per page, one thread per line pointer. Pages the backend had to load
+  (visibility checked on the CPU, under the buffer lock) are sent to the service; all-visible pages
+  are read by the service itself from the relation file (a 512 MB window is `mmap`ed and imported
+  into Vulkan on unified-memory devices; `PGSTROM_GPUSERV_NO_MAP=1` turns this off).
+- The result tuples are formed on the CPU by the service from the source tuple plus the GPU's
+  computed values, in heap order.
+- **Errors are not recovered.** A kernel error (division by zero, integer overflow) fails the query,
+  with a message that names the function, block and line pointer. PostgreSQL evaluates quals in an
+  order the GPU does not follow, so a row PostgreSQL would have skipped can raise an error on the GPU.
+  `pg_strom.cpu_fallback` does not change this (see [parameters.md](parameters.md)).
+- Arrow_Fdw (A5): one or several Arrow files (any number of record batches) and Parquet files (one task per
+  row group; **the backend decodes the row group with libparquet on the CPU**, the GPU only filters).
+  The planner offers a GpuScan only if every referenced column has a supported Arrow type: Int
+  (1/2/4/8 bytes), FloatingPoint (2/4/8 bytes), Bool, Utf8/LargeUtf8, Binary/LargeBinary, Date[day],
+  Time, Timestamp, FixedSizeBinary as `bpchar`, and virtual columns. Decimal, Interval, Date[ms], List,
+  Struct, `macaddr` and `inet` keep the table on the CPU Arrow_Fdw path. `ctid` of an Arrow table is
+  refused. Statistics hints (min/max per batch) still skip batches.
+
+## GpuPreAgg (aggregation)
+
+- The plan is `Aggregate (CPU) -> Custom Scan (GpuPreAgg)`: the GPU produces **partial** aggregate
+  states and PostgreSQL's own Agg node combines and finalizes them. `sum(int8)` is exact beyond 64 bits.
+- Without GROUP BY (`count`, `sum`, `avg`, `min`, `max` of integers): 2.6x to 4x faster than 8-process
+  PostgreSQL on a 16.8M-row table (plan A3).
+- With GROUP BY on **up to two** keys of type `int1/2/4/8`, `date`, `time`, `timestamp` or
+  `timestamptz` (a `bool` key is not offloaded). **GROUP BY is only worth it for few groups:** 1.3x faster
+  at 7 groups, 0.8x at 100, 0.3x at 1,000 (most rows overflow to a CPU path). The planner therefore keeps
+  queries with more than `pg_strom.gpupreagg_max_groups` (default 16) estimated groups on PostgreSQL.
+- Aggregation over a join is `Aggregate (CPU) -> GpuJoin`: every joined row is shipped to the backend
+  (a GPU-side join-then-aggregate was designed in the plan but is not built as of this commit).
+- GpuPreAgg over an Arrow or Parquet outer source is not supported (`Aggregate -> GpuScan`).
+
+## GpuJoin
+
+- Hash joins only. `INNER`, `LEFT`, `RIGHT`, `FULL`, semi (`EXISTS`, `IN`) and anti (`NOT EXISTS`, and
+  `NOT IN` where PostgreSQL 18+ plans an anti join) joins; up to **four inner relations in one GpuJoin**
+  (shown as `[1]` to `[4]`).
+- Join keys: integer, `bool` and the four temporal types. Any pushed-down join qualifier over the VM's
+  types, scan quals on the outer side, projections mixing outer and inner columns (pass-through of
+  any type included).
+- Stays on PostgreSQL: nest-loop and GiST joins; more than four inner relations; non-integer keys
+  (text, numeric, float); an outer join with a qualifier coming from the WHERE clause; RIGHT and FULL
+  joins in a parallel plan; PostgreSQL's "unique-ified" semi joins.
+- Performance: a selective join (6,000 result rows from a 2M-row outer and a 4,000-row inner) 12.5 ms
+  against 24.8 ms for 8-process PostgreSQL; an unselective one (1.6M result rows) 175 ms against 62 ms,
+  because forming and shipping result tuples dominates. Joins pay off when they reduce rows or feed an
+  aggregate; the cost model is not tuned for that.
+- The pinned inner buffer (a GPU-resident inner shared by later nodes) is not supported.
+
+## Speed, honestly
+
+Measured on one Apple M1 Pro with 8 CPU cores, against 8-process PostgreSQL on the same table, server
+side (`EXPLAIN ANALYZE` execution time):
+
+| Query shape | GPU | Notes |
+|---|---|---|
+| Selective heap scan (0.9% of 16.8M rows) | about 90 ms vs 124 ms (1.4x) | plan gate was 2.9x and is **not met** |
+| Unselective heap scan (50% of rows) | 980 ms vs 195 ms (slower) | forming and shipping 8.4M tuples through the socket dominates |
+| Aggregation without GROUP BY | 35-67 ms vs 115-172 ms | |
+| Selective Arrow scan (2.2 GB file) | 59-65 ms vs 196-367 ms | an unselective one loses to 8 workers |
+
+Nothing is known about speed on other GPUs. The acceptance criterion in the plan is relative to
+PostgreSQL's parallel scan on the same machine, not to CUDA.
+
+## What is not implemented (and where it is tracked)
+
+| Feature | State |
+|---|---|
+| GPU-Sort, window functions on the GPU | Not implemented (plan A7); `pg_strom.enable_gpusort` defaults to `off` and does nothing |
+| GPU-Cache | A stub (plan A7); the SQL functions exist so that older upgrade scripts load |
+| `numeric` on the GPU, specialized kernels, fuzzer | Not done (plan A6 "known gaps") |
+| jsonb | Not started (plan A8) |
+| GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
+| fp64, 64-bit-atomic kernels for devices that have them | Not implemented (plan A3b); `float8` stays on the CPU on every device |

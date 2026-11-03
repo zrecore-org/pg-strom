@@ -1,5 +1,5 @@
 # pg_strom extension
-comment = 'PG-Strom - big-data processing acceleration using GPU and NVME'
+comment = 'PG-Strom - big-data processing acceleration using GPU (Vulkan)'
 directory = 'pg_strom'
 default_version = '7.0'
 module_pathname = '$libdir/pg_strom'
