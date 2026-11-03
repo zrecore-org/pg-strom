@@ -11,7 +11,7 @@ test: conv_text_inet
 
 # Not scheduled in parallel_schedule, listed so that every test file has a status:
 #
-# gpu_cache      GPU-Cache (A7): the cache functions are stubs on this branch.
+# gpu_cache      (moved to vulkan_schedule: GPU-Cache works, A7 part 2)
 # parquet_cache  Parquet cache (A5/A7): parquet_cache.c is a stub.
 # postgis        PostGIS GiST index on the GPU (A4/A8): not ported, and needs the postgis extension.
 # dtype_range    Range types: no expected file for any PostgreSQL version in this tree.
