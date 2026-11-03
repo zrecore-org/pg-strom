@@ -876,22 +876,35 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 regs[dst].isnull = 1;
                 break;
             }
-            float a = asfloat(uint(x.v));
-            float b = asfloat(uint(y.v));
+            // Metal flushes denormal floats to zero (operands and results), PostgreSQL does not: a row with a denormal
+            // operand, or whose result may be denormal or underflow, is evaluated by the backend (exact, including
+            // PostgreSQL's underflow error)
+            uint  ua = uint(x.v), ub = uint(y.v);
+            if ((((ua & 0x7f800000u) == 0u) && ((ua & 0x7fffffu) != 0u)) ||
+                (((ub & 0x7f800000u) == 0u) && ((ub & 0x7fffffu) != 0u)))
+                return SOP_RECHECK_CODE;
+            float a = asfloat(ua);
+            float b = asfloat(ub);
             float r = 0;
             bool  bad = false;
             uint  why = SOP_ERR_FLTOVER;
             bool  inf_in = isinf(a) || isinf(b);
+            bool  tiny = false;
 
             switch (k0)
             {
-            case SOP_ARITH_PL: r = a + b; bad = isinf(r) && !inf_in; break;
-            case SOP_ARITH_MI: r = a - b; bad = isinf(r) && !inf_in; break;
+            case SOP_ARITH_PL:
+                r = a + b; bad = isinf(r) && !inf_in;
+                tiny = (abs(r) < 1.17549435e-38) && !(r == 0 && a == -b);
+                break;
+            case SOP_ARITH_MI:
+                r = a - b; bad = isinf(r) && !inf_in;
+                tiny = (abs(r) < 1.17549435e-38) && !(r == 0 && a == b);
+                break;
             case SOP_ARITH_MUL:
                 r = a * b;
-                bad = (isinf(r) && !inf_in) || (r == 0 && a != 0 && b != 0);
-                if (!isinf(r))
-                    why = SOP_ERR_FLTUNDER;
+                bad = (isinf(r) && !inf_in);
+                tiny = (abs(r) < 1.17549435e-38) && a != 0 && b != 0;
                 break;
             default:    // SOP_ARITH_DIV
                 if (b == 0)
@@ -902,12 +915,13 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 else
                 {
                     r = a / b;
-                    bad = (isinf(r) && !inf_in) || (r == 0 && a != 0 && !isinf(b));
-                    if (!isinf(r))
-                        why = SOP_ERR_FLTUNDER;
+                    bad = (isinf(r) && !inf_in);
+                    tiny = (abs(r) < 1.17549435e-38) && a != 0 && !isinf(b);
                 }
                 break;
             }
+            if (!bad && tiny && !isnan(r))
+                return SOP_RECHECK_CODE;
             if (bad)
                 return k1 | (why << 16);
             regs[dst].v = int64_t(asuint(r));

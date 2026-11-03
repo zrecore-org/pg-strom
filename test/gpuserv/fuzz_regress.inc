@@ -58,3 +58,9 @@ for t in s1 s2 s3; do
 	run $t "float4 = a denormal constant against a column" "select i from %T where d <= 1e-38::float4 and d > '-1e-38'::float4"
 	run $t "float4 vs a column through arithmetic" "select i from %T where d * 0::float4 = 0::float4 and d <> -0.0::float4 and d < 0.5::float4"
 done
+for t in s1 s2 s3; do
+	# float4 arithmetic whose result (or operand) is denormal: the backend evaluates the row (Metal flushes to zero)
+	run $t "float4 product that is denormal" "select i, d * 1e-38::float4 as x from %T where i < 3000 and d < 1000::float4"
+	run $t "float4 qual on a denormal quotient" "select i from %T where d / 1e38::float4 > 0::float4 and d / 1e38::float4 < 1e-37::float4 and i < 5000 and d < 1000::float4"
+	run_any $t "float4 sum with a denormal operand" "select i, d + 1e-40::float4 from %T where i < 3000 and d < 1000::float4"
+done
