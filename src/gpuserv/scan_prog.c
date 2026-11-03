@@ -612,6 +612,11 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			if (emit(b, SOP_NUMARITH, dst, ra, rb, fc.kind, kexp->opcode) < 0)
 				return -1;
 			break;
+		case SOP_NUMDIV:
+		case SOP_NUMRND:
+			if (emit(b, fc.cls, dst, ra, rb, fc.kind, kexp->opcode) < 0)
+				return -1;
+			break;
 		case SOP_ARITH:
 			if (emit(b, SOP_ARITH, dst, ra, rb, fc.kind | (fc.width << 8), kexp->opcode) < 0)
 				return -1;

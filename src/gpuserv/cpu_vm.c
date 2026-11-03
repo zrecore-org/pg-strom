@@ -307,6 +307,20 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				}
 				return 0;
 			}
+			if (k0 >= SOP_NUMOP_CEIL)
+			{
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+				{
+					int64_t		ur;
+					uint32_t	usc;
+
+					scan_vm_num_unary((int) k0, x.v, x.sc, &ur, &usc);
+					regs[dst].v = ur;
+					regs[dst].sc = usc;
+				}
+				return 0;
+			}
 			y = regs[rb];
 			if (x.isnull || y.isnull)
 			{
@@ -333,6 +347,30 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				return SOP_RECHECK_CODE;
 			regs[dst].v = r;
 			regs[dst].sc = sc;
+			regs[dst].isnull = 0;
+			return 0;
+		}
+		case SOP_NUMDIV:
+		case SOP_NUMRND:
+		{
+			vm_reg		x = regs[ra], y = regs[rb];
+			int64_t		qr;
+			uint32_t	qsc;
+			int			ok;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			if (op == SOP_NUMDIV)
+				ok = scan_vm_num_div((int) k0, x.v, x.sc, y.v, y.sc, &qr, &qsc);
+			else
+				ok = scan_vm_num_round((int) k0, x.v, x.sc, y.v, &qr, &qsc);
+			if (!ok)
+				return SOP_RECHECK_CODE;
+			regs[dst].v = qr;
+			regs[dst].sc = qsc;
 			regs[dst].isnull = 0;
 			return 0;
 		}

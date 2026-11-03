@@ -40,6 +40,10 @@ int		scan_vm_num_cmp(int64_t va, uint32_t sa, int64_t vb, uint32_t sb);
 int		scan_vm_numeric_payload_decode(const unsigned char *p, uint32_t plen, int64_t *v, uint32_t *sc);
 int		scan_vm_numeric_datum_decode(const unsigned char *d, int64_t *v, uint32_t *sc);
 uint32_t scan_vm_numeric_encode(int64_t v, uint32_t sc, unsigned char *buf);
+/* numeric.c's division, remainder, rounding ...: return 1 with the result, or 0 if the backend must evaluate the row */
+int		scan_vm_num_div(int kind, int64_t a, uint32_t sa, int64_t b, uint32_t sb, int64_t *r, uint32_t *rsc);
+int		scan_vm_num_round(int kind, int64_t v, uint32_t sc, int64_t n, int64_t *r, uint32_t *rsc);
+int		scan_vm_num_unary(int kind, int64_t v, uint32_t sc, int64_t *r, uint32_t *rsc);
 
 /*
  * Aggregation (GpuPreAgg): which partial-aggregate actions (KAGG_ACTION__*, xpu_common.h)
