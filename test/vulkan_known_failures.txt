@@ -1,0 +1,57 @@
+# Status of the upstream regression suite on the Vulkan build (branch vulkan-gpu).
+#
+# Commands (PostgreSQL 17 on macOS, a throwaway cluster, dataset kept between runs):
+#   sh test/gpuserv/locked_test.sh <tree> test/vulkan_installcheck.sh                    # vulkan_schedule: must be green
+#   TARGET=pending-installcheck sh test/gpuserv/locked_test.sh <tree> test/vulkan_installcheck.sh   # pending_schedule
+#   sh test/gpuserv/locked_test.sh <tree> test/vulkan_regen_expected.sh                  # regenerate <test>_9.out
+# or, against a server that is already running with the module installed:
+#   make -C test PG_CONFIG=... vulkan-installcheck
+#
+# How the expected files work. pg_regress accepts <test>.out and <test>_0.out .. <test>_9.out; a test passes if
+# its output equals any of them. <test>.out / <test>_1.out are upstream's (CUDA era; where they exist for the
+# PostgreSQL major version). <test>_9.out is this build's: the output of an actual run, written by
+# vulkan_regen_expected.sh only after the output without its EXPLAIN blocks equalled the output of the same test
+# run with pg_strom.enabled forced off ("CPU oracle"). Plan text on this build differs because float8,
+# numeric, jsonb, and joins are not on the GPU yet (Seq Scan or GpuScan with a smaller projection).
+#
+# Only PostgreSQL 17 was available when this was written. test/15, 16, 18 and 19 have no <test>_9.out: on a host
+# with those servers run vulkan_regen_expected.sh with PGBIN pointing at them (it regenerates the major version of
+# PGBIN only, and refuses to write a file whose rows differ from the oracle). Until then vulkan-installcheck only
+# means something on 17.
+#
+# ---------------------------------------------------------------------------------------------------------------
+# Result rows that differed from upstream's expected files (all four were checked against pg_strom.enabled=off:
+# the Vulkan build returns what PostgreSQL returns; upstream's file encodes something else)
+# ---------------------------------------------------------------------------------------------------------------
+# partition      The GROUP BY lo_orderpriority query: upstream's expected output has two rows per priority
+#                (10 rows, partial sums of the heap and the Arrow/Parquet partitions that were not merged).
+#                PostgreSQL returns 5 rows (64187204740 = 25816377858 + 38370826882 for 1-URGENT ...). Not a bug here.
+# misc (#637)    SELECT c0 FROM t1 GROUP BY t1.c0 HAVING NOT (MIN(65536))::BOOLEAN: upstream expects
+#                "ERROR: min(int8) out of range" (the CUDA kernel's int overflow check on a constant argument);
+#                PostgreSQL returns 0 rows, and so does this build.
+# fallback_pgsql Upstream expects "ERROR: xpu_textlib.h:56 text datum is compressed or external" and a CPU fallback
+#                NOTICE where the CUDA kernel met a compressed text value. Here text predicates are evaluated by the
+#                Vulkan VM (which detoasts through the CPU side), nothing fails, and the rows equal the CPU's; the
+#                second "SELECT INTO test01g" of the test then fails with "relation already exists" (recorded in the
+#                alternate file). The test no longer exercises CPU fallback (there is none on this branch).
+# arrow_index    The data is generated with pgstrom.random_*(), whose output differs between platforms, so every
+#                count in upstream's file differs; the GPU and CPU counts inside the test agree with each other.
+#
+# ---------------------------------------------------------------------------------------------------------------
+# Real bugs the first run found (GPU result or error differing from PostgreSQL); both are fixed in this commit series
+# ---------------------------------------------------------------------------------------------------------------
+# 1. sum/min/max(money): the planner offered GpuPreAgg (the money aggregates share the int8 actions) and the service
+#    rejected the program at run time ("aggregate argument of an unsupported type (opcode type 19)"), so the query
+#    FAILED where PostgreSQL returns $1.00. Fixed in gpu_preagg.c: the aggregate catalog skips money entries.
+#    Reproducer (test misc, #624): create table t(c0 money, c1 money); insert into t values (1,1);
+#    set enable_seqscan=0; select sum(c1) from t;
+# 2. More than 32 registers: a projection with many computed columns (test dtype_int test13/test20: 12-13
+#    expressions over 7 columns) failed with "the expression needs more than 32 registers" because the computed
+#    values were allocated above all kernel-variable slots, which include one unused slot per SaveExpr. Fixed in
+#    scan_prog.c: a computed value now lives in its own SaveExpr slot register.
+#
+# ---------------------------------------------------------------------------------------------------------------
+# Open (found while writing this; NOT fixed): the planner does not know the service's limits, and the service
+# has no CPU fallback, so a query the service cannot translate FAILS instead of running on the CPU.
+# ---------------------------------------------------------------------------------------------------------------
+# see the "Open" section at the end of this file once the last run is in.

@@ -1,1 +1,8 @@
 tpcds_sf5.dump
+*/results/
+*/regression.diffs
+*/regression.out
+*/regression.diffs.*
+*/oracle/
+*/regen_*.log
+data/test_*
