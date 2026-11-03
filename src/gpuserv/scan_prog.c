@@ -122,6 +122,8 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		case TypeOpCode__bpchar:      *p_bytes = 0; return SOP_VT_STR;
 		/* A6: numeric is { unscaled int64, scale } when the value fits (otherwise the row is rechecked) */
 		case TypeOpCode__numeric:     *p_bytes = 0; return SOP_VT_NUM;
+		/* A8: a jsonb value is a register that points at its container */
+		case TypeOpCode__jsonb:       *p_bytes = 0; return SOP_VT_JSON;
 		default:
 			break;
 	}
@@ -233,6 +235,8 @@ emit_const(builder *b, const kern_expression *kexp, int *next)
 
 	if (!vt)
 		return fail(b, "constant of an unsupported type (opcode type %u)", kexp->exptype);
+	if (vt == SOP_VT_JSON)
+		return fail(b, "a jsonb constant is only supported as the pattern of @>");
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (vt == SOP_VT_NUM)
@@ -292,6 +296,8 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 	if (id >= session->nparams)
 		return fail(b, "parameter %u does not exist", id);
 	off = session->poffset[id];
+	if (vt == SOP_VT_JSON)
+		return fail(b, "a jsonb parameter is not supported");
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) session + off, off == 0, next);
 	if (vt == SOP_VT_NUM)
@@ -332,6 +338,107 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 	if (emit(b, SOP_CONST, dst, off == 0 ? 1 : 0, 0,
 			 (uint32_t)((uint64_t) v & 0xffffffffU), (uint32_t)((uint64_t) v >> 32)) < 0)
 		return -1;
+	return dst;
+}
+
+/*
+ * A8: jsonb expressions. "x -> key", "x -> idx" are one JSONGET; "->>" adds JSONTXT, the planner's
+ * "(x ->> key)::numeric / intN" shortcut JSONNUM / JSONINT; "?", jsonb_typeof and "@>" are single instructions.
+ * The literals the instructions return (true/false, the type names) and the compiled pattern of @> live in the
+ * constant pool.
+ */
+static int
+emit_jsonb(builder *b, const kern_expression *kexp, scan_func_class fc, int *next)
+{
+	const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+	int			mark = *next;
+	int			ra, rb = 0, dst, t;
+	int64_t		off = 0;
+
+	if (b->no_strings)
+		return fail(b, "jsonb is not supported in a join");
+	if ((fc.cls == SOP_JSONTYPE && kexp->nr_args != 1) || (fc.cls != SOP_JSONTYPE && kexp->nr_args != 2))
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	ra = expr_to_reg(b, karg, next);
+	if (ra < 0)
+		return -1;
+	switch (fc.cls)
+	{
+		case SOP_JSONTYPE:
+			if ((off = pool_add(b, (const unsigned char *) "objectarraystringnumberbooleannull", 34)) < 0)
+				return -1;
+			break;
+		case SOP_JSONCONT:
+		{
+			const kern_expression *kpat = KEXP_NEXT_ARG(karg);
+			const unsigned char *pdata;
+			uint32_t	plen;
+			unsigned char *pat;
+			int			patlen;
+
+			if (kpat->opcode != FuncOpCode__ConstExpr || kpat->u.c.const_isnull || kpat->exptype != TypeOpCode__jsonb ||
+				!varlena_payload((const unsigned char *) kpat->u.c.const_value, &pdata, &plen))
+				return fail(b, "the pattern of @> is not a plain jsonb constant");
+			pat = malloc(SCAN_JB_PATTERN_MAX);
+			if (!pat)
+				return fail(b, "out of memory");
+			patlen = scan_vm_jsonb_pattern(pdata, plen, pat, SCAN_JB_PATTERN_MAX);
+			if (patlen < 0)
+			{
+				free(pat);
+				return fail(b, "the jsonb constant of @> has a shape the Vulkan service cannot match");
+			}
+			off = pool_add(b, pat, (uint32_t) patlen);
+			free(pat);
+			if (off < 0)
+				return -1;
+			break;
+		}
+		default:
+			rb = expr_to_reg(b, KEXP_NEXT_ARG(karg), next);
+			if (rb < 0)
+				return -1;
+			if (fc.cls == SOP_JSONTXT && (off = pool_add(b, (const unsigned char *) "truefalse", 9)) < 0)
+				return -1;
+			break;
+	}
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0)
+		return -1;
+	switch (fc.cls)
+	{
+		case SOP_JSONTYPE:
+		case SOP_JSONCONT:
+			if (emit(b, fc.cls, dst, ra, 0, (uint32_t) off, kexp->opcode) < 0)
+				return -1;
+			break;
+		case SOP_JSONEXISTS:
+			if (emit(b, SOP_JSONEXISTS, dst, ra, rb, 0, kexp->opcode) < 0)
+				return -1;
+			break;
+		default:
+			t = new_reg(b, next);
+			if (t < 0 || emit(b, SOP_JSONGET, (fc.cls == SOP_JSONGET ? dst : t), ra, rb, fc.kind, kexp->opcode) < 0)
+				return -1;
+			if (fc.cls == SOP_JSONTXT)
+			{
+				if (emit(b, SOP_JSONTXT, dst, t, 0, (uint32_t) off, kexp->opcode) < 0)
+					return -1;
+			}
+			else if (fc.cls == SOP_JSONNUM)
+			{
+				if (emit(b, SOP_JSONNUM, dst, t, 0, 0, kexp->opcode) < 0)
+					return -1;
+			}
+			else if (fc.cls == SOP_JSONINT)
+			{
+				if (emit(b, SOP_JSONINT, dst, t, 0, (uint32_t) fc.width, kexp->opcode) < 0)
+					return -1;
+			}
+			*next = dst + 1;
+			break;
+	}
 	return dst;
 }
 
@@ -398,7 +505,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return fail(b, "variable slot %u is out of range", slot);
 			if (!reg_vtype(kexp->exptype, &bytes))
 				return fail(b, "variable of an unsupported type (opcode type %u)", kexp->exptype);
-			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR || reg_vtype(kexp->exptype, &bytes) == SOP_VT_NUM)
+			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR || reg_vtype(kexp->exptype, &bytes) == SOP_VT_NUM ||
+				reg_vtype(kexp->exptype, &bytes) == SOP_VT_JSON)
 			{
 				if (b->no_strings)
 					return fail(b, "strings and numerics are not supported in a join");
@@ -437,7 +545,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			kin = KEXP_FIRST_ARG(kexp);
 			if (op != SOP_NOT && kin->opcode == FuncOpCode__VarExpr &&
 				(!reg_vtype(kin->exptype, &bytes) || reg_vtype(kin->exptype, &bytes) == SOP_VT_STR ||
-			  reg_vtype(kin->exptype, &bytes) == SOP_VT_NUM ||
+			  reg_vtype(kin->exptype, &bytes) == SOP_VT_NUM || reg_vtype(kin->exptype, &bytes) == SOP_VT_JSON ||
 			  kin->exptype == TypeOpCode__date || kin->exptype == TypeOpCode__time ||
 			  kin->exptype == TypeOpCode__timestamp || kin->exptype == TypeOpCode__timestamptz))
 			{
@@ -473,6 +581,10 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 	fc = scan_vm_classify_func(kexp->opcode);
 	if (fc.cls == 0)
 		return fail(b, "%s is not supported by the Vulkan GpuScan yet", scan_vm_opcode_name(kexp->opcode));
+
+	if (fc.cls == SOP_JSONGET || fc.cls == SOP_JSONTXT || fc.cls == SOP_JSONNUM || fc.cls == SOP_JSONINT ||
+		fc.cls == SOP_JSONEXISTS || fc.cls == SOP_JSONTYPE || fc.cls == SOP_JSONCONT)
+		return emit_jsonb(b, kexp, fc, next);
 
 	if (fc.cls == SOP_CAST || fc.cls == SOP_MOV || fc.cls == SOP_I2F || fc.cls == SOP_F2I ||
 		fc.cls == -SOP_ARITH || fc.cls == SOP_D2TS || fc.cls == SOP_TS2D || fc.cls == SOP_STRLEN ||
@@ -1061,7 +1173,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					int		bytes, r;
 					int		nx = perm;
 
-					if (!reg_vtype(ksave->exptype, &bytes) || reg_vtype(ksave->exptype, &bytes) == SOP_VT_STR)
+					if (!reg_vtype(ksave->exptype, &bytes) || reg_vtype(ksave->exptype, &bytes) == SOP_VT_STR ||
+						reg_vtype(ksave->exptype, &bytes) == SOP_VT_JSON)
 					{
 						fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
 						goto error;
@@ -1119,9 +1232,10 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			b.slot_bytes[s] = bytes;
 			if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* a date/time column that only IS [NOT] NULL reads */
-			else if ((b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM) && !b.slot_strval[s])
+			else if ((b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON) &&
+					 !b.slot_strval[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* only IS [NOT] NULL reads it */
-			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM)
+			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)
 			{
 				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
 				{
@@ -1226,7 +1340,8 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 		int		bytes, r;
 
 		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4 ||
-			reg_vtype(karg->exptype, &bytes) == SOP_VT_STR || reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM)
+			reg_vtype(karg->exptype, &bytes) == SOP_VT_STR || reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM ||
+			reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
 		*next = acc + 1;
 		r = expr_to_reg(b, karg, next);
@@ -1275,7 +1390,7 @@ join_use_slot(builder *b, uint32_t slot)
 	const kern_varslot_desc *vs = SESSION_KVARS_SLOT_DESC(b->session);
 
 	if (slot >= b->nslots || !reg_vtype(vs[slot].vs_type_code, &bytes) ||
-		reg_vtype(vs[slot].vs_type_code, &bytes) == SOP_VT_STR)
+		reg_vtype(vs[slot].vs_type_code, &bytes) == SOP_VT_STR || reg_vtype(vs[slot].vs_type_code, &bytes) == SOP_VT_JSON)
 		return fail(b, "aggregate argument of an unsupported type");
 	if (b->slot_resno[slot] > 0)
 	{
@@ -1626,7 +1741,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 				int		bytes, r, nx = perm;
 
 				if (!reg_vtype(ksave->exptype, &bytes) || reg_vtype(ksave->exptype, &bytes) == SOP_VT_STR ||
-					reg_vtype(ksave->exptype, &bytes) == SOP_VT_NUM)
+					reg_vtype(ksave->exptype, &bytes) == SOP_VT_NUM || reg_vtype(ksave->exptype, &bytes) == SOP_VT_JSON)
 				{
 					fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
 					goto error;
@@ -1658,7 +1773,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		if (b.slot_used[s])
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM)		/* join programs read the NULL-ness of strings only */
+			if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)		/* join programs read the NULL-ness of strings only */
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
 			else if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
@@ -1678,7 +1793,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
 
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM)
+			if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM || b.slot_ivtype[s] == SOP_VT_JSON)
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_ivtype[s] && b.slot_nullonly[s])
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;

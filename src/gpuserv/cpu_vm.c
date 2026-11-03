@@ -94,6 +94,398 @@ str_truelen(const unsigned char *p, uint32_t len)
 	return len;
 }
 
+
+/* ---- A8: jsonb. The same as the jsonb section of scan_common.slang (JSONGET ... JSONCONT) ---- */
+static const unsigned char *
+jb_base(const vm_env *env, int64_t v)
+{
+	return ((((uint64_t) v) >> 60) & 3) == 3 ? env->pool : env->htup;
+}
+
+static int64_t
+jb_reg(uint32_t off, uint32_t len, uint32_t src)
+{
+	return (int64_t)((uint64_t) off | ((uint64_t) len << 32) | ((uint64_t) src << 60));
+}
+
+/* the child 'idx' of container (kind CONT) at b + cb: fills the result register; 0, or -1 malformed */
+static int
+jb_pick(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c, uint32_t idx,
+		uint32_t src, vm_reg *r)
+{
+	uint32_t	kind, voff, vlen;
+
+	if (scan_jb_child(b, cb, clen, c, idx, &kind, &voff, &vlen) < 0)
+		return -1;
+	r->v = jb_reg(voff, vlen, src);
+	if (kind >= SCAN_JB_FALSE && kind <= SCAN_JB_NULL)
+		r->v = 0;
+	r->sc = kind;
+	r->isnull = 0;
+	return 0;
+}
+
+/* walk the keys of a pattern term from the root value x; 1: found (kind, off, len), 0: absent, -1: malformed */
+static int
+jb_walk_path(const unsigned char *b, vm_reg x, const unsigned char *pat, uint32_t nsteps, const uint32_t *steps,
+			 uint32_t *kind, uint32_t *voff, uint32_t *vlen)
+{
+	uint32_t	cb = (uint32_t)((uint64_t) x.v & 0xffffffffU), clen = str_len(x.v);
+
+	*kind = x.sc;
+	*voff = cb;
+	*vlen = clen;
+	for (uint32_t d = 0; d < nsteps; d++)
+	{
+		scan_jb_cont c;
+		uint32_t	idx;
+		int			rc;
+
+		if (*kind != SCAN_JB_CONT)
+			return 0;
+		if (scan_jb_open(b, *voff, *vlen, &c) < 0)
+			return -1;
+		if (!c.isobj)
+			return 0;
+		rc = scan_jb_find_key(b, *voff, *vlen, &c, pat + steps[2 * d], steps[2 * d + 1], &idx);
+		if (rc <= 0)
+			return rc;
+		if (scan_jb_child(b, *voff, *vlen, &c, c.count + idx, kind, voff, vlen) < 0)
+			return -1;
+	}
+	return 1;
+}
+
+/* does the scalar (kind, off, len) of the column equal the pattern's scalar? 1 / 0, or -1 (cannot tell) */
+static int
+jb_scalar_equal(const unsigned char *b, uint32_t kind, uint32_t off, uint32_t len,
+				const unsigned char *pat, uint32_t tkind, const uint32_t *sw)
+{
+	if (kind != tkind)
+		return 0;
+	if (kind == SCAN_JB_STR)
+		return len == sw[1] && memcmp(b + off, pat + sw[0], len) == 0;
+	if (kind == SCAN_JB_NUM)
+	{
+		int64_t		av, pv = (int64_t)((uint64_t) sw[0] | ((uint64_t) sw[1] << 32));
+		uint32_t	asc;
+		int			rc = scan_jb_numeric(b, off, len, &av, &asc);
+
+		if (rc <= 0)
+			return -1;
+		return scan_vm_num_cmp(av, asc, pv, sw[2]) == 0;
+	}
+	return 1;
+}
+
+/* 1: the column's value x contains the pattern, 0: no, -1: cannot tell exactly */
+static int
+jb_contains(const unsigned char *b, vm_reg x, const unsigned char *pat)
+{
+	uint32_t	nterms, w[64];
+	const unsigned char *tp = pat + 4;
+
+	memcpy(&nterms, pat, 4);
+	for (uint32_t t = 0; t < nterms; t++)
+	{
+		uint32_t	w0, type, nsteps, tkind, kind, voff, vlen, nsw;
+		int			rc;
+		const uint32_t *sw;
+
+		memcpy(&w0, tp, 4);
+		type = w0 & 0xff;
+		nsteps = (w0 >> 8) & 0xff;
+		tkind = (w0 >> 16) & 0xff;
+		if (nsteps > 8)
+			return -1;
+		memcpy(w, tp + 4, 8 * nsteps);
+		nsw = (type == SCAN_JBT_EQ || type == SCAN_JBT_ELEM) ? (tkind == SCAN_JB_STR ? 2 : tkind == SCAN_JB_NUM ? 3 : 0) : 0;
+		memcpy(w + 2 * nsteps, tp + 4 + 8 * nsteps, 4 * nsw);
+		sw = w + 2 * nsteps;
+		tp += 4 + 8 * nsteps + 4 * nsw;
+		rc = jb_walk_path(b, x, pat, nsteps, w, &kind, &voff, &vlen);
+		if (rc < 0)
+			return -1;
+		if (rc == 0)
+			return 0;
+		if (type == SCAN_JBT_EQ)
+		{
+			rc = jb_scalar_equal(b, kind, voff, vlen, pat, tkind, sw);
+			if (rc <= 0)
+				return rc;
+		}
+		else
+		{
+			scan_jb_cont c;
+
+			if (kind != SCAN_JB_CONT)
+				return 0;
+			if (scan_jb_open(b, voff, vlen, &c) < 0)
+				return -1;
+			if (type == SCAN_JBT_ISOBJ)
+			{
+				if (!c.isobj)
+					return 0;
+			}
+			else
+			{
+				int			found = 0;
+
+				if (!c.isarr || c.isscalar)
+					return 0;
+				if (type == SCAN_JBT_ELEM)
+				{
+					for (uint32_t i = 0; i < c.count && !found; i++)
+					{
+						uint32_t	ek, eo, el;
+
+						if (scan_jb_child(b, voff, vlen, &c, i, &ek, &eo, &el) < 0)
+							return -1;
+						rc = jb_scalar_equal(b, ek, eo, el, pat, tkind, sw);
+						if (rc < 0)
+							return -1;
+						found = rc;
+					}
+					if (!found)
+						return 0;
+				}
+			}
+		}
+	}
+	return 1;
+}
+
+static uint32_t
+vm_json(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
+		vm_reg *regs)
+{
+	vm_reg		x = regs[ra];
+
+	(void) k1;
+	switch (op)
+	{
+		case SOP_JSONGET:
+		{
+			vm_reg		y = regs[rb], r;
+			const unsigned char *b = jb_base(env, x.v);
+			uint32_t	src = (uint32_t)(((uint64_t) x.v >> 60) & 3);
+			uint32_t	cb = (uint32_t)((uint64_t) x.v & 0xffffffffU), clen = str_len(x.v);
+			int			found = 0;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			memset(&r, 0, sizeof(r));
+			r.isnull = 1;
+			if (x.sc == SCAN_JB_CONT)
+			{
+				scan_jb_cont c;
+
+				if (scan_jb_open(b, cb, clen, &c) < 0)
+					return SOP_RECHECK_CODE;
+				if (k0 == 0 && c.isobj)
+				{
+					uint32_t	idx;
+					const unsigned char *key = str_ptr(env, y.v);
+					int			rc = scan_jb_find_key(b, cb, clen, &c, key, str_len(y.v), &idx);
+
+					if (rc < 0 || (rc == 1 && jb_pick(b, cb, clen, &c, c.count + idx, src, &r) < 0))
+						return SOP_RECHECK_CODE;
+					found = (rc == 1);
+				}
+				else if (k0 == 1 && c.isarr)
+				{
+					int64_t		i = y.v;
+
+					if (i < 0)
+					{
+						if (-i > (int64_t) c.count)
+							i = -1;
+						else
+							i += c.count;
+					}
+					if (i >= 0 && i < (int64_t) c.count)
+					{
+						if (jb_pick(b, cb, clen, &c, (uint32_t) i, src, &r) < 0)
+							return SOP_RECHECK_CODE;
+						found = 1;
+					}
+				}
+			}
+			else if (k0 == 1 && (y.v == 0 || y.v == -1))
+			{
+				r = x;					/* a scalar behaves as an array of one element */
+				found = 1;
+			}
+			if (found)
+			{
+				r.isnull = 0;
+				regs[dst] = r;
+			}
+			else
+				regs[dst].isnull = 1;
+			return 0;
+		}
+		case SOP_JSONTXT:
+		{
+			if (x.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			regs[dst].isnull = 0;
+			regs[dst].sc = 0;
+			switch (x.sc)
+			{
+				case SCAN_JB_STR:
+					regs[dst].v = x.v & ~(1LL << 62);
+					break;
+				case SCAN_JB_TRUE:
+					regs[dst].v = jb_reg(k0, 4, 3);
+					break;
+				case SCAN_JB_FALSE:
+					regs[dst].v = jb_reg(k0 + 4, 5, 3);
+					break;
+				case SCAN_JB_NULL:
+					regs[dst].isnull = 1;
+					break;
+				default:
+					regs[dst].v = x.v | (1LL << 62);		/* deferred */
+					break;
+			}
+			return 0;
+		}
+		case SOP_JSONEXISTS:
+		{
+			vm_reg		y = regs[rb];
+			const unsigned char *b = jb_base(env, x.v);
+			uint32_t	cb = (uint32_t)((uint64_t) x.v & 0xffffffffU), clen = str_len(x.v);
+			int			res;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			if (x.sc == SCAN_JB_CONT)
+			{
+				scan_jb_cont c;
+
+				if (scan_jb_open(b, cb, clen, &c) < 0)
+					return SOP_RECHECK_CODE;
+				res = scan_jb_exists(b, cb, clen, &c, str_ptr(env, y.v), str_len(y.v));
+				if (res < 0)
+					return SOP_RECHECK_CODE;
+			}
+			else if (x.sc == SCAN_JB_STR)
+				res = (clen == str_len(y.v) && memcmp(b + cb, str_ptr(env, y.v), clen) == 0);
+			else
+				res = 0;
+			regs[dst].isnull = 0;
+			regs[dst].v = res;
+			return 0;
+		}
+		case SOP_JSONTYPE:
+		{
+			static const uint32_t toff[6] = {0, 6, 11, 17, 23, 30};
+			static const uint32_t tlen[6] = {6, 5, 6, 6, 7, 4};
+			uint32_t	t;
+
+			if (x.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			switch (x.sc)
+			{
+				case SCAN_JB_STR:	t = 2; break;
+				case SCAN_JB_NUM:	t = 3; break;
+				case SCAN_JB_FALSE:
+				case SCAN_JB_TRUE:	t = 4; break;
+				case SCAN_JB_NULL:	t = 5; break;
+				default:
+				{
+					const unsigned char *b = jb_base(env, x.v);
+					uint32_t	cb = (uint32_t)((uint64_t) x.v & 0xffffffffU), clen = str_len(x.v);
+					scan_jb_cont c;
+
+					if (scan_jb_open(b, cb, clen, &c) < 0)
+						return SOP_RECHECK_CODE;
+					if (c.isobj)
+						t = 0;
+					else if (!c.isscalar)
+						t = 1;
+					else
+					{
+						uint32_t	kind, voff, vlen;
+
+						if (c.count != 1 || scan_jb_child(b, cb, clen, &c, 0, &kind, &voff, &vlen) < 0 ||
+							kind == SCAN_JB_CONT)
+							return SOP_RECHECK_CODE;
+						t = (kind == SCAN_JB_STR ? 2 : kind == SCAN_JB_NUM ? 3 : kind == SCAN_JB_NULL ? 5 : 4);
+					}
+					break;
+				}
+			}
+			regs[dst].isnull = 0;
+			regs[dst].sc = 0;
+			regs[dst].v = jb_reg(k0 + toff[t], tlen[t], 3);
+			return 0;
+		}
+		case SOP_JSONNUM:
+		case SOP_JSONINT:
+		{
+			const unsigned char *b = jb_base(env, x.v);
+			uint32_t	cb = (uint32_t)((uint64_t) x.v & 0xffffffffU), clen = str_len(x.v);
+			int64_t		v;
+			uint32_t	sc;
+
+			if (x.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			if (x.sc == SCAN_JB_NULL)
+			{
+				regs[dst].isnull = 1;			/* ->> of a JSON null is SQL NULL */
+				return 0;
+			}
+			if (x.sc != SCAN_JB_NUM || scan_jb_numeric(b, cb, clen, &v, &sc) != 1)
+				return SOP_RECHECK_CODE;
+			if (op == SOP_JSONINT && (sc != 0 || out_of_range(v, k0)))
+				return SOP_RECHECK_CODE;		/* the text is not an integer or out of range: PostgreSQL's error */
+			regs[dst].isnull = 0;
+			regs[dst].v = v;
+			regs[dst].sc = (op == SOP_JSONNUM) ? sc : 0;
+			return 0;
+		}
+		case SOP_JSONCONT:
+		{
+			int			res;
+
+			if (x.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			if (x.sc != SCAN_JB_CONT)
+				res = 0;						/* a scalar is a raw-scalar array: it contains no object/array pattern */
+			else
+			{
+				res = jb_contains(jb_base(env, x.v), x, env->pool + k0);
+				if (res < 0)
+					return SOP_RECHECK_CODE;
+			}
+			regs[dst].isnull = 0;
+			regs[dst].v = res;
+			return 0;
+		}
+	}
+	return op | 0x80000000u;
+}
+
 /* the instructions that A6 added; the same as vm_ext() of scan_common.slang */
 static uint32_t
 vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
@@ -195,6 +587,8 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				regs[dst].isnull = 1;
 				return 0;
 			}
+			if ((((uint64_t) x.v | (uint64_t) y.v) >> 62) & 1)
+				return SOP_RECHECK_CODE;		/* a deferred text of ->> (a numeric or a container) */
 			pa = str_ptr(env, x.v);
 			pb = str_ptr(env, y.v);
 			la = str_len(x.v);
@@ -255,6 +649,8 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 			vm_reg		x = regs[ra];
 
 			regs[dst].isnull = x.isnull;
+			if (!x.isnull && (((uint64_t) x.v >> 62) & 1))
+				return SOP_RECHECK_CODE;
 			if (!x.isnull)
 			{
 				uint32_t	n = str_len(x.v);
@@ -422,6 +818,8 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 			return 0;
 		}
 		default:
+			if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
+				return vm_json(env, op, dst, ra, rb, k0, k1, regs);
 			break;
 	}
 	return op | 0x80000000u;
@@ -747,7 +1145,7 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 							recheck = 1;
 					}
 				}
-				else if (vt == SOP_VT_STR)
+				else if (vt == SOP_VT_STR || vt == SOP_VT_JSON)
 				{
 					uint32_t	hl = 4;
 
@@ -760,7 +1158,10 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 					else if ((htup[off] & 3) == 2)
 						recheck = 1;
 					if (!recheck)
+					{
 						regs[slot].v = (int64_t)((uint64_t) (off + hl) | ((uint64_t) (sz - hl) << 32));
+						regs[slot].sc = (vt == SOP_VT_JSON) ? SCAN_JB_CONT : 0;
+					}
 				}
 			}
 			off += sz;

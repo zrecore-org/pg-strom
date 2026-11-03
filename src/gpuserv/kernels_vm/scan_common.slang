@@ -741,6 +741,496 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// A8: jsonb. A jsonb register is { byte offset | length << 32 | source << 60 } of a JsonbContainer (Reg.sc =
+// JB_CONT) or of a scalar inside one (Reg.sc = the JEntry type: string payload, numeric varlena, false, true,
+// null). The binary form is that of utils/jsonb.h: a header word (count | flags), the JEntry words (keys, then values,
+// of an object), the data. An entry has the type of the child and its length, or at every 32nd entry the end
+// offset. Strings are stored as is, numerics and containers are aligned to 4 bytes from the start of the data.
+// Anything the kernel cannot read exactly (malformed data, a numeric that does not fit) is rechecked by the backend.
+// scan_caps.c and cpu_vm.c have the same code in C.
+// ---------------------------------------------------------------------------------------------
+static const uint JB_STR = 0u;
+static const uint JB_NUM = 1u;
+static const uint JB_FALSE = 2u;
+static const uint JB_TRUE = 3u;
+static const uint JB_NULL = 4u;
+static const uint JB_CONT = 5u;
+
+int64_t jb_mkreg(uint off, uint len, uint src)
+{
+    return int64_t(uint64_t(off) | (uint64_t(len) << 32) | (uint64_t(src) << 60));
+}
+
+// Open the container at cb of clen bytes. false if malformed. isobj: object; isscalar: a raw scalar.
+bool jb_open(uint s, uint cb, uint clen, out uint count, out uint nent, out bool isobj, out bool isarr, out bool isscalar)
+{
+    count = 0;
+    nent = 0;
+    isobj = false;
+    isarr = false;
+    isscalar = false;
+    if (clen < 4u)
+        return false;
+    uint h = ldw_s(s, cb);
+    count = h & 0x0fffffffu;
+    isobj = (h & 0x20000000u) != 0u;
+    isarr = (h & 0x40000000u) != 0u;
+    isscalar = (h & 0x10000000u) != 0u;
+    if (isobj == isarr || count > clen / 4u)
+        return false;
+    nent = isobj ? 2u * count : count;
+    return 4u + 4u * nent <= clen;
+}
+
+// Child entry i (a key and the value of an object are entries i and count + i): its JEntry type and where its
+// bytes are. false if the entry runs outside the container.
+bool jb_child(uint s, uint cb, uint clen, uint nent, uint i, out uint kind, out uint voff, out uint vlen)
+{
+    kind = 0;
+    voff = 0;
+    vlen = 0;
+    uint e = ldw_s(s, cb + 4u + 4u * i);
+    uint st = 0;
+    for (uint j = i; j > 0u; j--)
+    {
+        uint p = ldw_s(s, cb + 4u + 4u * (j - 1u));
+        st += p & 0x0fffffffu;
+        if ((p & 0x80000000u) != 0u)
+            break;
+    }
+    uint f = e & 0x0fffffffu;
+    uint len = f;
+    if ((e & 0x80000000u) != 0u)
+    {
+        if (f < st)
+            return false;
+        len = f - st;
+    }
+    kind = (e >> 28) & 7u;
+    if (kind > JB_CONT)
+        return false;
+    uint pad = 0;
+    if (kind == JB_NUM || kind == JB_CONT)
+        pad = ((st + 3u) & ~3u) - st;
+    uint dbase = 4u + 4u * nent;
+    if (len < pad || dbase + st + len > clen)
+        return false;
+    if (kind >= JB_FALSE && kind <= JB_NULL)
+        return true;
+    voff = cb + dbase + st + pad;
+    vlen = len - pad;
+    return true;
+}
+
+// Binary search of an object's keys (ordered by length, then bytes). 1 found (idx), 0 absent, 2 malformed.
+uint jb_find_key(uint s, uint cb, uint clen, uint count, uint nent, uint ks, uint ko, uint kl, out uint idx)
+{
+    idx = 0;
+    uint lo = 0;
+    uint hi = count;
+    while (lo < hi)
+    {
+        uint mid = lo + (hi - lo) / 2u;
+        uint kind, voff, vlen;
+        if (!jb_child(s, cb, clen, nent, mid, kind, voff, vlen) || kind != JB_STR)
+            return 2u;
+        int c;
+        if (vlen == kl)
+            c = str_memcmp(s, voff, ks, ko, kl);
+        else
+            c = (vlen > kl) ? 1 : -1;
+        if (c < 0)
+            lo = mid + 1u;
+        else if (c > 0)
+            hi = mid;
+        else
+        {
+            idx = mid;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+// jsonb_exists on an object or an array. 1 / 0, or 2 malformed.
+uint jb_exists(uint s, uint cb, uint clen, uint count, uint nent, bool isobj, uint ks, uint ko, uint kl)
+{
+    if (isobj)
+    {
+        uint idx;
+        return jb_find_key(s, cb, clen, count, nent, ks, ko, kl, idx);
+    }
+    for (uint i = 0; i < count; i++)
+    {
+        uint kind, voff, vlen;
+        if (!jb_child(s, cb, clen, nent, i, kind, voff, vlen))
+            return 2u;
+        if (kind == JB_STR && vlen == kl && str_memcmp(s, voff, ks, ko, kl) == 0)
+            return 1u;
+    }
+    return 0u;
+}
+
+// The numeric varlena at [off, off + len) of source s as { v, sc }: 1, 0 = does not fit, 2 = malformed.
+uint jb_numeric(uint s, uint off, uint len, out int64_t v, out uint sc)
+{
+    v = 0;
+    sc = 0;
+    if (len < 1u)
+        return 2u;
+    uint b0 = ldb_s(s, off);
+    uint hl = 4u;
+    uint total;
+    if ((b0 & 1u) != 0u)
+    {
+        if (b0 == 1u)
+            return 2u;
+        hl = 1u;
+        total = (b0 >> 1) & 0x7fu;
+    }
+    else
+    {
+        if (len < 4u || (b0 & 3u) == 2u)
+            return 2u;
+        total = (ldw_s(s, off) >> 2) & 0x3fffffffu;
+    }
+    if (total < hl || total > len)
+        return 2u;
+    // num_decode() reads through the page source g_src: the jsonb always lives there
+    uint saved = g_src;
+    g_src = s;
+    bool ok = num_decode(off + hl, total - hl, v, sc);
+    g_src = saved;
+    return ok ? 1u : 0u;
+}
+
+// The child idx of an opened container as a register. false if malformed.
+bool jb_pick(uint s, uint cb, uint clen, uint nent, uint idx, inout Reg r)
+{
+    uint kind, voff, vlen;
+    if (!jb_child(s, cb, clen, nent, idx, kind, voff, vlen))
+        return false;
+    r.v = (kind >= JB_FALSE && kind <= JB_NULL) ? 0 : jb_mkreg(voff, vlen, s);
+    r.sc = kind;
+    r.isnull = 0;
+    return true;
+}
+
+// Follow the keys of a pattern term (words at wp of the program) from the register x; 1 found, 0 absent, 2 malformed.
+uint jb_walk_path(Reg x, uint nsteps, uint wp, uint patb, out uint kind, out uint voff, out uint vlen)
+{
+    uint s = str_src(x);
+    kind = x.sc;
+    voff = str_off(x);
+    vlen = str_len(x);
+    for (uint d = 0; d < nsteps; d++)
+    {
+        if (kind != JB_CONT)
+            return 0u;
+        uint count, nent;
+        bool isobj, isarr, isscalar;
+        if (!jb_open(s, voff, vlen, count, nent, isobj, isarr, isscalar))
+            return 2u;
+        if (!isobj)
+            return 0u;
+        uint idx;
+        uint rc = jb_find_key(s, voff, vlen, count, nent, 3u, patb + prog[wp + 2u * d], prog[wp + 2u * d + 1u], idx);
+        if (rc != 1u)
+            return rc;
+        uint k2, o2, l2;
+        if (!jb_child(s, voff, vlen, nent, count + idx, k2, o2, l2))
+            return 2u;
+        kind = k2;
+        voff = o2;
+        vlen = l2;
+    }
+    return 1u;
+}
+
+// Is the column's scalar (kind, off, len) the pattern's scalar? 1 / 0, or 2: cannot tell. sw: word index of the scalar.
+uint jb_scalar_equal(uint s, uint kind, uint off, uint len, uint tkind, uint sw, uint patb)
+{
+    if (kind != tkind)
+        return 0u;
+    if (kind == JB_STR)
+    {
+        if (len != prog[sw + 1u])
+            return 0u;
+        return str_memcmp(s, off, 3u, patb + prog[sw], len) == 0 ? 1u : 0u;
+    }
+    if (kind == JB_NUM)
+    {
+        int64_t av;
+        uint asc;
+        if (jb_numeric(s, off, len, av, asc) != 1u)
+            return 2u;
+        int64_t pv = int64_t(uint64_t(prog[sw]) | (uint64_t(prog[sw + 1u]) << 32));
+        return num_cmp(av, asc, pv, prog[sw + 2u]) == 0 ? 1u : 0u;
+    }
+    return 1u;
+}
+
+// x @> the pattern at byte offset pat of the constant pool. 1 / 0, or 2: cannot tell.
+uint jb_contains(Reg x, uint pat)
+{
+    uint s = str_src(x);
+    uint patw = prog[20] + (pat >> 2);          // word index of the pattern
+    uint patb = prog[20] * 4u + pat;            // byte offset of the pattern in the program buffer
+    uint nterms = prog[patw];
+    uint tw = patw + 1u;
+    for (uint t = 0; t < nterms; t++)
+    {
+        uint w0 = prog[tw];
+        uint type = w0 & 0xffu;
+        uint nsteps = (w0 >> 8) & 0xffu;
+        uint tkind = (w0 >> 16) & 0xffu;
+        uint wp = tw + 1u;
+        uint sw = wp + 2u * nsteps;
+        uint nsw = 0;
+        if (type == 1u || type == 4u)
+            nsw = (tkind == JB_STR) ? 2u : ((tkind == JB_NUM) ? 3u : 0u);
+        tw = sw + nsw;
+        uint kind, voff, vlen;
+        uint rc = jb_walk_path(x, nsteps, wp, patb, kind, voff, vlen);
+        if (rc == 2u)
+            return 2u;
+        if (rc == 0u)
+            return 0u;
+        if (type == 1u)                         // EQ
+        {
+            rc = jb_scalar_equal(s, kind, voff, vlen, tkind, sw, patb);
+            if (rc != 1u)
+                return rc;
+            continue;
+        }
+        if (kind != JB_CONT)
+            return 0u;
+        uint count, nent;
+        bool isobj, isarr, isscalar;
+        if (!jb_open(s, voff, vlen, count, nent, isobj, isarr, isscalar))
+            return 2u;
+        if (type == 2u)                         // ISOBJ
+        {
+            if (!isobj)
+                return 0u;
+            continue;
+        }
+        if (!isarr || isscalar)                 // ISARR, ELEM
+            return 0u;
+        if (type == 4u)
+        {
+            bool found = false;
+            for (uint i = 0; i < count && !found; i++)
+            {
+                uint ek, eo, el;
+                if (!jb_child(s, voff, vlen, nent, i, ek, eo, el))
+                    return 2u;
+                uint r2 = jb_scalar_equal(s, ek, eo, el, tkind, sw, patb);
+                if (r2 == 2u)
+                    return 2u;
+                found = (r2 == 1u);
+            }
+            if (!found)
+                return 0u;
+        }
+    }
+    return 1u;
+}
+
+// The jsonb instructions. Returns 0, or SOP_RECHECK_CODE.
+uint vm_json(uint op, uint dst, uint ra, uint rb, uint k0, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    uint xs = str_src(x);
+    uint xo = str_off(x);
+    uint xl = str_len(x);
+    switch (op)
+    {
+    case SOP_JSONGET:
+    {
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        Reg r;
+        r.v = 0;
+        r.isnull = 1;
+        r.sc = 0;
+        if (x.sc == JB_CONT)
+        {
+            uint count, nent;
+            bool isobj, isarr, isscalar;
+            if (!jb_open(xs, xo, xl, count, nent, isobj, isarr, isscalar))
+                return SOP_RECHECK_CODE;
+            if (k0 == 0u && isobj)
+            {
+                uint idx;
+                uint rc = jb_find_key(xs, xo, xl, count, nent, str_src(y), str_off(y), str_len(y), idx);
+                if (rc == 2u)
+                    return SOP_RECHECK_CODE;
+                if (rc == 1u && !jb_pick(xs, xo, xl, nent, count + idx, r))
+                    return SOP_RECHECK_CODE;
+            }
+            else if (k0 == 1u && isarr)
+            {
+                int64_t i = y.v;
+                if (i < 0)
+                {
+                    if (-i > int64_t(count))
+                        i = -1;
+                    else
+                        i += int64_t(count);
+                }
+                if (i >= 0 && i < int64_t(count))
+                {
+                    if (!jb_pick(xs, xo, xl, nent, uint(i), r))
+                        return SOP_RECHECK_CODE;
+                }
+            }
+        }
+        else if (k0 == 1u && (y.v == 0 || y.v == -1))
+            r = x;                              // a scalar behaves as an array of one element
+        regs[dst] = r;
+        break;
+    }
+    case SOP_JSONTXT:
+    {
+        if (x.isnull != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        regs[dst].isnull = 0;
+        regs[dst].sc = 0;
+        if (x.sc == JB_STR)
+            regs[dst].v = int64_t(uint64_t(x.v) & ~(uint64_t(0x40000000u) << 32));
+        else if (x.sc == JB_TRUE)
+            regs[dst].v = jb_mkreg(prog[20] * 4u + k0, 4u, 3u);
+        else if (x.sc == JB_FALSE)
+            regs[dst].v = jb_mkreg(prog[20] * 4u + k0 + 4u, 5u, 3u);
+        else if (x.sc == JB_NULL)
+            regs[dst].isnull = 1;
+        else
+            regs[dst].v = int64_t(uint64_t(x.v) | (uint64_t(0x40000000u) << 32));     // deferred: a numeric or a container
+        break;
+    }
+    case SOP_JSONEXISTS:
+    {
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        uint res = 0;
+        if (x.sc == JB_CONT)
+        {
+            uint count, nent;
+            bool isobj, isarr, isscalar;
+            if (!jb_open(xs, xo, xl, count, nent, isobj, isarr, isscalar))
+                return SOP_RECHECK_CODE;
+            res = jb_exists(xs, xo, xl, count, nent, isobj, str_src(y), str_off(y), str_len(y));
+            if (res == 2u)
+                return SOP_RECHECK_CODE;
+        }
+        else if (x.sc == JB_STR && xl == str_len(y))
+            res = (str_memcmp(xs, xo, str_src(y), str_off(y), xl) == 0) ? 1u : 0u;
+        regs[dst].isnull = 0;
+        regs[dst].v = int64_t(res);
+        break;
+    }
+    case SOP_JSONTYPE:
+    {
+        if (x.isnull != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        uint t = 0;
+        if (x.sc == JB_STR)
+            t = 2u;
+        else if (x.sc == JB_NUM)
+            t = 3u;
+        else if (x.sc == JB_FALSE || x.sc == JB_TRUE)
+            t = 4u;
+        else if (x.sc == JB_NULL)
+            t = 5u;
+        else
+        {
+            uint count, nent;
+            bool isobj, isarr, isscalar;
+            if (!jb_open(xs, xo, xl, count, nent, isobj, isarr, isscalar))
+                return SOP_RECHECK_CODE;
+            if (isobj)
+                t = 0u;
+            else if (!isscalar)
+                t = 1u;
+            else
+            {
+                uint kind, voff, vlen;
+                if (count != 1u || !jb_child(xs, xo, xl, nent, 0u, kind, voff, vlen) || kind == JB_CONT)
+                    return SOP_RECHECK_CODE;
+                t = (kind == JB_STR) ? 2u : ((kind == JB_NUM) ? 3u : ((kind == JB_NULL) ? 5u : 4u));
+            }
+        }
+        uint toff = 0;
+        uint tlen = 6;
+        if (t == 1u) { toff = 6u; tlen = 5u; }
+        else if (t == 2u) { toff = 11u; tlen = 6u; }
+        else if (t == 3u) { toff = 17u; tlen = 6u; }
+        else if (t == 4u) { toff = 23u; tlen = 7u; }
+        else if (t == 5u) { toff = 30u; tlen = 4u; }
+        regs[dst].isnull = 0;
+        regs[dst].sc = 0;
+        regs[dst].v = jb_mkreg(prog[20] * 4u + k0 + toff, tlen, 3u);
+        break;
+    }
+    case SOP_JSONNUM:
+    case SOP_JSONINT:
+    {
+        if (x.isnull != 0 || x.sc == JB_NULL)   // ->> of a JSON null is SQL NULL
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        int64_t v;
+        uint sc;
+        if (x.sc != JB_NUM || jb_numeric(xs, xo, xl, v, sc) != 1u)
+            return SOP_RECHECK_CODE;
+        if (op == SOP_JSONINT && (sc != 0u || out_of_range(v, k0)))
+            return SOP_RECHECK_CODE;            // not an integer text, or out of range: PostgreSQL's own error
+        regs[dst].isnull = 0;
+        regs[dst].v = v;
+        regs[dst].sc = (op == SOP_JSONNUM) ? sc : 0u;
+        break;
+    }
+    case SOP_JSONCONT:
+    {
+        if (x.isnull != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        uint res = 0;
+        if (x.sc == JB_CONT)
+        {
+            res = jb_contains(x, k0);
+            if (res == 2u)
+                return SOP_RECHECK_CODE;
+        }
+        regs[dst].isnull = 0;
+        regs[dst].v = int64_t(res);
+        break;
+    }
+    default:
+        return op | 0x80000000u;
+    }
+    return 0;
+}
+
 // Instructions of A6 (not in the original VM). Returns 0 or the error code.
 uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
@@ -834,6 +1324,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             regs[dst].isnull = 1;
             break;
         }
+        if (((uint64_t(x.v) | uint64_t(y.v)) >> 62) != 0ul)
+            return SOP_RECHECK_CODE;            // a deferred text of ->> (a numeric or a container)
         uint sa = str_src(x), sb = str_src(y);
         uint oa = str_off(x), ob = str_off(y);
         uint la = str_len(x), lb = str_len(y);
@@ -864,6 +1356,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             regs[dst].isnull = 1;
             break;
         }
+        if (((uint64_t(x.v) | uint64_t(y.v)) >> 62) != 0ul)
+            return SOP_RECHECK_CODE;
         uint sa = str_src(x), sb = str_src(y);
         uint oa = str_off(x), ob = str_off(y);
         uint la = str_len(x), lb = str_len(y);
@@ -904,6 +1398,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
     {
         Reg x = regs[ra];
         regs[dst].isnull = x.isnull;
+        if (x.isnull == 0 && (uint64_t(x.v) >> 62) != 0ul)
+            return SOP_RECHECK_CODE;
         if (x.isnull == 0)
         {
             uint n = str_len(x);
@@ -922,6 +1418,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
     default:
         if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
             return vm_num(op, dst, ra, rb, k0, k1, regs);
+        if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
+            return vm_json(op, dst, ra, rb, k0, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;
@@ -1337,7 +1835,7 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
                             g_recheck = 1;
                     }
                 }
-                else if (vt == SOP_VT_STR)
+                else if (vt == SOP_VT_STR || vt == SOP_VT_JSON)
                 {
                     // a string register: where the payload is (see above); a value stored out of line
                     // (b0 == 1) or compressed (4-byte header with the compression flag) is not readable
@@ -1351,8 +1849,11 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
                     else if ((b0 & 3u) == 2u)
                         g_recheck = 1;
                     if (g_recheck == 0)
+                    {
                         regs[slot].v = int64_t(uint64_t(tbase + off + hl) | (uint64_t(sz - hl) << 32) |
                                                (uint64_t(g_src) << 60));
+                        regs[slot].sc = (vt == SOP_VT_JSON) ? 5u : 0u;      // jsonb: the register holds a container
+                    }
                 }
             }
             off += sz;

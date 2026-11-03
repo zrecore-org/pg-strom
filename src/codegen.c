@@ -1645,6 +1645,12 @@ __appendKernExpMagicAndLength(StringInfo buf, int head_pos)
 	((kern_expression *)(buf->data + head_pos))->len = buf->len - head_pos;
 }
 
+/*
+ * A8: a jsonb constant has no register in the scan VM; the pattern of "jsonb_column @> constant" is the one place
+ * it is read (the program builder compiles it). __codegen_func_expression sets this for the arguments of @>.
+ */
+static bool codegen_jsonb_const_ok = false;
+
 static int
 codegen_const_expression(codegen_context *context,
 						 StringInfo buf, int curr_depth,
@@ -1652,6 +1658,9 @@ codegen_const_expression(codegen_context *context,
 {
 	devtype_info   *dtype;
 	char			typtype;
+
+	if (con->consttype == JSONBOID && !codegen_jsonb_const_ok)
+		__Ereport("a jsonb constant is only supported as the pattern of @> on the Vulkan service");
 
 	typtype = get_typtype(con->consttype);
 	if (typtype != TYPTYPE_BASE &&
@@ -1732,6 +1741,8 @@ codegen_pseudo_const_expression(codegen_context *context,
 		__Ereport("type %s is not device supported", format_type_be(type_oid));
 	if (type_oid == NUMERICOID)		/* the program builder must know the value fits: refuse */
 		__Ereport("numeric parameters are not supported by the Vulkan service");
+	if (type_oid == JSONBOID)
+		__Ereport("jsonb parameters are not supported by the Vulkan service");
 	/* assign param_id */
 	foreach (lc, context->used_params)
 	{
@@ -1777,6 +1788,8 @@ codegen_param_expression(codegen_context *context,
 				  format_type_be(param->paramtype));
 	if (param->paramtype == NUMERICOID)
 		__Ereport("numeric parameters are not supported by the Vulkan service");
+	if (param->paramtype == JSONBOID)
+		__Ereport("jsonb parameters are not supported by the Vulkan service");
 	/* assign param_id */
 	foreach (lc, context->used_params)
 	{
@@ -1877,6 +1890,44 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 			if (exprType((Node *) lfirst(lc)) == NUMERICOID)
 				return false;
 	}
+	/*
+	 * jsonb (A8): the first argument is a column or the result of another jsonb function (a jsonb constant
+	 * or parameter has no register), the pattern of @> a plain constant of a shape the VM can match.
+	 * Join programs read no jsonb.
+	 */
+	if (fc.cls == SOP_JSONGET || fc.cls == SOP_JSONTXT || fc.cls == SOP_JSONEXISTS ||
+		fc.cls == SOP_JSONTYPE || fc.cls == SOP_JSONCONT)
+	{
+		Node	   *arg0;
+
+		if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN || func_args == NIL)
+			return false;
+		arg0 = (Node *) linitial(func_args);
+		if (IsA(arg0, Const) || IsA(arg0, Param))
+			return false;
+		if (fc.cls == SOP_JSONCONT)
+		{
+			Node	   *pat;
+			struct varlena *vl;
+			unsigned char *buf;
+			int			rc;
+
+			if (list_length(func_args) != 2)
+				return false;
+			pat = (Node *) lsecond(func_args);
+			if (!IsA(pat, Const) || ((Const *) pat)->constisnull)
+				return false;
+			vl = (struct varlena *) DatumGetPointer(((Const *) pat)->constvalue);
+			if (VARATT_IS_EXTERNAL(vl) || VARATT_IS_COMPRESSED(vl))
+				return false;
+			buf = palloc(SCAN_JB_PATTERN_MAX);
+			rc = scan_vm_jsonb_pattern((const unsigned char *) VARDATA_ANY(vl), (uint32_t) VARSIZE_ANY_EXHDR(vl),
+									   buf, SCAN_JB_PATTERN_MAX);
+			pfree(buf);
+			return (rc >= 0);
+		}
+		return true;
+	}
 	if (fc.cls != SOP_STRCMP && fc.cls != SOP_STRLIKE && fc.cls != SOP_STRLEN)
 		return true;
 	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
@@ -1930,6 +1981,7 @@ __codegen_func_expression(codegen_context *context,
 	uint32_t		stack_usage_saved = context->stack_usage;
 	uint32_t		stack_usage_max = stack_usage_saved;
 	ListCell	   *lc;
+	bool			jb_const_saved;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
 	if (!dfunc ||
@@ -1952,15 +2004,21 @@ __codegen_func_expression(codegen_context *context,
 	kexp.args_offset = SizeOfKernExpr(0);
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
+	jb_const_saved = codegen_jsonb_const_ok;
+	codegen_jsonb_const_ok = (dfunc->func_code == FuncOpCode__jsonb_contains);
 	foreach (lc, func_args)
 	{
 		Expr   *arg = lfirst(lc);
 
 		if (codegen_expression_walker(context, buf, curr_depth, arg) < 0)
+		{
+			codegen_jsonb_const_ok = jb_const_saved;
 			return -1;
+		}
 		stack_usage_max = Max(stack_usage_max, context->stack_usage);
 		context->stack_usage = stack_usage_saved;
 	}
+	codegen_jsonb_const_ok = jb_const_saved;
 	context->stack_usage = stack_usage_max;
 	if ((dfunc->func_flags & DEVFUNC__HAS_RECURSION) != 0)
 		context->stack_usage += XPUCODE_STACK_USAGE_RECURSIVE;
@@ -2282,6 +2340,11 @@ __codegen_coerceviaio_jsonbref_expression(codegen_context *context,
 			ListCell   *lc;
 			int			pos = -1;
 
+			/* the Vulkan service: numeric, int2, int4, int8 (not the float and int1 shortcuts), no joins */
+			if (!scan_vm_func_supported(jsonref_catalog[i].opcode) ||
+				(context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+				__Ereport("jsonb field reference cast to %s is not supported by the Vulkan service",
+						  dtype->type_name);
 			memset(&kexp, 0, sizeof(kexp));
 			kexp.opcode = jsonref_catalog[i].opcode;
 			kexp.exptype = dtype->type_code;
@@ -2369,6 +2432,9 @@ codegen_coerceviaio_expression(codegen_context *context,
 			kern_expression kexp;
 			int		pos = -1;
 
+			/* the Vulkan service's VM has no text -> number parser: only the jsonb shortcut above */
+			if (!scan_vm_func_supported(coerce_viaio_catalog[i].opcode))
+				__Ereport("CoerceViaIO is not supported by the Vulkan service");
 			memset(&kexp, 0, sizeof(kexp));
 			kexp.opcode = coerce_viaio_catalog[i].opcode;
 			kexp.exptype = dtype->type_code;
@@ -3159,7 +3225,7 @@ codegen_expression_walker(codegen_context *context,
 	{
 		case T_DistinctExpr:
 		case T_BooleanTest:
-		case T_CoerceViaIO:
+		/* T_CoerceViaIO: only (jsonb ->> key)::numeric / intN, see codegen_coerceviaio_expression */
 		case T_CoalesceExpr:
 		case T_MinMaxExpr:
 		case T_CaseExpr:
@@ -4766,6 +4832,23 @@ pgstrom_xpu_expression(Expr *expr,
 		return false;
 	if (codegen_expression_walker(context, NULL, -1, expr) < 0)
 		return false;
+	/*
+	 * The Vulkan service cannot hand back a computed string or jsonb value (a sub-range of the input, or text
+	 * formatted by the device): such an expression is evaluated by the CPU above the scan, and the scan loads
+	 * the column. Quals, aggregate arguments and numbers computed from a jsonb value are not affected.
+	 */
+	switch (exprType((Node *) expr))
+	{
+		case TEXTOID:
+		case VARCHAROID:
+		case BPCHAROID:
+		case JSONBOID:
+			if (!IsA(expr, Var))
+				return false;
+			break;
+		default:
+			break;
+	}
 	if (p_devcost)
 		*p_devcost = context->device_cost;
 	return true;

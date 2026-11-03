@@ -51,6 +51,22 @@
  *            negative scale rounds to tens, ...) or the numeric(p,s) coercion with typmod register b
  *   NUMARITH with k0 = NUMOP_CEIL / FLOOR / SIGN: ceil, floor, sign (scale 0)
  *
+ * jsonb (A8): a jsonb register is { byte offset | length << 32 | source << 60 } of a JsonbContainer, or of a scalar
+ * inside one, and Reg.sc says which (the JEntry type: 0 string payload, 1 numeric varlena, 2 false, 3 true, 4 JSON
+ * null, 5 container). A column loads as kind 5; a compressed or external value is rechecked like a string. A
+ * text register with bit 62 of v set is a *deferred* text: the value of ->> that cannot be shown without
+ * formatting (a numeric or a container). It can be tested for NULL; every other use hands the row to the backend.
+ *
+ *   JSONGET    dst = a -> b: k0 = 0: b is a string register (object key), k0 = 1: b is an int register (array
+ *              element, negative from the end); NULL if absent or of the wrong shape
+ *   JSONTXT    dst = a ->> ...: the text of a jsonb scalar; k0 = pool offset of the literal "truefalse"
+ *   JSONEXISTS dst = jsonb_exists(a, b) (the ? operator: key of an object, string element of an array)
+ *   JSONTYPE   dst = jsonb_typeof(a); k0 = pool offset of "objectarraystringnumberbooleannull"
+ *   JSONNUM    dst = (a ->> ...)::numeric: a numeric scalar as { unscaled, scale }; a JSON null is NULL
+ *   JSONINT    dst = (a ->> ...)::intN (k0 = bits): a numeric scalar of scale 0 in range
+ *   JSONCONT   dst = a @> pattern (k0 = pool word offset of the compiled pattern, scan_caps.c)
+ * Whatever these cannot decide exactly returns SCANVM_RECHECK_CODE.
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -84,6 +100,13 @@ SCANVM_OP(I2N,      83)
 SCANVM_OP(N2I,      84)
 SCANVM_OP(NUMDIV,   85)
 SCANVM_OP(NUMRND,   86)
+SCANVM_OP(JSONGET,    100)
+SCANVM_OP(JSONTXT,    101)
+SCANVM_OP(JSONEXISTS, 102)
+SCANVM_OP(JSONTYPE,   103)
+SCANVM_OP(JSONNUM,    104)
+SCANVM_OP(JSONINT,    105)
+SCANVM_OP(JSONCONT,   106)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
 /* unary numeric operations (NUMARITH k0) */
@@ -137,3 +160,4 @@ SCANVM_OP(VT_FLOAT4,3)
 SCANVM_OP(VT_NULLONLY,4)   /* any type: only NULL-ness is loaded (IS [NOT] NULL) */
 SCANVM_OP(VT_STR,   5)     /* text/varchar/bpchar: a string register (see above) */
 SCANVM_OP(VT_NUM,   6)     /* numeric: { unscaled, scale } (see above); not readable -> row rechecked */
+SCANVM_OP(VT_JSON,  7)     /* jsonb: a register pointing at the container (see above); not readable -> row rechecked */

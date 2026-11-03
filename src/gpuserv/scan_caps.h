@@ -46,6 +46,49 @@ int		scan_vm_num_round(int kind, int64_t v, uint32_t sc, int64_t n, int64_t *r, 
 int		scan_vm_num_unary(int kind, int64_t v, uint32_t sc, int64_t *r, uint32_t *rsc);
 
 /*
+ * A8 jsonb: navigation over the binary form of a JsonbContainer (utils/jsonb.h), shared by the planner (the shape of a
+ * containment pattern), the CPU copy of the VM and the unit test. All offsets are byte offsets into 'b'. A function
+ * that finds the data malformed returns -1 (the row is then evaluated by the backend).
+ */
+#define SCAN_JB_STR		0		/* kinds: the JEntry type; a column or a nested container is SCAN_JB_CONT */
+#define SCAN_JB_NUM		1
+#define SCAN_JB_FALSE	2
+#define SCAN_JB_TRUE	3
+#define SCAN_JB_NULL	4
+#define SCAN_JB_CONT	5
+
+typedef struct
+{
+	uint32_t	count;			/* pairs of an object, elements of an array */
+	uint32_t	nent;			/* JEntry words: 2 * count for an object */
+	int			isobj, isarr, isscalar;
+} scan_jb_cont;
+
+int		scan_jb_open(const unsigned char *b, uint32_t cb, uint32_t clen, scan_jb_cont *c);
+int		scan_jb_child(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c,
+					  uint32_t i, uint32_t *kind, uint32_t *voff, uint32_t *vlen);
+/* 1: found (*idx = index of the pair), 0: absent, -1: malformed */
+int		scan_jb_find_key(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c,
+						 const unsigned char *key, uint32_t kl, uint32_t *idx);
+/* ? : a key of an object or a string element of an array. 1 / 0 / -1 */
+int		scan_jb_exists(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c,
+					   const unsigned char *key, uint32_t kl);
+/* the numeric varlena at [off, off+len) as { v, sc } (1) or not representable (0); -1 malformed */
+int		scan_jb_numeric(const unsigned char *b, uint32_t off, uint32_t len, int64_t *v, uint32_t *sc);
+/*
+ * Compile the constant jsonb of "col @> const" (the payload of the varlena: a JsonbContainer) into the pattern
+ * the VM matches (JSONCONT): returns its length in out (at most outcap), or -1 if the VM cannot evaluate this
+ * constant exactly (a nested array of containers, a raw scalar, a number that does not fit ...).
+ */
+int		scan_vm_jsonb_pattern(const unsigned char *jb, uint32_t len, unsigned char *out, uint32_t outcap);
+#define SCAN_JB_PATTERN_MAX		2048
+/* pattern terms (JSONCONT): see scan_caps.c */
+#define SCAN_JBT_EQ		1
+#define SCAN_JBT_ISOBJ	2
+#define SCAN_JBT_ISARR	3
+#define SCAN_JBT_ELEM	4
+
+/*
  * Aggregation (GpuPreAgg): which partial-aggregate actions (KAGG_ACTION__*, xpu_common.h)
  * the service implements. The planner offers only these.
  */

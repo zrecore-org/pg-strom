@@ -284,6 +284,66 @@ classify_numeric(const char *name)
 	return fc;
 }
 
+/*
+ * A8: jsonb. kind 0: the key form (object_field), 1: the array element form. cls SOP_JSONGET is "->", SOP_JSONTXT is
+ * "->>" (a get and the text of the result), SOP_JSONNUM / SOP_JSONINT the "(->>)::numeric / intN" shortcut of the
+ * planner (width = bits). Not on the VM: the float casts, int1, #>, path operators, jsonb_eq ...
+ */
+static scan_func_class
+classify_jsonb(const char *name)
+{
+	scan_func_class fc = {0, 0, 0};
+	const char *rest;
+	int			kind;
+
+	if (strncmp(name, "jsonb_", 6) != 0)
+		return fc;
+	rest = name + 6;
+	if (!strncmp(rest, "object_field", 12))
+	{
+		kind = 0;
+		rest += 12;
+	}
+	else if (!strncmp(rest, "array_element", 13))
+	{
+		kind = 1;
+		rest += 13;
+	}
+	else
+	{
+		if (!strcmp(rest, "exists"))
+			fc.cls = SOP_JSONEXISTS;
+		else if (!strcmp(rest, "typeof"))
+			fc.cls = SOP_JSONTYPE;
+		else if (!strcmp(rest, "contains"))
+			fc.cls = SOP_JSONCONT;
+		return fc;
+	}
+	fc.kind = kind;
+	if (*rest == '\0')
+		fc.cls = SOP_JSONGET;
+	else if (!strcmp(rest, "_text"))
+		fc.cls = SOP_JSONTXT;
+	else if (!strcmp(rest, "_as_numeric"))
+		fc.cls = SOP_JSONNUM;
+	else if (!strcmp(rest, "_as_int2"))
+	{
+		fc.cls = SOP_JSONINT;
+		fc.width = 16;
+	}
+	else if (!strcmp(rest, "_as_int4"))
+	{
+		fc.cls = SOP_JSONINT;
+		fc.width = 32;
+	}
+	else if (!strcmp(rest, "_as_int8"))
+	{
+		fc.cls = SOP_JSONINT;
+		fc.width = 64;
+	}
+	return fc;
+}
+
 /* value * 10^d without overflow of int64 (|value| <= INT64_MAX); 0 if it overflows */
 int
 scan_vm_num_up(int64_t *v, uint32_t d)
@@ -721,6 +781,394 @@ scan_vm_numeric_encode(int64_t v, uint32_t sc, unsigned char *buf)
 	return len;
 }
 
+
+/* ----------------------------------------------------------------
+ * A8: jsonb. The binary form (utils/jsonb.h): a container is a header word (count | flags), the JEntry
+ * words (keys then values for an object), then the data; an entry carries the type of the child and either
+ * its length or, every 32nd entry, the end offset of the child (JB_OFFSET_STRIDE). A string is stored
+ * as is, a numeric and a nested container are aligned to 4 bytes relative to the start of the data.
+ * ----------------------------------------------------------------
+ */
+static uint32_t
+jb_ld32(const unsigned char *b, uint32_t o)
+{
+	uint32_t	v;
+
+	memcpy(&v, b + o, 4);
+	return v;
+}
+
+int
+scan_jb_open(const unsigned char *b, uint32_t cb, uint32_t clen, scan_jb_cont *c)
+{
+	uint32_t	h;
+
+	if (clen < 4)
+		return -1;
+	h = jb_ld32(b, cb);
+	c->count = h & 0x0fffffffU;
+	c->isobj = (h & 0x20000000U) != 0;
+	c->isarr = (h & 0x40000000U) != 0;
+	c->isscalar = (h & 0x10000000U) != 0;
+	if (c->isobj == c->isarr || c->count > clen / 4)
+		return -1;
+	c->nent = c->isobj ? 2 * c->count : c->count;
+	if (4 + 4 * c->nent > clen)
+		return -1;
+	return 0;
+}
+
+int
+scan_jb_child(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c,
+			  uint32_t i, uint32_t *kind, uint32_t *voff, uint32_t *vlen)
+{
+	uint32_t	e = jb_ld32(b, cb + 4 + 4 * i);
+	uint32_t	st = 0, f = e & 0x0fffffffU, len, pad = 0, dbase = 4 + 4 * c->nent;
+
+	for (uint32_t j = i; j > 0; j--)
+	{
+		uint32_t	p = jb_ld32(b, cb + 4 + 4 * (j - 1));
+
+		st += p & 0x0fffffffU;
+		if (p & 0x80000000U)
+			break;
+	}
+	if (e & 0x80000000U)
+	{
+		if (f < st)
+			return -1;
+		len = f - st;
+	}
+	else
+		len = f;
+	*kind = (e >> 28) & 7;
+	if (*kind > SCAN_JB_CONT)
+		return -1;
+	if (*kind == SCAN_JB_NUM || *kind == SCAN_JB_CONT)
+		pad = ((st + 3) & ~3U) - st;
+	if (len < pad || (uint64_t) dbase + st + len > clen)
+		return -1;
+	if (*kind >= SCAN_JB_FALSE && *kind <= SCAN_JB_NULL)
+	{
+		*voff = 0;
+		*vlen = 0;
+		return 0;
+	}
+	*voff = cb + dbase + st + pad;
+	*vlen = len - pad;
+	return 0;
+}
+
+int
+scan_jb_find_key(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c,
+				 const unsigned char *key, uint32_t kl, uint32_t *idx)
+{
+	uint32_t	lo = 0, hi = c->count;
+
+	while (lo < hi)
+	{
+		uint32_t	mid = lo + (hi - lo) / 2, kind, voff, vlen;
+		int			cmp;
+
+		if (scan_jb_child(b, cb, clen, c, mid, &kind, &voff, &vlen) < 0 || kind != SCAN_JB_STR)
+			return -1;
+		if (vlen == kl)
+			cmp = memcmp(b + voff, key, kl);
+		else
+			cmp = (vlen > kl) ? 1 : -1;
+		if (cmp < 0)
+			lo = mid + 1;
+		else if (cmp > 0)
+			hi = mid;
+		else
+		{
+			*idx = mid;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int
+scan_jb_exists(const unsigned char *b, uint32_t cb, uint32_t clen, const scan_jb_cont *c,
+			   const unsigned char *key, uint32_t kl)
+{
+	uint32_t	idx;
+
+	if (c->isobj)
+		return scan_jb_find_key(b, cb, clen, c, key, kl, &idx);
+	for (uint32_t i = 0; i < c->count; i++)
+	{
+		uint32_t	kind, voff, vlen;
+
+		if (scan_jb_child(b, cb, clen, c, i, &kind, &voff, &vlen) < 0)
+			return -1;
+		if (kind == SCAN_JB_STR && vlen == kl && memcmp(b + voff, key, kl) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+int
+scan_jb_numeric(const unsigned char *b, uint32_t off, uint32_t len, int64_t *v, uint32_t *sc)
+{
+	uint32_t	hl, total;
+
+	if (len < 1)
+		return -1;
+	if (b[off] & 1)
+	{
+		if (b[off] == 1)
+			return -1;
+		hl = 1;
+		total = (b[off] >> 1) & 0x7f;
+	}
+	else
+	{
+		if (len < 4 || (b[off] & 3) == 2)
+			return -1;
+		hl = 4;
+		total = (jb_ld32(b, off) >> 2) & 0x3fffffffU;
+	}
+	if (total < hl || total > len)
+		return -1;
+	return scan_vm_numeric_payload_decode(b + off + hl, total - hl, v, sc) ? 1 : 0;
+}
+
+/*
+ * The pattern of "col @> const". The constant is turned into a conjunction of terms, each tested by walking
+ * from the root of the column's value:
+ *   EQ    the value at the path (keys of objects) is a scalar equal to the given one (same JSON type)
+ *   ISOBJ the value at the path is an object (an empty {} in the constant)
+ *   ISARR the value at the path is an array that is not a raw scalar (an empty [] in the constant)
+ *   ELEM  the value at the path is such an array and one of its elements is the given scalar
+ * Shapes this expresses exactly: objects whose values are scalars, objects, empty arrays or arrays of scalars
+ * (to any depth up to JBP_DEPTH), and a root array of scalars. Everything else (arrays inside arrays, raw
+ * scalars, an empty root array, numbers that do not fit { int64, scale }) is refused: the planner leaves
+ * the qual on the CPU.
+ * Layout (little-endian words): [0] number of terms; per term: [0] type | nsteps << 8 | kind << 16, nsteps
+ * pairs { byte offset of the key in the pattern, length }, then the scalar: a string { offset, length } or
+ * a numeric { lo, hi, scale }; the key and string bytes follow the words.
+ */
+#define JBP_DEPTH	6
+#define JBP_TERMS	48
+typedef struct
+{
+	uint32_t	type, nsteps, kind;
+	const unsigned char *step[JBP_DEPTH];
+	uint32_t	steplen[JBP_DEPTH];
+	const unsigned char *sptr;
+	uint32_t	slen;
+	int64_t		nv;
+	uint32_t	nsc;
+} jbp_term;
+
+typedef struct
+{
+	const unsigned char *b;
+	uint32_t	clen_root;
+	jbp_term	terms[JBP_TERMS];
+	uint32_t	nterms;
+} jbp_ctx;
+
+static int
+jbp_scalar(jbp_ctx *x, jbp_term *t, uint32_t kind, uint32_t voff, uint32_t vlen)
+{
+	t->kind = kind;
+	switch (kind)
+	{
+		case SCAN_JB_STR:
+			t->sptr = x->b + voff;
+			t->slen = vlen;
+			return 0;
+		case SCAN_JB_NUM:
+			return scan_jb_numeric(x->b, voff, vlen, &t->nv, &t->nsc) == 1 ? 0 : -1;
+		case SCAN_JB_FALSE:
+		case SCAN_JB_TRUE:
+		case SCAN_JB_NULL:
+			return 0;
+	}
+	return -1;
+}
+
+static int
+jbp_walk(jbp_ctx *x, uint32_t cb, uint32_t clen, uint32_t depth,
+		 const unsigned char **ksteps, const uint32_t *kstepl)
+{
+	scan_jb_cont c;
+	jbp_term   *t;
+
+	if (scan_jb_open(x->b, cb, clen, &c) < 0 || c.isscalar)
+		return -1;
+	if (x->nterms >= JBP_TERMS)
+		return -1;
+	if (c.isarr)
+	{
+		/* an array of scalars */
+		if (c.count == 0)
+		{
+			if (depth == 0)
+				return -1;				/* the empty root array */
+			t = &x->terms[x->nterms++];
+			memset(t, 0, sizeof(*t));
+			t->type = SCAN_JBT_ISARR;
+			t->nsteps = depth;
+			for (uint32_t d = 0; d < depth; d++)
+			{
+				t->step[d] = ksteps[d];
+				t->steplen[d] = kstepl[d];
+			}
+			return 0;
+		}
+		for (uint32_t i = 0; i < c.count; i++)
+		{
+			uint32_t	kind, voff, vlen;
+
+			if (scan_jb_child(x->b, cb, clen, &c, i, &kind, &voff, &vlen) < 0 || kind == SCAN_JB_CONT)
+				return -1;
+			if (x->nterms >= JBP_TERMS)
+				return -1;
+			t = &x->terms[x->nterms++];
+			memset(t, 0, sizeof(*t));
+			t->type = SCAN_JBT_ELEM;
+			t->nsteps = depth;
+			for (uint32_t d = 0; d < depth; d++)
+			{
+				t->step[d] = ksteps[d];
+				t->steplen[d] = kstepl[d];
+			}
+			if (jbp_scalar(x, t, kind, voff, vlen) < 0)
+				return -1;
+		}
+		return 0;
+	}
+	/* an object */
+	if (c.count == 0)
+	{
+		t = &x->terms[x->nterms++];
+		memset(t, 0, sizeof(*t));
+		t->type = SCAN_JBT_ISOBJ;
+		t->nsteps = depth;
+		for (uint32_t d = 0; d < depth; d++)
+		{
+			t->step[d] = ksteps[d];
+			t->steplen[d] = kstepl[d];
+		}
+		return 0;
+	}
+	if (depth >= JBP_DEPTH)
+		return -1;
+	for (uint32_t i = 0; i < c.count; i++)
+	{
+		uint32_t	kk, koff, klen, kind, voff, vlen;
+		const unsigned char *st[JBP_DEPTH];
+		uint32_t	stl[JBP_DEPTH];
+
+		if (scan_jb_child(x->b, cb, clen, &c, i, &kk, &koff, &klen) < 0 || kk != SCAN_JB_STR ||
+			scan_jb_child(x->b, cb, clen, &c, c.count + i, &kind, &voff, &vlen) < 0)
+			return -1;
+		for (uint32_t d = 0; d < depth; d++)
+		{
+			st[d] = ksteps[d];
+			stl[d] = kstepl[d];
+		}
+		st[depth] = x->b + koff;
+		stl[depth] = klen;
+		if (kind == SCAN_JB_CONT)
+		{
+			if (jbp_walk(x, voff, vlen, depth + 1, st, stl) < 0)
+				return -1;
+			continue;
+		}
+		if (x->nterms >= JBP_TERMS)
+			return -1;
+		t = &x->terms[x->nterms++];
+		memset(t, 0, sizeof(*t));
+		t->type = SCAN_JBT_EQ;
+		t->nsteps = depth + 1;
+		for (uint32_t d = 0; d <= depth; d++)
+		{
+			t->step[d] = st[d];
+			t->steplen[d] = stl[d];
+		}
+		if (jbp_scalar(x, t, kind, voff, vlen) < 0)
+			return -1;
+	}
+	return 0;
+}
+
+int
+scan_vm_jsonb_pattern(const unsigned char *jb, uint32_t len, unsigned char *out, uint32_t outcap)
+{
+	static jbp_ctx x;				/* too big for the stack of a backend; not re-entrant (nor needed) */
+	uint32_t	nwords = 1, nbytes = 0, wi, bpos;
+	unsigned char *bytes;
+
+	memset(&x, 0, sizeof(x));
+	x.b = jb;
+	x.clen_root = len;
+	if (jbp_walk(&x, 0, len, 0, NULL, NULL) < 0 || x.nterms == 0)
+		return -1;
+	for (uint32_t i = 0; i < x.nterms; i++)
+	{
+		jbp_term   *t = &x.terms[i];
+
+		nwords += 1 + 2 * t->nsteps;
+		for (uint32_t d = 0; d < t->nsteps; d++)
+			nbytes += (t->steplen[d] + 3) & ~3U;
+		if (t->type == SCAN_JBT_EQ || t->type == SCAN_JBT_ELEM)
+		{
+			if (t->kind == SCAN_JB_STR)
+			{
+				nwords += 2;
+				nbytes += (t->slen + 3) & ~3U;
+			}
+			else if (t->kind == SCAN_JB_NUM)
+				nwords += 3;
+		}
+	}
+	if ((uint64_t) 4 * nwords + nbytes > outcap)
+		return -1;
+	memset(out, 0, 4 * nwords + nbytes);
+	bytes = out + 4 * nwords;
+	bpos = 4 * nwords;
+	wi = 0;
+#define PUTW(v)	do { uint32_t __w = (uint32_t)(v); memcpy(out + 4 * wi, &__w, 4); wi++; } while (0)
+	PUTW(x.nterms);
+	for (uint32_t i = 0; i < x.nterms; i++)
+	{
+		jbp_term   *t = &x.terms[i];
+
+		PUTW(t->type | (t->nsteps << 8) | (t->kind << 16));
+		for (uint32_t d = 0; d < t->nsteps; d++)
+		{
+			PUTW(bpos);
+			PUTW(t->steplen[d]);
+			memcpy(out + bpos, t->step[d], t->steplen[d]);
+			bpos += (t->steplen[d] + 3) & ~3U;
+		}
+		if (t->type == SCAN_JBT_EQ || t->type == SCAN_JBT_ELEM)
+		{
+			if (t->kind == SCAN_JB_STR)
+			{
+				PUTW(bpos);
+				PUTW(t->slen);
+				memcpy(out + bpos, t->sptr, t->slen);
+				bpos += (t->slen + 3) & ~3U;
+			}
+			else if (t->kind == SCAN_JB_NUM)
+			{
+				PUTW((uint64_t) t->nv & 0xffffffffU);
+				PUTW((uint64_t) t->nv >> 32);
+				PUTW(t->nsc);
+			}
+		}
+	}
+#undef PUTW
+	(void) bytes;
+	return (int) bpos;
+}
+
 /* "int4lt", "int48pl", "float4mul", "int4_to_int8", "booleq", "int4um" ... */
 scan_func_class
 scan_vm_classify_func(uint32_t opcode)
@@ -732,6 +1180,8 @@ scan_vm_classify_func(uint32_t opcode)
 	if (!name)
 		return fc;
 	if ((fc = classify_numeric(name)).cls != 0)
+		return fc;
+	if ((fc = classify_jsonb(name)).cls != 0)
 		return fc;
 	if ((fc = classify_temporal(name)).cls != 0)
 		return fc;

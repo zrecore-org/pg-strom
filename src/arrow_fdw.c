@@ -3253,6 +3253,8 @@ __arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
 {
 	const ArrowTypeOptions *attopts = &field->attopts;
 
+	if (field->atttypid == JSONBOID)
+		return false;		/* the Arrow loader of the service has no jsonb registers */
 	switch (attopts->tag)
 	{
 		case ArrowType__Int:
