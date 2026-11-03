@@ -16,3 +16,5 @@ agg	select tm as k0, count((e4 * n2)) filter (where (d <> d)) as a0 from fz1 t g
 agg	select (nf)::int2 as k0, sum(e8) as a0 from fz2 t where (nw IS NOT NULL) group by 1
 # fail_service seed=4 index=972 GPU: ERROR:  gpuserv:0  the expression needs more than 32 registers | CPU: c12684998b7caa01bc19a4b137611577|100
 agg	select (w22 % 5) as k0, (w1 % 5) as k1, sum(w5) as a0, max((w32 + w4)) as a1, count((w15 + w35)) as a2, min((w14 + w29)) as a3, max((w16 + w21)) as a4, sum((w28 + w13)) as a5 from fz_w t group by 1, 2
+# fail_rows seed=5 index=522 GPU: 1803b4658bcd04a24ebecb88ffa555b1|2002 | CPU: 29c441758f80d504a0ceb092d01948c9|2002
+agg	select n4 as k0, sum((e8)::float4) as a0 from fz3 t group by 1

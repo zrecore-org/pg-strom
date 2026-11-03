@@ -696,7 +696,7 @@ def gen_query(seed, index):
                 f = "count"
             else:
                 at = r.choice(["i2", "i4", "i4", "i8", "i8", "i8", "num", "f4", "date", "ts", "time", "text", "bool"] if f in ("count", "min", "max")
-                              else ["i2", "i4", "i4", "i8", "i8", "num", "f4"])
+                              else ["i2", "i4", "i4", "i8", "i8", "num"])   # sum/avg of float4 depends on the order the rows arrive in
                 a = g.expr(at, depth)
             flt = g.expr("bool", min(depth, 2)) if r.random() < 0.3 else None
             q.aggs.append((f, a, flt))
