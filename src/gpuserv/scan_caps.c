@@ -195,3 +195,20 @@ scan_vm_agg_action_supported(int action)
 	}
 	return false;
 }
+
+bool
+scan_vm_groupkey_type_supported(int type_code)
+{
+	switch (type_code)
+	{
+		case TypeOpCode__bool:
+		case TypeOpCode__int1:
+		case TypeOpCode__int2:
+		case TypeOpCode__int4:
+		case TypeOpCode__int8:
+			return true;
+		default:
+			break;
+	}
+	return false;
+}

@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "scan_caps.h"
 #define SCAN_MAX_REGS		32		/* must equal VM_MAX_REGS of scan_common.slang */
 #define SCAN_AGG_MAX		12		/* must equal AGG_MAX of agg.slang */
 
@@ -36,8 +37,11 @@ typedef struct scan_prog
 	int				max_src_resno;	/* highest source column copied as is */
 	/* aggregation (GpuPreAgg without GROUP BY) */
 	int				agg_mode;
-	int				nagg;
+	int				nagg;			/* number of aggregates (not counting key columns) */
+	int				nkeys;			/* GROUP BY keys (0: aggregation without GROUP BY) */
 	uint16_t		agg_action[SCAN_AGG_MAX];	/* KAGG_ACTION__* of each output column */
+	int8_t			agg_of_col[SCAN_AGG_MAX];	/* output column -> aggregate index, or -1 */
+	int8_t			key_of_col[SCAN_AGG_MAX];	/* output column -> key index, or -1 */
 } scan_prog;
 
 struct kern_session_info;

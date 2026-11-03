@@ -18,7 +18,7 @@
 #include "scan_caps.h"
 
 
-#define PROG_HDR_WORDS		12
+#define PROG_HDR_WORDS		14
 #define NO_REG				(-1)
 
 /* ----------------------------------------------------------------
@@ -428,7 +428,10 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	int			max_src = 0;
 	int			agg_mode;
 	uint32_t	agg_tab[4 * SCAN_AGG_MAX];
-	int			nagg = 0;
+	int			nagg = 0, nattrs_out = 0;
+	int			nkeys = 0;
+	uint32_t	key_reg_tab[SCAN_GROUP_KEYS];
+	int			key_slot[SCAN_GROUP_KEYS];
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));
@@ -456,12 +459,6 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		if (!session->xpucode_groupby_actions)
 		{
 			fail(&b, "GpuPreAgg without aggregate actions");
-			goto error;
-		}
-		if (session->xpucode_groupby_keyhash || session->xpucode_groupby_keyload ||
-			session->xpucode_groupby_keycomp)
-		{
-			fail(&b, "GROUP BY is not implemented by the Vulkan service yet");
 			goto error;
 		}
 	}
@@ -523,13 +520,69 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 
 		for (int i = 0; i < SCAN_MAX_REGS; i++)
 			slot_reg[i] = -1;
-		nagg = kagg->u.pagg.nattrs;
-		if (nagg < 1 || nagg > SCAN_AGG_MAX)
+		nattrs_out = kagg->u.pagg.nattrs;
+		if (nattrs_out < 1 || nattrs_out > SCAN_AGG_MAX)
 		{
-			fail(&b, "%d aggregates (up to %d are supported)", nagg, SCAN_AGG_MAX);
+			fail(&b, "%d output columns (up to %d are supported)", nattrs_out, SCAN_AGG_MAX);
 			goto error;
 		}
-		prog->nattrs = nagg;
+		prog->nattrs = nattrs_out;
+		/* the GROUP BY keys: the SaveExpr arguments of the key hash */
+		if (session->xpucode_groupby_keyhash)
+		{
+			const kern_expression *khash = (const kern_expression *)
+				((const char *) session + session->xpucode_groupby_keyhash);
+			const kern_expression *kk = KEXP_FIRST_ARG(khash);
+
+			if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS)
+			{
+				fail(&b, "%u GROUP BY keys (up to %d are supported)", khash->nr_args, SCAN_GROUP_KEYS);
+				goto error;
+			}
+			for (uint32_t j = 0; j < khash->nr_args; j++, kk = KEXP_NEXT_ARG(kk))
+			{
+				const kern_expression *kin;
+				int		bytes, vt, r, nx = perm;
+
+				if (kk->opcode != FuncOpCode__SaveExpr || kk->nr_args != 1 || kk->u.save.sv_slot_id >= b.nslots)
+				{
+					fail(&b, "unexpected GROUP BY key element %s", scan_vm_opcode_name(kk->opcode));
+					goto error;
+				}
+				vt = reg_vtype(kk->exptype, &bytes);
+				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL)
+				{
+					fail(&b, "GROUP BY key of an unsupported type (opcode type %u)", kk->exptype);
+					goto error;
+				}
+				kin = KEXP_FIRST_ARG(kk);
+				if (kin->opcode == FuncOpCode__VarExpr &&
+					kin->u.v.var_slot_id < b.nslots && b.slot_resno[kin->u.v.var_slot_id] > 0)
+				{
+					b.slot_used[kin->u.v.var_slot_id] = 1;
+					r = (int) kin->u.v.var_slot_id;
+				}
+				else
+				{
+					r = expr_to_reg(&b, kin, &nx);
+					if (r < 0)
+						goto error;
+					if (r < (int) b.nslots)
+					{
+						int		d = new_reg(&b, &nx);
+
+						if (d < 0 || emit(&b, SOP_MOV, d, r, 0, 0, 0) < 0)
+							goto error;
+						r = d;
+					}
+					perm = r + 1;
+				}
+				slot_reg[kk->u.save.sv_slot_id] = r;
+				key_slot[nkeys] = (int) kk->u.save.sv_slot_id;
+				key_reg_tab[nkeys] = (uint32_t) r;
+				nkeys++;
+			}
+		}
 		/* the argument values: SaveExpr slots, computed after the quals */
 		for (uint32_t j = 0; j < kagg->nr_args; j++, ksave = KEXP_NEXT_ARG(ksave))
 		{
@@ -580,10 +633,35 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				perm = r + 1;
 			}
 		}
-		/* the aggregate table */
-		for (int i = 0; i < nagg; i++)
+		/* the aggregate table (the key columns of the output are not aggregates) */
+		for (int i = 0; i < nattrs_out; i++)
 		{
 			const kern_aggregate_desc *d = &kagg->u.pagg.desc[i];
+
+			prog->agg_action[i] = d->action;
+			prog->agg_of_col[i] = -1;
+			prog->key_of_col[i] = -1;
+			if (d->action == KAGG_ACTION__VREF)
+			{
+				int		kidx = -1;
+
+				for (int k = 0; k < nkeys; k++)
+					if (key_slot[k] == d->arg0_slot_id)
+						kidx = k;
+				if (kidx < 0)
+				{
+					fail(&b, "output column %d refers to a slot that is not a GROUP BY key", i + 1);
+					goto error;
+				}
+				prog->key_of_col[i] = (int8_t) kidx;
+				continue;
+			}
+			if (d->action == KAGG_ACTION__VREF_NOKEY)
+			{
+				fail(&b, "a column that depends on the GROUP BY key (VREF_NOKEY) is not supported yet");
+				goto error;
+			}
+			prog->agg_of_col[i] = (int8_t) nagg;
 			int		sources[2] = {d->arg0_slot_id, d->filter_slot_id};
 			int		regs_of[2] = {-1, -1};
 			uint32_t	cls;
@@ -637,17 +715,18 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			}
 			if ((cls == 2 || cls >= 3) && regs_of[0] < 0)
 			{
-				fail(&b, "aggregate %d has no argument", i);
+				fail(&b, "aggregate in column %d has no argument", i + 1);
 				goto error;
 			}
-			agg_tab[4 * i + 0] = cls;
-			agg_tab[4 * i + 1] = regs_of[0] < 0 ? 0xffffffffU : (uint32_t) regs_of[0];
-			agg_tab[4 * i + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
-			agg_tab[4 * i + 3] = 0;
-			prog->agg_action[i] = d->action;
+			agg_tab[4 * nagg + 0] = cls;
+			agg_tab[4 * nagg + 1] = regs_of[0] < 0 ? 0xffffffffU : (uint32_t) regs_of[0];
+			agg_tab[4 * nagg + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
+			agg_tab[4 * nagg + 3] = 0;
+			nagg++;
 		}
 		prog->agg_mode = 1;
 		prog->nagg = nagg;
+		prog->nkeys = nkeys;
 	}
 	else
 	{
@@ -759,7 +838,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		}
 	}
 
-	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;
+	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;
 	w = calloc(nwords, sizeof(uint32_t));
 	if (!w)
 	{
@@ -778,6 +857,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	w[9] = PROG_HDR_WORDS + ncols + 6 * b.ninsn;	/* compoff */
 	w[10] = nagg;
 	w[11] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp;	/* aggoff */
+	w[12] = nkeys;
+	w[13] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;	/* keyoff */
 	for (int c = 0; c < ncols; c++)
 	{
 		const kern_colmeta *cm = &kds_src->colmeta[c];
@@ -795,6 +876,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	memcpy(w + PROG_HDR_WORDS + ncols, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp, agg_tab, sizeof(uint32_t) * 4 * nagg);
+	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg, key_reg_tab, sizeof(uint32_t) * nkeys);
 
 	prog->words = w;
 	prog->nwords = nwords;

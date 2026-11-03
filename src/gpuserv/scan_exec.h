@@ -34,6 +34,8 @@ typedef struct scan_engine
 	int				pipe_ready[3];
 	gpu_vk_pipeline	agg_pipe[3][3];		/* the aggregation kernel: [registers 8/16/32][aggregates 4/8/12] */
 	int				agg_pipe_ready[3][3];
+	gpu_vk_pipeline	gagg_pipe[2][3];		/* GROUP BY: [registers 16/32][aggregates 4/8/12] */
+	int				gagg_pipe_ready[2][3];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 } scan_engine;
@@ -56,8 +58,10 @@ XpuCommand *scan_exec_task(scan_engine *eng,
  * Aggregation without GROUP BY: the session's running partial aggregates. Tasks add to it;
  * the reply to XpuTaskFinal is the one row of partial states.
  */
+struct group_table;
 typedef struct agg_state
 {
+	struct group_table *groups;		/* GROUP BY: the groups of the session (NULL otherwise) */
 	int			nagg;
 	uint64_t	n[SCAN_AGG_MAX];		/* count, number of values, or "has a value" (min/max) */
 	__int128	sum[SCAN_AGG_MAX];		/* sums, exact */
@@ -69,8 +73,15 @@ typedef struct agg_state
 /* Run one task of a GpuPreAgg session and add its results to st. 0 on success. */
 int		scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 						   agg_state *st, const XpuCommand *task, char *err, size_t errlen);
-/* The reply to XpuTaskFinal: the partial aggregate row. malloc'ed, NULL on error. */
-XpuCommand *scan_exec_agg_final(const XpuCommand *session_cmd,
+/* GROUP BY: the same, with the groups kept in st->groups. */
+int		scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+							 agg_state *st, const XpuCommand *task, char *err, size_t errlen);
+/*
+ * The reply to XpuTaskFinal: the partial aggregate row (one row per group with GROUP BY).
+ * malloc'ed, NULL on error.
+ */
+XpuCommand *scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 								const agg_state *st, size_t *p_len, char *err, size_t errlen);
+void	agg_state_free(agg_state *st);
 
 #endif	/* GPUSERV_SCAN_EXEC_H */

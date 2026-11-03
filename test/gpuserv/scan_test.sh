@@ -117,11 +117,17 @@ for t in s1 s2 s3; do
 done
 
 echo "aggregation (GpuPreAgg)"
-runagg() { # table, label, query-with-%T [, settings]
+runagg() { # table, label, query-with-%T [, settings]; the plan must use GpuPreAgg
+	ANYPLAN=0; __runagg "$@"
+}
+runagg_any() { # the same, but the aggregate may also stay on the CPU (results must match)
+	ANYPLAN=1; __runagg "$@"
+}
+__runagg() {
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); set_extra=${4:-}
-	plan=$($PSQL -d scantest -c "$GPU $set_extra explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
-	g=$($PSQL -d scantest -c "$GPU $set_extra $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
-	if { [ "$plan" -ge 1 ] || [ -n "$ANYPLAN" ]; } && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label"
+	plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; $set_extra explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
+	g=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; $set_extra $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
+	if { [ "$plan" -ge 1 ] || [ "$ANYPLAN" = 1 ]; } && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label"
 	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 for t in s1 s2 s3; do
@@ -133,9 +139,28 @@ for t in s1 s2 s3; do
 	runagg $t "expressions as arguments" "select sum(a + b), max(b * 2), min(c - 1), count(a * 2) from %T"
 	runagg $t "FILTER (WHERE ...)" "select count(*) filter (where b > 0), sum(b) filter (where a < 0), max(c) filter (where e) from %T"
 	runagg $t "sum beyond 64 bits" "select sum(c + 9000000000000000000), avg(c + 9000000000000000000), sum(c) from %T"
-	ANYPLAN=1 runagg $t "float aggregates stay on the CPU too" "select count(*), sum(a), sum(d) from %T where a > 9000"
+	runagg_any $t "float aggregates stay on the CPU too" "select count(*), sum(a), sum(d) from %T where a > 9000"
 done
 runagg s1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+
+echo "GROUP BY"
+BIGGROUPS="set pg_strom.gpupreagg_max_groups=1000000;"
+for t in s1 s2 s3; do
+	runagg $t "one int key" "select a % 10 as k, count(*), sum(b), min(c), max(b), avg(a) from %T group by 1 order by 1"
+	runagg $t "key with NULLs" "select b % 5 as k, count(*), count(b), sum(a) from %T group by 1 order by 1"
+	runagg $t "two integer keys" "select a % 4 as k1, b % 3 as k2, count(*), sum(c), max(a) from %T group by 1, 2 order by 1, 2"
+	runagg_any $t "bool key (stays on the CPU)" "select a % 4 as k1, e, count(*), sum(c), max(a) from %T group by 1, 2 order by 1, 2"
+	runagg $t "int8 key" "select c % 7 as k, count(*), sum(a) from %T group by 1 order by 1"
+	runagg $t "with quals and FILTER" "select a % 6 as k, count(*) filter (where b > 0), sum(b) filter (where e), max(c) from %T where a > -9000 group by 1 order by 1"
+	runagg_any $t "empty input" "select a % 6 as k, count(*), sum(b) from %T where a > 100000 group by 1 order by 1"
+	runagg $t "sum beyond 64 bits per group" "select a % 3 as k, sum(c + 9000000000000000000), avg(c + 9000000000000000000) from %T group by 1 order by 1"
+	runagg $t "more groups than a workgroup's table (CPU overflow path)" "select i % 1500 as k, count(*), sum(a), min(b), max(c) from %T group by 1 order by 1" "$BIGGROUPS"
+	runagg $t "overflow with two keys" "select i % 97 as k1, i % 13 as k2, count(*), sum(a) from %T group by 1, 2 order by 1, 2" "$BIGGROUPS"
+done
+runagg s1 "parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+runagg_any s1 "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
+runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
+plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?
 
 echo "errors"
 for t in s1; do

@@ -32,11 +32,12 @@ endif
 
 SLANG_SRCS := $(sort $(wildcard kernels/*.slang))
 AGG_SPV    := $(foreach r,8 16 32,$(foreach a,4 8 12,build/gpuagg$(r)_$(a).spv))
-SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV)
+GAGG_SPV   := $(foreach r,16 32,$(foreach a,4 8 12,build/gagg$(r)_$(a).spv))
+SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV)
 # per-kernel extra slangc flags (the memory model kernel must declare the Vulkan memory model)
 SLANGFLAGS_memmodel := -capability vk_mem_model
 
-LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.o scan_prog.o scan_exec.o scan_caps.o
+LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.o scan_prog.o scan_exec.o scan_caps.o cpu_vm.o
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
 
@@ -85,6 +86,15 @@ scan_caps.o: scan_caps.c scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h 
 build/gpuagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/agg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) -DSCAN_WG=128 $(SCAN_SLANGFLAGS) -target spirv -entry agg_main -stage compute -o $@
+
+cpu_vm.o: cpu_vm.c cpu_vm.h scan_prog.h scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+# the GROUP BY kernel: <regs>_<aggregates>; the capacity of the per-workgroup table shrinks as the
+# accumulators grow, to fit shared memory (the host has the same table in scan_exec.c)
+build/gagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/gagg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
 
 scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<

@@ -20,6 +20,7 @@ static CustomExecMethods	gpupreagg_exec_methods;
 static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
+static int					pgstrom_gpupreagg_max_groups;	/* GUC */
 bool						pgstrom_enable_gpusort = false;
 
 /*
@@ -1954,6 +1955,14 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
+			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer or bool columns */
+			if (!scan_vm_groupkey_type_supported(dtype->type_code) ||
+				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)
+			{
+				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
+					 nodeToString(expr));
+				return false;
+			}
 			coll_oid = exprCollation((Node *)expr);
 			if (devtype_lookup_equal_func(dtype, coll_oid) == NULL)
 			{
@@ -2454,6 +2463,16 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		num_groups = estimate_num_groups(root, distinctExprs,
 										 pp_input->final_nrows,
 										 NULL, NULL);
+	}
+	/*
+	 * The service keeps each workgroup's groups in shared memory; with many more groups than
+	 * fit, most rows would be aggregated on the CPU, so leave such queries to PostgreSQL.
+	 */
+	if (parse->groupClause && num_groups > pgstrom_gpupreagg_max_groups)
+	{
+		elog(DEBUG2, "GpuPreAgg: estimated %.0f groups exceed pg_strom.gpupreagg_max_groups",
+			 num_groups);
+		return;
 	}
 	/* setup inner_target_list */
 	foreach (lc, input_path->custom_paths)
@@ -3542,6 +3561,17 @@ pgstrom_init_gpu_preagg(void)
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* pg_strom.gpupreagg_max_groups */
+	DefineCustomIntVariable("pg_strom.gpupreagg_max_groups",
+							"Largest estimated number of groups for which GROUP BY runs on the GPU",
+							"The GPU wins for few groups (the service keeps each workgroup's groups in shared memory); with more groups most rows are aggregated on the CPU",
+							&pgstrom_gpupreagg_max_groups,
+							16,
+							1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	/* pg_strom.enable_numeric_aggfuncs */
 	DefineCustomBoolVariable("pg_strom.enable_numeric_aggfuncs",
 							 "Enable aggregate functions on numeric type",
@@ -3561,11 +3591,12 @@ pgstrom_init_gpu_preagg(void)
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 	/* turn on/off GPU-Sort */
+	/* (GPU-Sort comes back with milestone A7; the Vulkan service does not implement it yet) */
 	DefineCustomBoolVariable("pg_strom.enable_gpusort",
 							 "Enables to use GPU-Sort on top of GPU-Projection/PreAgg",
 							 NULL,
 							 &pgstrom_enable_gpusort,
-							 true,
+							 false,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);

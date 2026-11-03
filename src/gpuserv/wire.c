@@ -332,7 +332,9 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 		uint64_t	raw0 = wc->agg.nitems_raw, in0 = wc->agg.nitems_in;
 		uint32_t	vfs0 = wc->agg.npages_vfs_read;
 
-		if (scan_exec_agg_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg)) != 0)
+		if ((wc->session->u.session.xpucode_groupby_keyhash
+			 ? scan_exec_group_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg))
+			 : scan_exec_agg_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg))) != 0)
 		{
 			wlog(ws, 1, "task failed: %s", msg);
 			reply_error(wc, "XpuTaskExec", "%s", msg);
@@ -373,7 +375,7 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			{
 				char		msg[256];
 				size_t		len = 0;
-				XpuCommand *resp = scan_exec_agg_final(wc->session, &wc->agg, &len, msg, sizeof(msg));
+				XpuCommand *resp = scan_exec_agg_final(wc->session, &wc->prog, &wc->agg, &len, msg, sizeof(msg));
 
 				if (!resp)
 				{
@@ -405,6 +407,7 @@ client_free(wire_client *wc)
 		close(wc->fd);
 	free(wc->rbuf);
 	scan_prog_free(&wc->prog);
+	agg_state_free(&wc->agg);
 	free(wc->session);
 	free(wc);
 }

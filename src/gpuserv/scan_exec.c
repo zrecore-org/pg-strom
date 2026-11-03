@@ -18,6 +18,7 @@
 #include "kernels_spv.h"
 #include "scan_exec.h"
 #include "scan_caps.h"
+#include "cpu_vm.h"
 
 #define SCAN_WG_MAX		65535U
 #define AGG_PAGES_PER_WG	32U		/* pages one aggregation workgroup runs over */
@@ -369,6 +370,10 @@ scan_engine_fini(scan_engine *eng)
 			if (eng->agg_pipe_ready[i][j])
 				gpu_vk_pipeline_destroy(eng->vk, &eng->agg_pipe[i][j]);
 			eng->agg_pipe_ready[i][j] = 0;
+			if (i < 2 && eng->gagg_pipe_ready[i][j])
+				gpu_vk_pipeline_destroy(eng->vk, &eng->gagg_pipe[i][j]);
+			if (i < 2)
+				eng->gagg_pipe_ready[i][j] = 0;
 		}
 	}
 }
@@ -1155,181 +1160,797 @@ done:
 	return rv;
 }
 
+/* ---------------------------------------------------------------- */
 /*
- * The reply to XpuTaskFinal: one row of partial aggregate states, in the format PostgreSQL's
- * Agg node combines (kagg_state__* of xpu_common.h, in bytea; count as int8).
+ * Aggregate state helpers shared by aggregation with and without GROUP BY
  */
-XpuCommand *
-scan_exec_agg_final(const XpuCommand *session_cmd,
-					const agg_state *st, size_t *p_len, char *err, size_t errlen)
+typedef struct
 {
-	const kern_session_info *session = &session_cmd->u.session;
-	const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(session);
-	unsigned char tup[sizeof(kern_tupitem) + 64 + SCAN_AGG_MAX * 48];
+	uint64_t	n;
+	__int128	sum;
+	int64_t		val;
+} agg_acc;
+
+/* add the contribution of one GPU record { n, A, B } to an accumulator */
+static void
+acc_merge_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
+{
+	int64_t		a = (int64_t)((uint64_t) rec[2] | ((uint64_t) rec[3] << 32));
+	int64_t		b = (int64_t)((uint64_t) rec[4] | ((uint64_t) rec[5] << 32));
+
+	switch (action)
+	{
+		case KAGG_ACTION__NROWS_ANY:
+		case KAGG_ACTION__NROWS_COND:
+			acc->n += rec[0];
+			break;
+		case KAGG_ACTION__PSUM_INT:
+		case KAGG_ACTION__PSUM_INT64:
+		case KAGG_ACTION__PAVG_INT:
+		case KAGG_ACTION__PAVG_INT64:
+			acc->n += rec[0];
+			acc->sum += (__int128) b * 4294967296LL + (__int128) a;
+			break;
+		case KAGG_ACTION__PMIN_INT32:
+		case KAGG_ACTION__PMIN_INT64:
+			if (rec[0] && (!acc->n || a < acc->val))
+				acc->val = a;
+			if (rec[0])
+				acc->n = 1;
+			break;
+		default:		/* PMAX_* */
+			if (rec[0] && (!acc->n || a > acc->val))
+				acc->val = a;
+			if (rec[0])
+				acc->n = 1;
+			break;
+	}
+}
+
+/* add one record of the GROUP BY kernel (gagg.slang: counts, 16-bit limbs of biased sums, biased min/max) */
+static void
+acc_merge_group_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__NROWS_ANY:
+		case KAGG_ACTION__NROWS_COND:
+			acc->n += rec[0];
+			break;
+		case KAGG_ACTION__PSUM_INT:
+		case KAGG_ACTION__PSUM_INT64:
+		case KAGG_ACTION__PAVG_INT:
+		case KAGG_ACTION__PAVG_INT64:
+		{
+			__int128	u = (__int128) rec[2] + ((__int128) rec[3] << 16) +
+				((__int128) rec[4] << 32) + ((__int128) rec[5] << 48);
+
+			acc->n += rec[0];
+			acc->sum += u - ((__int128) rec[0] << 63);
+			break;
+		}
+		case KAGG_ACTION__PMIN_INT32:
+		case KAGG_ACTION__PMIN_INT64:
+		{
+			int64_t		v = (int32_t)(rec[2] ^ 0x80000000u);
+
+			if (rec[0] && (!acc->n || v < acc->val))
+				acc->val = v;
+			if (rec[0])
+				acc->n = 1;
+			break;
+		}
+		default:		/* PMAX_* */
+		{
+			int64_t		v = (int32_t)(rec[2] ^ 0x80000000u);
+
+			if (rec[0] && (!acc->n || v > acc->val))
+				acc->val = v;
+			if (rec[0])
+				acc->n = 1;
+			break;
+		}
+	}
+}
+
+/* add one row's argument to an accumulator (the CPU path of GROUP BY overflow rows) */
+static void
+acc_add_value(agg_acc *acc, uint32_t cls, int64_t v)
+{
+	switch (cls)
+	{
+		case 1:			/* count(*) */
+		case 2:			/* count(x) */
+			acc->n += 1;
+			break;
+		case 3:			/* sum, avg */
+			acc->n += 1;
+			acc->sum += v;
+			break;
+		case 4:			/* min */
+			if (!acc->n || v < acc->val)
+				acc->val = v;
+			acc->n = 1;
+			break;
+		default:		/* max */
+			if (!acc->n || v > acc->val)
+				acc->val = v;
+			acc->n = 1;
+			break;
+	}
+}
+
+/* the value of one output column of a partial aggregate row */
+typedef struct
+{
+	int			isnull;
+	uint32_t	len;
+	unsigned char data[40];
+} col_value;
+
+static int
+agg_col_value(uint32_t action, const agg_acc *acc, col_value *cv, char *err, size_t errlen)
+{
+	int64_t		i64;
+
+	memset(cv, 0, sizeof(*cv));
+	switch (action)
+	{
+		case KAGG_ACTION__NROWS_ANY:
+		case KAGG_ACTION__NROWS_COND:
+			i64 = (int64_t) acc->n;
+			memcpy(cv->data, &i64, 8);
+			cv->len = 8;
+			break;
+
+		case KAGG_ACTION__PSUM_INT:
+		case KAGG_ACTION__PAVG_INT:
+		{
+			kagg_state__psum_int_packed *r = (kagg_state__psum_int_packed *) cv->data;
+
+			if (acc->n == 0)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			if (acc->sum > (__int128) INT64_MAX || acc->sum < (__int128) INT64_MIN)
+			{
+				snprintf(err, errlen, "bigint out of range (sum of integers)");
+				return -1;
+			}
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->nitems = (int64_t) acc->n;
+			r->sum = (int64_t) acc->sum;
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		case KAGG_ACTION__PSUM_INT64:
+		case KAGG_ACTION__PAVG_INT64:
+		{
+			kagg_state__psum_numeric_packed *r = (kagg_state__psum_numeric_packed *) cv->data;
+
+			if (acc->n == 0)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = 0;
+			r->nitems = acc->n;
+			__store_int128_packed(&r->sum, (int128_t) acc->sum);
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		default:		/* PMIN_*, PMAX_* */
+		{
+			kagg_state__pminmax_int64_packed *r = (kagg_state__pminmax_int64_packed *) cv->data;
+
+			if (!acc->n)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = __PAGG_MINMAX_ATTRS__VALID;
+			r->value = acc->val;
+			cv->len = sizeof(*r);
+			break;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Form a tuple (kern_tupitem) of ncols values into tup (capacity tupsz). Returns t_len or -1.
+ * The column types come from the result store's column metadata.
+ */
+static int
+form_partial_tuple(const kern_data_store *kds_dst_head, const col_value *cols, uint32_t ncols,
+				   unsigned char *tup, size_t tupsz, uint32_t rowid, char *err, size_t errlen)
+{
 	kern_tupitem *titem = (kern_tupitem *) tup;
-	size_t		head_sz, resp_sz, usage, chunk_len;
-	const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
-	uint32_t	nagg = kagg ? kagg->u.pagg.nattrs : 0;
 	uint32_t	t_hoff;
 	uint16_t	infomask = 0;
-	int			isnull[SCAN_AGG_MAX];
-	unsigned char datum[SCAN_AGG_MAX][40];
-	uint32_t	dlen[SCAN_AGG_MAX];
-	XpuCommand *resp;
-	kern_data_store *kds;
 	int			hasnull = 0;
 
-	if (!kds_dst_head || !kagg || nagg > SCAN_AGG_MAX || kds_dst_head->ncols < nagg)
-	{
-		snprintf(err, errlen, "the result store has %u columns, %u are needed",
-				 kds_dst_head ? kds_dst_head->ncols : 0, nagg);
-		return NULL;
-	}
-	/* the datum of each output column */
-	for (uint32_t k = 0; k < nagg; k++)
-	{
-		int64_t		i64;
-
-		isnull[k] = 0;
-		memset(datum[k], 0, sizeof(datum[k]));
-		switch (kagg->u.pagg.desc[k].action)
-		{
-			case KAGG_ACTION__NROWS_ANY:
-			case KAGG_ACTION__NROWS_COND:
-				i64 = (int64_t) st->n[k];
-				memcpy(datum[k], &i64, 8);
-				dlen[k] = 8;
-				break;
-
-			case KAGG_ACTION__PSUM_INT:
-			case KAGG_ACTION__PAVG_INT:
-			{
-				kagg_state__psum_int_packed *r = (kagg_state__psum_int_packed *) datum[k];
-
-				if (st->n[k] == 0)
-				{
-					isnull[k] = 1;
-					break;
-				}
-				if (st->sum[k] > (__int128) INT64_MAX || st->sum[k] < (__int128) INT64_MIN)
-				{
-					snprintf(err, errlen, "bigint out of range (sum of integers)");
-					return NULL;
-				}
-				r->vl_len_ = (int32_t)(sizeof(*r) << 2);
-				r->nitems = (int64_t) st->n[k];
-				r->sum = (int64_t) st->sum[k];
-				dlen[k] = sizeof(*r);
-				break;
-			}
-
-			case KAGG_ACTION__PSUM_INT64:
-			case KAGG_ACTION__PAVG_INT64:
-			{
-				kagg_state__psum_numeric_packed *r = (kagg_state__psum_numeric_packed *) datum[k];
-
-				if (st->n[k] == 0)
-				{
-					isnull[k] = 1;
-					break;
-				}
-				r->vl_len_ = (int32_t)(sizeof(*r) << 2);
-				r->attrs = 0;
-				r->nitems = st->n[k];
-				__store_int128_packed(&r->sum, (int128_t) st->sum[k]);
-				dlen[k] = sizeof(*r);
-				break;
-			}
-
-			default:		/* PMIN_*, PMAX_* */
-			{
-				kagg_state__pminmax_int64_packed *r = (kagg_state__pminmax_int64_packed *) datum[k];
-
-				if (!st->n[k])
-				{
-					isnull[k] = 1;
-					break;
-				}
-				r->vl_len_ = (int32_t)(sizeof(*r) << 2);
-				r->attrs = __PAGG_MINMAX_ATTRS__VALID;
-				r->value = st->val[k];
-				dlen[k] = sizeof(*r);
-				break;
-			}
-		}
-		if (isnull[k])
+	for (uint32_t k = 0; k < ncols; k++)
+		if (cols[k].isnull)
 			hasnull = 1;
-	}
-	/* the tuple (kern_tupitem: a MinimalTuple with a row id at the tail) */
-	infomask = hasnull ? 1 : 0;
+	if (hasnull)
+		infomask |= 1;
 	t_hoff = offsetof(kern_tupitem, t_bits);
 	if (hasnull)
-		t_hoff += (nagg + 7) / 8;
+		t_hoff += (ncols + 7) / 8;
 	t_hoff = MAXALIGN(t_hoff);
-	memset(tup, 0, sizeof(tup));
-	titem->t_infomask2 = (uint16_t)(nagg & 0x7ff);
+	memset(tup, 0, t_hoff);
+	titem->t_infomask2 = (uint16_t)(ncols & 0x7ff);
 	titem->t_hoff = (uint8_t)(t_hoff + MINIMAL_TUPLE_OFFSET);
-	for (uint32_t k = 0; k < nagg; k++)
+	for (uint32_t k = 0; k < ncols; k++)
 	{
 		const kern_colmeta *cm = &kds_dst_head->colmeta[k];
 		uint32_t	t_next;
 
-		if (isnull[k])
+		if (cols[k].isnull)
 			continue;
 		if (cm->attlen == -1)
 			infomask |= 2;						/* HEAP_HASVARWIDTH */
-		else if (cm->attlen != 8)
-		{
-			snprintf(err, errlen, "result column %u has an unexpected length %d", k + 1, cm->attlen);
-			return NULL;
-		}
 		t_next = TYPEALIGN(cm->attalign, t_hoff);
-		if (t_next + dlen[k] + ROWID_SIZE > sizeof(tup))
+		if (t_next + cols[k].len + ROWID_SIZE > tupsz)
 		{
 			snprintf(err, errlen, "the partial aggregate row is too large");
-			return NULL;
+			return -1;
 		}
-		memcpy(tup + t_next, datum[k], dlen[k]);
+		memcpy(tup + t_next, cols[k].data, cols[k].len);
 		if (hasnull)
 			titem->t_bits[k >> 3] |= (1 << (k & 7));
-		t_hoff = t_next + dlen[k];
+		t_hoff = t_next + cols[k].len;
 	}
 	t_hoff += ROWID_SIZE;
+	if (t_hoff > tupsz)
+	{
+		snprintf(err, errlen, "the partial aggregate row is too large");
+		return -1;
+	}
 	titem->t_len = t_hoff;
 	titem->t_infomask = infomask;
-	KERN_TUPITEM_SET_ROWID(titem, 0);
-	usage = MAXALIGN(t_hoff);
+	KERN_TUPITEM_SET_ROWID(titem, rowid);
+	return (int) t_hoff;
+}
 
-	/* one chunk with the one row */
+/* ---------------------------------------------------------------- */
+/*
+ * The groups of a session
+ */
+typedef struct
+{
+	int64_t		key[SCAN_GROUP_KEYS];
+	uint32_t	knull;
+	agg_acc		acc[SCAN_AGG_MAX];
+} group_entry;
+
+struct group_table
+{
+	group_entry	   *ents;
+	uint32_t		nents, cap;
+	uint32_t	   *htab;			/* index + 1, 0 = empty */
+	uint32_t		hcap;
+};
+
+static uint32_t
+group_hash(const int64_t *key, uint32_t knull)
+{
+	uint64_t	h = 0xcbf29ce484222325ULL;
+
+	for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+	{
+		h = (h ^ (uint64_t) key[i]) * 0x100000001b3ULL;
+		h ^= h >> 29;
+	}
+	h = (h ^ knull) * 0x100000001b3ULL;
+	return (uint32_t)(h ^ (h >> 32));
+}
+
+static group_entry *
+group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
+{
+	struct group_table *gt = *p_gt;
+	uint32_t	h, i;
+
+	if (!gt)
+	{
+		gt = calloc(1, sizeof(*gt));
+		if (!gt)
+			return NULL;
+		*p_gt = gt;
+	}
+	if (gt->nents * 2 >= gt->hcap)
+	{
+		uint32_t	ncap = gt->hcap ? gt->hcap * 2 : 1024;
+		uint32_t   *nh = calloc(ncap, sizeof(uint32_t));
+
+		if (!nh)
+			return NULL;
+		for (uint32_t e = 0; e < gt->nents; e++)
+		{
+			uint32_t	x = group_hash(gt->ents[e].key, gt->ents[e].knull) & (ncap - 1);
+
+			while (nh[x])
+				x = (x + 1) & (ncap - 1);
+			nh[x] = e + 1;
+		}
+		free(gt->htab);
+		gt->htab = nh;
+		gt->hcap = ncap;
+	}
+	h = group_hash(key, knull) & (gt->hcap - 1);
+	for (i = h; gt->htab[i]; i = (i + 1) & (gt->hcap - 1))
+	{
+		group_entry *e = &gt->ents[gt->htab[i] - 1];
+
+		if (e->knull == knull && !memcmp(e->key, key, sizeof(e->key)))
+			return e;
+	}
+	if (gt->nents == gt->cap)
+	{
+		uint32_t	ncap = gt->cap ? gt->cap * 2 : 256;
+		group_entry *ne = realloc(gt->ents, sizeof(group_entry) * ncap);
+
+		if (!ne)
+			return NULL;
+		gt->ents = ne;
+		gt->cap = ncap;
+	}
+	{
+		group_entry *e = &gt->ents[gt->nents];
+
+		memset(e, 0, sizeof(*e));
+		memcpy(e->key, key, sizeof(e->key));
+		e->knull = knull;
+		gt->htab[i] = ++gt->nents;
+		return e;
+	}
+}
+
+void
+agg_state_free(agg_state *st)
+{
+	if (st->groups)
+	{
+		free(st->groups->ents);
+		free(st->groups->htab);
+		free(st->groups);
+		st->groups = NULL;
+	}
+}
+
+/* the capacity of a workgroup's table and the aggregate variant, as compiled into gagg.slang */
+static const int ga_variant_na[3] = {4, 8, 12};
+static const int ga_variant_cap[3] = {128, 64, 64};
+
+static int
+ensure_group_pipeline(scan_engine *eng, int variant, int avariant, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	static const struct { const unsigned char *spv; const unsigned int *len; } tab[2][3] = {
+		{{kspv_gagg16_4, &kspv_gagg16_4_len}, {kspv_gagg16_8, &kspv_gagg16_8_len},
+		 {kspv_gagg16_12, &kspv_gagg16_12_len}},
+		{{kspv_gagg32_4, &kspv_gagg32_4_len}, {kspv_gagg32_8, &kspv_gagg32_8_len},
+		 {kspv_gagg32_12, &kspv_gagg32_12_len}},
+	};
+
+	if (!eng->gagg_pipe_ready[variant][avariant])
+	{
+		if (gpu_vk_pipeline_create(vk, &eng->gagg_pipe[variant][avariant], tab[variant][avariant].spv,
+								   *tab[variant][avariant].len, 5, 16) != 0)
+		{
+			snprintf(err, errlen, "cannot create the GROUP BY pipeline: %s", vk->err);
+			return -1;
+		}
+		eng->gagg_pipe_ready[variant][avariant] = 1;
+	}
+	return 0;
+}
+
+int
+scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+					 agg_state *st, const XpuCommand *task, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const kern_session_info *session = &session_cmd->u.session;
+	const kern_data_store *kds_src;
+	const char *pathname = NULL;
+	const io_vector *iovec = NULL;
+	gpu_vk_buffer bout, bprog, btab;
+	page_set	ps;
+	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant;
+	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, cap, rec_words, blk_words;
+	uint32_t   *lp_base = NULL;
+	size_t		out_words;
+	const uint32_t *out;
+	int			rv = -1;
+	const uint32_t *w;
+	uint32_t	agg_col[SCAN_AGG_MAX];
+	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
+	uint64_t	n_overflow = 0;
+
+	memset(&ps, 0, sizeof(ps));
+	err[0] = '\0';
+	if (!task->u.task.kds_src_offset)
+	{
+		snprintf(err, errlen, "no source data store in the task");
+		return -1;
+	}
+	kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
+	if (kds_src->format != KDS_FORMAT_BLOCK)
+	{
+		snprintf(err, errlen, "source format '%c' is not implemented by the Vulkan GpuPreAgg yet",
+				 kds_src->format);
+		return -1;
+	}
+	if (task->u.task.kds_src_pathname)
+		pathname = (const char *) task + task->u.task.kds_src_pathname;
+	if (task->u.task.kds_src_iovec)
+		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
+	npages = kds_src->nitems;
+	nloaded = kds_src->block_nloaded;
+	if (nloaded > npages ||
+		kds_src->block_offset + (size_t) nloaded * BLCKSZ > task->length)
+	{
+		snprintf(err, errlen, "corrupted block data store");
+		return -1;
+	}
+	if (!prog->words && scan_prog_build(session, kds_src, prog, err, errlen) != 0)
+		return -1;
+	if (!prog->agg_mode || prog->nkeys == 0)
+	{
+		snprintf(err, errlen, "not a GROUP BY program");
+		return -1;
+	}
+	nagg = prog->nagg;
+	w = prog->words;
+	variant = (prog->nregs <= 16 ? 0 : 1);
+	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
+	cap = ga_variant_cap[avariant];
+	rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * ga_variant_na[avariant];
+	blk_words = 1 + cap * rec_words;
+	if (ensure_group_pipeline(eng, variant, avariant, err, errlen) != 0)
+		return -1;
+	if (npages == 0)
+		return 0;
+
+	if (task_pages_open(eng, &ps, kds_src, pathname, iovec, &mapped, err, errlen) != 0)
+		goto done;
+	lp_base = malloc(sizeof(uint32_t) * npages);
+	if (!lp_base)
+	{
+		snprintf(err, errlen, "out of memory");
+		goto done;
+	}
+	t1 = now_ms();
+	if (gpu_vk_buffer_create(vk, &btab, sizeof(uint32_t) * 2 * npages, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the page table: %s", vk->err);
+		goto done;
+	}
+	have_tab = 1;
+	for (uint32_t i = 0; i < npages; i++)
+	{
+		uint16_t	pd_lower;
+
+		memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
+		lp_base[i] = total_lps;
+		if (pd_lower > 24)
+			total_lps += (pd_lower - 24) / 4;
+		((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
+		((uint32_t *) btab.map)[2 * i + 1] = lp_base[i];
+	}
+	st->nitems_raw += total_lps;
+	ngroups_total = (npages + AGG_PAGES_PER_WG - 1) / AGG_PAGES_PER_WG;
+	out_words = 4 + (size_t) ngroups_total * blk_words + total_lps;
+	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
+		goto done;
+	}
+	have_out = 1;
+	out = (const uint32_t *) bout.map;
+	memset(bout.map, 0, 16);
+	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
+		goto done;
+	}
+	have_prog = 1;
+	memcpy(bprog.map, prog->words, prog->nwords * 4);
+	{
+		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
+		uint32_t	flags_base = 4 + ngroups_total * blk_words;
+
+		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
+		{
+			uint32_t	groups = ngroups_total - base;
+			uint32_t	pc[4];
+
+			if (groups > SCAN_WG_MAX)
+				groups = SCAN_WG_MAX;
+			pc[0] = npages;
+			pc[1] = base;
+			pc[2] = AGG_PAGES_PER_WG;
+			pc[3] = flags_base;
+			if (gpu_vk_dispatch(vk, &eng->gagg_pipe[variant][avariant], bufs, pc, groups, 1, 1, NULL) != 0)
+			{
+				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+				goto done;
+			}
+		}
+	}
+	if (out[1] != 0)
+	{
+		describe_kernel_error(out[1], out[2], out[3], err, errlen);
+		goto done;
+	}
+	t2 = now_ms();
+	/* merge the workgroups' tables */
+	for (uint32_t a = 0; a < nagg; a++)
+	{
+		uint32_t	col;
+
+		for (col = 0; col < (uint32_t) prog->nattrs; col++)
+			if (prog->agg_of_col[col] == (int8_t) a)
+				break;
+		agg_col[a] = col;
+	}
+	for (uint32_t wg = 0; wg < ngroups_total; wg++)
+	{
+		const uint32_t *blk = &out[4 + (size_t) wg * blk_words];
+
+		st->nitems_in += blk[0];
+		for (uint32_t s = 0; s < cap; s++)
+		{
+			const uint32_t *rec = blk + 1 + (size_t) s * rec_words;
+			int64_t		key[SCAN_GROUP_KEYS];
+			group_entry *e;
+
+			if (!rec[0])
+				continue;
+			for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+				key[i] = (int64_t)((uint64_t) rec[2 + 2 * i] | ((uint64_t) rec[3 + 2 * i] << 32));
+			e = group_lookup(&st->groups, key, rec[1]);
+			if (!e)
+			{
+				snprintf(err, errlen, "out of memory");
+				goto done;
+			}
+			for (uint32_t a = 0; a < nagg; a++)
+				acc_merge_group_record(&e->acc[a], prog->agg_action[agg_col[a]],
+									   rec + 2 + 2 * SCAN_GROUP_KEYS + 6 * a);
+		}
+	}
+	t3 = now_ms();
+	/* the rows that found no slot: on the CPU */
+	{
+		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
+		uint32_t	aggoff = w[11], keyoff = w[13];
+		uint32_t	nkeys = prog->nkeys;
+
+		for (uint32_t i = 0; i < npages; i++)
+		{
+			uint32_t	nlp = (i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i];
+			const unsigned char *page = PAGE_AT(&ps, i);
+
+			for (uint32_t lp = 0; lp < nlp; lp++)
+			{
+				vm_reg		regs[SCAN_MAX_REGS];
+				uint32_t	lpd, e = 0, knull = 0;
+				int64_t		key[SCAN_GROUP_KEYS] = {0, 0};
+				group_entry *g;
+
+				if (!flags[lp_base[i] + lp])
+					continue;
+				n_overflow++;
+				memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+				if (cpu_eval_row(prog, page + (lpd & 0x7fff), regs, &e) != 1)
+				{
+					if (e != 0)
+					{
+						describe_kernel_error(e, i, lp, err, errlen);
+						goto done;
+					}
+					continue;
+				}
+				for (uint32_t k = 0; k < nkeys; k++)
+				{
+					const vm_reg *r = &regs[w[keyoff + k]];
+
+					if (r->isnull)
+						knull |= (1u << k);
+					else
+						key[k] = r->v;
+				}
+				g = group_lookup(&st->groups, key, knull);
+				if (!g)
+				{
+					snprintf(err, errlen, "out of memory");
+					goto done;
+				}
+				for (uint32_t a = 0; a < nagg; a++)
+				{
+					uint32_t	cls = w[aggoff + 4 * a], ra = w[aggoff + 4 * a + 1], rf = w[aggoff + 4 * a + 2];
+
+					if (rf != 0xffffffffu && (regs[rf].isnull || regs[rf].v == 0))
+						continue;
+					if (cls != 1 && regs[ra].isnull)
+						continue;
+					acc_add_value(&g->acc[a], cls, (cls == 1 || cls == 2) ? 0 : regs[ra].v);
+				}
+			}
+		}
+	}
+	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
+	if (eng->trace)
+		fprintf(stderr, "pgstrom-gpuserv: group task: %u pages, gpu %.1f ms, merge %.1f ms, overflow rows %llu (%.1f ms), groups so far %u\n",
+				npages, t2 - t1, t3 - t2, (unsigned long long) n_overflow, now_ms() - t3,
+				st->groups ? st->groups->nents : 0);
+	rv = 0;
+done:
+	free(lp_base);
+	if (have_prog)
+		gpu_vk_buffer_destroy(vk, &bprog);
+	if (have_out)
+		gpu_vk_buffer_destroy(vk, &bout);
+	if (have_tab)
+		gpu_vk_buffer_destroy(vk, &btab);
+	page_set_release(vk, &ps);
+	if (rv != 0 && err[0] == '\0')
+		snprintf(err, errlen, "GROUP BY aggregation failed");
+	return rv;
+}
+
+/*
+ * The reply to XpuTaskFinal: the partial aggregate rows in the format PostgreSQL's Agg node
+ * combines (kagg_state__* of xpu_common.h in bytea; counts as int8): one row without GROUP BY,
+ * one row per group with it.
+ */
+XpuCommand *
+scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
+					const agg_state *st, size_t *p_len, char *err, size_t errlen)
+{
+	const kern_session_info *session = &session_cmd->u.session;
+	const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(session);
+	const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	uint32_t	ncols = kagg ? kagg->u.pagg.nattrs : 0;
+	int			grouped = (session->xpucode_groupby_keyhash != 0);
+	uint32_t	nrows = grouped ? (st->groups ? st->groups->nents : 0) : 1;
+	col_value	cols[SCAN_AGG_MAX];
+	unsigned char tup[sizeof(kern_tupitem) + 64 + SCAN_AGG_MAX * 48];
+	size_t		head_sz, resp_sz, cap, usage = 0, chunk_len;
+	XpuCommand *resp;
+	kern_data_store *kds;
+	uint64_t   *rowindex;
+
+	if (!kds_dst_head || !kagg || ncols > SCAN_AGG_MAX || kds_dst_head->ncols < ncols)
+	{
+		snprintf(err, errlen, "the result store has %u columns, %u are needed",
+				 kds_dst_head ? kds_dst_head->ncols : 0, ncols);
+		return NULL;
+	}
 	head_sz = KDS_HEAD_LENGTH(kds_dst_head);
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
-	chunk_len = head_sz + MAXALIGN(sizeof(uint64_t)) + usage;
-	resp = calloc(1, resp_sz + chunk_len);
+	cap = resp_sz + head_sz + MAXALIGN(sizeof(uint64_t) * nrows) + (size_t) nrows * 96 + 4096;
+	resp = calloc(1, cap);
 	if (!resp)
 	{
 		snprintf(err, errlen, "out of memory");
 		return NULL;
 	}
+	rowindex = (uint64_t *)((char *) resp + resp_sz + head_sz);
+	for (uint32_t r = 0; r < nrows; r++)
+	{
+		int			sz;
+		size_t		idx_sz = MAXALIGN(sizeof(uint64_t) * nrows);
+		const group_entry *g = (grouped ? &st->groups->ents[r] : NULL);
+
+		for (uint32_t j = 0; j < ncols; j++)
+		{
+			uint32_t	action = kagg->u.pagg.desc[j].action;
+
+			if (action == KAGG_ACTION__VREF && grouped && prog && prog->words)
+			{
+				int			k = prog->key_of_col[j];
+				const kern_colmeta *cm = &kds_dst_head->colmeta[j];
+
+				memset(&cols[j], 0, sizeof(cols[j]));
+				if (k < 0 || (cm->attlen != 1 && cm->attlen != 2 && cm->attlen != 4 && cm->attlen != 8))
+				{
+					snprintf(err, errlen, "GROUP BY column %u has an unsupported result type", j + 1);
+					free(resp);
+					return NULL;
+				}
+				if (g->knull & (1u << k))
+					cols[j].isnull = 1;
+				else
+				{
+					int64_t		v = g->key[k];
+
+					memcpy(cols[j].data, &v, 8);		/* little endian: the low bytes */
+					cols[j].len = cm->attlen;
+				}
+			}
+			else
+			{
+				agg_acc		acc, *pacc;
+
+				if (grouped)
+				{
+					int		a = prog->agg_of_col[j];
+
+					pacc = &g->acc[a < 0 ? 0 : a];
+				}
+				else
+				{
+					memset(&acc, 0, sizeof(acc));
+					acc.n = st->n[j];
+					acc.sum = st->sum[j];
+					acc.val = st->val[j];
+					pacc = &acc;
+				}
+				if (agg_col_value(action, pacc, &cols[j], err, errlen) != 0)
+				{
+					free(resp);
+					return NULL;
+				}
+			}
+		}
+		/* append the tuple, growing the buffer if necessary */
+		if (resp_sz + head_sz + idx_sz + usage + sizeof(tup) > cap)
+		{
+			size_t		ncap = cap * 2 + sizeof(tup);
+			XpuCommand *nr = realloc(resp, ncap);
+
+			if (!nr)
+			{
+				snprintf(err, errlen, "out of memory");
+				free(resp);
+				return NULL;
+			}
+			resp = nr;
+			cap = ncap;
+			rowindex = (uint64_t *)((char *) resp + resp_sz + head_sz);
+		}
+		sz = form_partial_tuple(kds_dst_head, cols, ncols, tup, sizeof(tup), r, err, errlen);
+		if (sz < 0)
+		{
+			free(resp);
+			return NULL;
+		}
+		memcpy((char *) resp + resp_sz + head_sz + idx_sz + usage, tup, sz);
+		rowindex[r] = usage;				/* forward position, fixed up below */
+		usage += MAXALIGN(sz);
+	}
+	chunk_len = head_sz + MAXALIGN(sizeof(uint64_t) * nrows) + usage;
 	kds = (kern_data_store *)((char *) resp + resp_sz);
 	memcpy(kds, kds_dst_head, head_sz);
 	kds->length = chunk_len;
 	kds->usage = usage;
-	kds->nitems = 1;
+	kds->nitems = nrows;
 	kds->format = KDS_FORMAT_ROW;
 	kds->hash_nslots = 0;
-	((uint64_t *)((char *) kds + head_sz))[0] = usage;
-	memcpy((char *) kds + chunk_len - usage, tup, t_hoff);
-
+	for (uint32_t r = 0; r < nrows; r++)
+		rowindex[r] = usage - rowindex[r];		/* distance from the end of the chunk */
 	resp->magic = XpuCommandMagicNumber;
 	resp->tag = XpuCommandTag__Success;
 	resp->length = resp_sz + chunk_len;
 	resp->u.results.scan_relidx = -1;
 	resp->u.results.chunks_offset = resp_sz;
-	resp->u.results.chunks_nitems = 1;
+	resp->u.results.chunks_nitems = (nrows > 0 ? 1 : 0);
 	resp->u.results.final_plan_task = true;
-	resp->u.results.final_nitems = 1;
+	resp->u.results.final_nitems = nrows;
 	resp->u.results.final_usage = usage;
 	resp->u.results.final_total = chunk_len;
+	if (nrows == 0)
+		resp->length = resp_sz;
 	*p_len = resp->length;
 	return resp;
 }
