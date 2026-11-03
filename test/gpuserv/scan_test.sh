@@ -371,6 +371,7 @@ g=$($PSQL -d scantest -c "$GPU select c / a from a1 where b < 0" 2>&1 | head -1)
 echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported on the GPU" $?
 
 . "${0%/*}/types_tests.inc"
+. "${0%/*}/numeric_tests.inc"
 
 echo "errors"
 for t in s1; do
