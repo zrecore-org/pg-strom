@@ -12,6 +12,8 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+/* keep the Arrow/Parquet types visible; see the note in arrow_meta.cpp */
+#pragma GCC visibility push(default)
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/filesystem/api.h>
@@ -19,11 +21,13 @@
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/api/reader.h>
+#pragma GCC visibility pop
 #include <string>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
+#include "pg_portable.h"
 #include "xpu_common.h"
 #include "arrow_fdw.h"
 

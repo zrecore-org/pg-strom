@@ -13,6 +13,16 @@ endif
 CUDA_PATH_LIST := /usr/local/cuda /usr/local/cuda-*
 CUDA_PATH := $(shell for x in $(CUDA_PATH_LIST);    \
            do test -e "$$x/include/cuda.h" && echo $$x; done | head -1)
+ifeq ($(CUDA_PATH),)
+# No CUDA toolkit on this machine (macOS, or a Linux box without NVIDIA): build the
+# host side against the stub in nocuda/, which reports "no device". Scaffolding of the
+# apple-silicon branch; it goes away together with the CUDA code (milestone A2).
+PGSTROM_NO_CUDA := 1
+CUDA_IPATH := nocuda
+CUDA_LPATH :=
+NVCC       :=
+NVCC_VERSION := 0
+else
 CUDA_IPATH := $(CUDA_PATH)/include
 CUDA_BPATH := $(CUDA_PATH)/bin
 CUDA_LPATH := $(CUDA_PATH)/lib64
@@ -21,6 +31,7 @@ NVCC_VERSION := $(shell $(NVCC) --version | grep ^Cuda | \
                   grep -o -E 'V[0-9\.]+$$' |             \
 		  sed -e 's/V//g' -e 's/\./ /g' |        \
 		  awk '{ printf("%06u", $$1 * 1000 + $$2 * 10); }')
+endif
 # Max number of registers per GPU thread for PG-Strom modules
 # (64k / 128 = up to 512 threads per SM)
 MAXREGCOUNT := 128
@@ -63,5 +74,7 @@ endif
 CUDA_OBJS = $(addsuffix .o, $(__CUDA_CORE_FILES) $(CUDA_CUSTOM_FILES))
 CUDA_SRCS = $(addsuffix .cu,$(__CUDA_CORE_FILES) $(CUDA_CUSTOM_FILES))
 CUDA_HEADERS = $(__CUDA_CORE_HEADERS) $(CUDA_CUSTOM_HEADERS)
+ifndef PGSTROM_NO_CUDA
 CUDA_MD5SUM = $(shell cat $(CUDA_HEADERS) $(CUDA_SRCS) | md5sum | awk '{print $$1}')
 CUDA_FATBIN = pgstrom-gpucode-V$(NVCC_VERSION)-$(CUDA_MD5SUM).fatbin
+endif

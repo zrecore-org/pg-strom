@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/gpuserv_proto.h"
 #include "cuda_common.h"
 
 #define COMPONENT_LABEL		"gpu-device"
@@ -334,6 +335,44 @@ pgstrom_collect_gpu_devices(void)
 	pid_t	child;
 	StringInfoData buf;
 
+#ifdef PGSTROM_NO_CUDA
+	/*
+	 * The devices were probed by the GPU service program at start-up
+	 * (gpu_launcher.c); the planner only needs a description of the selected one.
+	 */
+	{
+		const gpuserv_control *ctl = pgstrom_gpuserv_control();
+		const gpuserv_devcaps *dc;
+		GpuDevAttributes *dattrs;
+
+		numGpuDevAttrs = 0;
+		gpuDevAttrs = NULL;
+		if (!ctl)
+			return;
+		dc = &ctl->devcaps[ctl->selected_device];
+		dattrs = calloc(1, sizeof(GpuDevAttributes));
+		if (!dattrs)
+			elog(ERROR, "out of memory");
+#define DEV_ATTR(LABEL,DESC)	dattrs->LABEL = DEV_ATTR__UNKNOWN;
+#include "gpu_devattrs.h"
+#undef DEV_ATTR
+		dattrs->DEV_ID = 0;
+		snprintf(dattrs->DEV_NAME, sizeof(dattrs->DEV_NAME), "%s", dc->name);
+		snprintf(dattrs->DEV_UUID, sizeof(dattrs->DEV_UUID), "%s", dc->uuid);
+		dattrs->DEV_TOTAL_MEMSZ = dc->device_memory;
+		dattrs->MAX_THREADS_PER_BLOCK = dc->max_wg_invocations;
+		dattrs->MAX_SHARED_MEMORY_PER_BLOCK = dc->max_shared_memory;
+		dattrs->WARP_SIZE = (dc->subgroup_size_observed > 0
+							 ? dc->subgroup_size_observed
+							 : dc->subgroup_size_max);
+		numGpuDevAttrs = 1;
+		gpuDevAttrs = dattrs;
+		elog(LOG, "PG-Strom: GPU0 %s (Vulkan, tier %s), RAM %zuMB",
+			 dc->name, gpuserv_tier_name(dc->tier),
+			 (size_t)(dc->device_memory >> 20));
+		return;
+	}
+#endif
 	if (pipe(pipefd) != 0)
 		elog(ERROR, "failed on pipe(2): %m");
 	child = fork();
@@ -1102,9 +1141,22 @@ gpuClientOpenSession(pgstromTaskState *pts,
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
+#ifdef PGSTROM_NO_CUDA
+	{
+		const gpuserv_control *ctl = pgstrom_gpuserv_control();
+
+		if (!ctl || ctl->state != GPUSERV_STATE_READY)
+		{
+			close(sockfd);
+			elog(ERROR, "the GPU service is not ready");
+		}
+		snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", ctl->socket_path);
+	}
+#else
 	snprintf(addr.sun_path, sizeof(addr.sun_path),
 			 ".pg_strom.%u.gpuserv.sock",
 			 PostmasterPid);
+#endif
 	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
 	{
 		close(sockfd);

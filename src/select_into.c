@@ -1012,7 +1012,7 @@ __selectIntoWriteOutOneKDS(gpuClient *gclient,
 		strcpy(fname, si_state->base_name);
 	else
 		sprintf(fname, "%s.%u", si_state->base_name, segment_no);
-	fdesc = open(fname, O_WRONLY | O_CREAT | O_TRUNC | O_DIRECT, 0600);
+	fdesc = pgstromOpenDirect(fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (fdesc < 0)
 	{
 		gpuClientELog(gclient, "failed on open('%s'): %m", fname);

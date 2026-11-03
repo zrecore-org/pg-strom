@@ -7,8 +7,8 @@ include ../Makefile.common
 # Makefile for arrow-tools
 #
 HAS_PG_CONFIG = $(shell which $(PG_CONFIG)>/dev/null 2>&1 && echo yes)
-HAS_LIBARROW = $(shell $(PKGCONF) --exists arrow>/dev/null 2>&1 && echo -n yes)
-HAS_PARQUET = $(shell $(PKGCONF) --exists parquet>/dev/null 2>&1 && echo -n yes)
+HAS_LIBARROW = $(shell $(PKGCONF) --exists arrow>/dev/null 2>&1 && printf yes)
+HAS_PARQUET = $(shell $(PKGCONF) --exists parquet>/dev/null 2>&1 && printf yes)
 
 ifeq ($(HAS_LIBARROW),yes)
 ALL_PROGS = vcf2arrow tsv2arrow arrow2csv

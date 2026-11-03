@@ -4,3 +4,9 @@ Makefile.custom
 *.fatbin
 *.gfatbin
 
+*.dylib
+*.dSYM/
+src/githash.c
+src/gpu_devattrs.h
+test/ssbm/dbgen-ssbm
+test/port/port_test

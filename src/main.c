@@ -826,6 +826,8 @@ _PG_init(void)
 		 PGSTROM_VERSION,
 		 PG_MAJORVERSION,
 		 pgstrom_githash_cstring);
+	/* GPU service launcher: probes the Vulkan devices and runs pgstrom-gpuserv */
+	pgstrom_init_gpu_launcher();
 	/* init GPU related stuff */
 	if (pgstrom_init_gpu_device())
 	{

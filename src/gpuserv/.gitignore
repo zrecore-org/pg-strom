@@ -1,0 +1,10 @@
+build/
+*.o
+*.a
+gpuserv-probe
+proto_check
+kernels_spv.c
+kernels_spv.h
+probe.err
+pgstrom-gpuserv
+gen/

@@ -113,20 +113,20 @@ CREATE TABLE supplier (
 ---
 --- Partitioned lineorder
 ---
-\set plineorder_p1992_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1992_rem1.parquet`
-\set plineorder_p1993_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1993_rem1.parquet`
-\set plineorder_p1994_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1994_rem1.parquet`
-\set plineorder_p1995_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1995_rem1.parquet`
-\set plineorder_p1996_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1996_rem1.parquet`
-\set plineorder_p1997_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1997_rem1.parquet`
-\set plineorder_p1998_rem1_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1998_rem1.parquet`
-\set plineorder_p1992_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1992_rem2.arrow`
-\set plineorder_p1993_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1993_rem2.arrow`
-\set plineorder_p1994_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1994_rem2.arrow`
-\set plineorder_p1995_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1995_rem2.arrow`
-\set plineorder_p1996_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1996_rem2.arrow`
-\set plineorder_p1997_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1997_rem2.arrow`
-\set plineorder_p1998_rem2_path `echo -n $ARROW_TEST_DATA_DIR/plineorder_p1998_rem2.arrow`
+\set plineorder_p1992_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1992_rem1.parquet`
+\set plineorder_p1993_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1993_rem1.parquet`
+\set plineorder_p1994_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1994_rem1.parquet`
+\set plineorder_p1995_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1995_rem1.parquet`
+\set plineorder_p1996_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1996_rem1.parquet`
+\set plineorder_p1997_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1997_rem1.parquet`
+\set plineorder_p1998_rem1_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1998_rem1.parquet`
+\set plineorder_p1992_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1992_rem2.arrow`
+\set plineorder_p1993_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1993_rem2.arrow`
+\set plineorder_p1994_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1994_rem2.arrow`
+\set plineorder_p1995_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1995_rem2.arrow`
+\set plineorder_p1996_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1996_rem2.arrow`
+\set plineorder_p1997_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1997_rem2.arrow`
+\set plineorder_p1998_rem2_path `printf %s $ARROW_TEST_DATA_DIR/plineorder_p1998_rem2.arrow`
 DROP TABLE IF EXISTS plineorder CASCADE;
 CREATE TABLE plineorder (
   LIKE lineorder

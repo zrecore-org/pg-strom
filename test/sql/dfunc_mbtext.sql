@@ -9,7 +9,7 @@ RESET client_min_messages;
 
 SET search_path = regtest_dfunc_mbtext_temp,public;
 
-\set mbtext_1_file_path `echo -n $ARROW_TEST_DATA_DIR/mbtext_1.data`
+\set mbtext_1_file_path `printf %s $ARROW_TEST_DATA_DIR/mbtext_1.data`
 
 CREATE TABLE rt_mbtext (
   id    int,

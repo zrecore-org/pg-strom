@@ -13,7 +13,15 @@
 #define XPU_COMMON_H
 #include <alloca.h>
 #include <assert.h>
+#if defined(__APPLE__)
+/* macOS has no <byteswap.h>; same names on top of OSByteOrder */
+#include <libkern/OSByteOrder.h>
+#define bswap_16(x)		OSSwapInt16(x)
+#define bswap_32(x)		OSSwapInt32(x)
+#define bswap_64(x)		OSSwapInt64(x)
+#else
 #include <byteswap.h>
+#endif
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>

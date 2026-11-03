@@ -1,0 +1,48 @@
+#version 450
+// Mimics a GpuScan kernel: unaligned byte-wise heap-row deform, int64 qual,
+// subgroup ballot compaction, 32-bit global atomic for output position.
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+
+layout(local_size_x = 256) in;
+layout(std430, set = 0, binding = 0) readonly buffer Rows { uint8_t d[]; } rows;
+layout(std430, set = 0, binding = 1) buffer Out { uint count; uint idx[]; } outb;
+layout(push_constant) uniform PC { uint nrows; uint stride; int64_t thresh; } pc;
+
+uint ld32(uint o)
+{
+	return uint(rows.d[o]) | (uint(rows.d[o + 1]) << 8) |
+		   (uint(rows.d[o + 2]) << 16) | (uint(rows.d[o + 3]) << 24);
+}
+
+void main()
+{
+	uint gid = gl_GlobalInvocationID.x;
+	bool hit = false;
+
+	if (gid < pc.nrows)
+	{
+		uint base = gid * pc.stride;
+		int  a = int(ld32(base));
+		uint blo = ld32(base + 4);
+		uint bhi = ld32(base + 8);
+		int64_t b = int64_t(uint64_t(blo) | (uint64_t(bhi) << 32));
+		uint flag = uint(rows.d[base + 12]);
+
+		hit = (a % 7 == 0) && (b + int64_t(a) * 3 > pc.thresh) && (flag != 0u);
+	}
+	/* all invocations take part in the subgroup ops (uniform control flow) */
+	uvec4 ballot = subgroupBallot(hit);
+	uint  cnt = subgroupBallotBitCount(ballot);
+	uint  excl = subgroupBallotExclusiveBitCount(ballot);
+	uint  pos = 0;
+	if (subgroupElect() && cnt > 0)
+		pos = atomicAdd(outb.count, cnt);
+	pos = subgroupBroadcastFirst(pos);
+	if (hit)
+		outb.idx[pos + excl] = gid;
+}

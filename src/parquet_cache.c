@@ -999,9 +999,9 @@ pgstrom_startup_parquet_cache(void)
 	/*
 	 * cache file creation
 	 */
-	fdesc = open(pgstrom_parquet_cache_path,
-				 O_RDWR | O_CREAT | O_DIRECT,
-				 0600);
+	fdesc = pgstromOpenDirect(pgstrom_parquet_cache_path,
+							  O_RDWR | O_CREAT,
+							  0600);
 	if (fdesc < 0)
 		elog(ERROR, "failed on open('%s'): %m [parquet cache file]",
 			 pgstrom_parquet_cache_path);

@@ -37,11 +37,14 @@
 #endif            /* HP */
 #include <ctype.h>
 #include <math.h>
-#ifndef _POSIX_SOURCE
-#include <malloc.h>
+#if !defined(_POSIX_SOURCE) && !defined(__APPLE__)
+#include <malloc.h>	/* macOS has no <malloc.h>; malloc() comes from <stdlib.h> */
 #endif /* POSIX_SOURCE */
 
 #include <fcntl.h>
+#ifndef O_LARGEFILE
+#define O_LARGEFILE 0	/* off_t is 64 bits by default on macOS */
+#endif
 
 #ifdef IBM
 #include <sys/mode.h>

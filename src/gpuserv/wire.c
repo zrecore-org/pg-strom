@@ -1,0 +1,504 @@
+/*
+ * wire.c
+ *
+ * Serves the backend <-> GPU service protocol (XpuCommand frames) for the exec'd
+ * pgstrom-gpuserv. One poll()-driven thread; connections are one per backend session.
+ *
+ *   OpenSession  keep the kern_session_info, answer Success
+ *   XpuTaskExec  (scan execution is added by the A2 scan milestone; for now an Error)
+ *   XpuTaskFinal answer Success with final_plan_task
+ *
+ * The same frames the CUDA service spoke, taken from the real xpu_common.h, so the
+ * backend code is unchanged. Not a PostgreSQL process: libc only.
+ */
+#include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include "xpu_common.h"
+#include "wire.h"
+
+#define WIRE_MAX_FRAME		((uint64_t)1 << 31)
+
+struct wire_client
+{
+	int				fd;
+	unsigned char  *rbuf;
+	size_t			rlen;
+	size_t			rcap;
+	XpuCommand	   *session;			/* copy of the OpenSession frame */
+	int				closing;
+};
+
+static void
+wlog(const wire_server *ws, int always, const char *fmt, ...)
+{
+	va_list		ap;
+
+	if (!always && !ws->trace)
+		return;
+	fprintf(stderr, "pgstrom-gpuserv[%d]: ", (int) getpid());
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fputc('\n', stderr);
+	fflush(stderr);
+}
+
+/* ----------------------------------------------------------------
+ * opcode names, for tracing
+ * ----------------------------------------------------------------
+ */
+#define TYPE_OPCODE(NAME,a,b)				[TypeOpCode__##NAME] = #NAME,
+static const char *const type_opcode_names[TypeOpCode__BuiltInMax] = {
+#include "xpu_opcodes.h"
+};
+#undef TYPE_OPCODE
+
+#define FUNC_OPCODE(a,b,c,NAME,d,e)			case FuncOpCode__##NAME: return #NAME;
+#define DEVONLY_FUNC_OPCODE(a,NAME,b,c,d)	case FuncOpCode__##NAME: return #NAME;
+static const char *
+func_opcode_name(unsigned int opcode)
+{
+	switch (opcode)
+	{
+		case FuncOpCode__ConstExpr:			return "ConstExpr";
+		case FuncOpCode__ParamExpr:			return "ParamExpr";
+		case FuncOpCode__VarExpr:			return "VarExpr";
+		case FuncOpCode__BoolExpr_And:		return "BoolExpr_And";
+		case FuncOpCode__BoolExpr_Or:		return "BoolExpr_Or";
+		case FuncOpCode__BoolExpr_Not:		return "BoolExpr_Not";
+		case FuncOpCode__NullTestExpr_IsNull:	return "NullTestExpr_IsNull";
+		case FuncOpCode__NullTestExpr_IsNotNull: return "NullTestExpr_IsNotNull";
+		case FuncOpCode__LoadVars:			return "LoadVars";
+		case FuncOpCode__MoveVars:			return "MoveVars";
+		case FuncOpCode__JoinQuals:			return "JoinQuals";
+		case FuncOpCode__HashValue:			return "HashValue";
+		case FuncOpCode__SaveExpr:			return "SaveExpr";
+		case FuncOpCode__AggFuncs:			return "AggFuncs";
+		case FuncOpCode__Projection:		return "Projection";
+		case FuncOpCode__Packed:			return "Packed";
+#include "xpu_opcodes.h"
+		default:
+			break;
+	}
+	return "?";
+}
+#undef FUNC_OPCODE
+#undef DEVONLY_FUNC_OPCODE
+
+static void
+dump_kexp(const kern_expression *kexp, int depth)
+{
+	const char *tname = (kexp->exptype < TypeOpCode__BuiltInMax
+						 ? type_opcode_names[kexp->exptype] : NULL);
+
+	fprintf(stderr, "  %*s%s -> %s (nr_args=%u, len=%u)",
+			depth * 2, "", func_opcode_name(kexp->opcode),
+			tname ? tname : "?", kexp->nr_args, kexp->len);
+	switch (kexp->opcode)
+	{
+		case FuncOpCode__VarExpr:
+			fprintf(stderr, " var_offset=%d slot=%u",
+					kexp->u.v.var_offset, kexp->u.v.var_slot_id);
+			break;
+		case FuncOpCode__LoadVars:
+			fprintf(stderr, " depth=%d nitems=%d [", kexp->u.load.depth, kexp->u.load.nitems);
+			for (int i = 0; i < kexp->u.load.nitems; i++)
+				fprintf(stderr, "%sresno%d->slot%d", i ? " " : "",
+						kexp->u.load.desc[i].vl_resno, kexp->u.load.desc[i].vl_slot_id);
+			fputc(']', stderr);
+			break;
+		case FuncOpCode__Projection:
+			fprintf(stderr, " nattrs=%d", kexp->u.proj.nattrs);
+			break;
+		default:
+			break;
+	}
+	fputc('\n', stderr);
+
+	if (kexp->opcode == FuncOpCode__Packed)
+	{
+		for (uint32_t i = 0; i < kexp->u.pack.npacked; i++)
+		{
+			if (kexp->u.pack.offset[i] == 0)
+				fprintf(stderr, "  %*s(null)\n", (depth + 1) * 2, "");
+			else
+				dump_kexp((const kern_expression *)
+						  ((const char *)kexp + kexp->u.pack.offset[i]), depth + 1);
+		}
+	}
+	else if (kexp->nr_args > 0 && kexp->args_offset > 0)
+	{
+		const kern_expression *karg = KEXP_FIRST_ARG(kexp);
+
+		for (uint32_t i = 0; i < kexp->nr_args; i++, karg = KEXP_NEXT_ARG(karg))
+			dump_kexp(karg, depth + 1);
+	}
+}
+
+static void
+dump_session(const wire_server *ws, const kern_session_info *s)
+{
+	static const struct { const char *label; size_t off; } codes[] = {
+		{"load_vars",     offsetof(kern_session_info, xpucode_load_vars_packed)},
+		{"move_vars",     offsetof(kern_session_info, xpucode_move_vars_packed)},
+		{"scan_quals",    offsetof(kern_session_info, xpucode_scan_quals)},
+		{"join_quals",    offsetof(kern_session_info, xpucode_join_quals_packed)},
+		{"hash_values",   offsetof(kern_session_info, xpucode_hash_values_packed)},
+		{"projection",    offsetof(kern_session_info, xpucode_projection)},
+		{"groupby_keyhash", offsetof(kern_session_info, xpucode_groupby_keyhash)},
+		{"groupby_actions", offsetof(kern_session_info, xpucode_groupby_actions)},
+		{"gpusort_keydesc", offsetof(kern_session_info, xpucode_gpusort_keydesc)},
+	};
+
+	wlog(ws, 0, "session: plan_id=%llu task_flags=%08x kvars=%u/%u kvecs_ndims=%u nparams=%u",
+		 (unsigned long long) s->query_plan_id, s->xpu_task_flags,
+		 s->kcxt_kvars_nslots, s->kcxt_kvars_nrooms, s->kcxt_kvecs_ndims, s->nparams);
+	for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++)
+	{
+		uint32_t	off = *(const uint32_t *)((const char *)s + codes[i].off);
+
+		if (off == 0)
+			continue;
+		fprintf(stderr, " %s:\n", codes[i].label);
+		dump_kexp((const kern_expression *)((const char *)s + off), 0);
+	}
+	if (s->kcxt_kvars_nslots > 0 && s->kcxt_kvars_defs > 0)
+	{
+		const kern_varslot_desc *vs = (const kern_varslot_desc *)
+			((const char *)s + s->kcxt_kvars_defs);
+
+		for (uint32_t i = 0; i < s->kcxt_kvars_nslots; i++)
+			fprintf(stderr, " kvar slot%u: type=%s len=%d byval=%d align=%d offset=%d\n",
+					i, vs[i].vs_type_code < TypeOpCode__BuiltInMax
+					   ? type_opcode_names[vs[i].vs_type_code] : "?",
+					vs[i].vs_typlen, vs[i].vs_typbyval, vs[i].vs_typalign, vs[i].vs_offset);
+	}
+	fflush(stderr);
+}
+
+/* ----------------------------------------------------------------
+ * replies
+ * ----------------------------------------------------------------
+ */
+static int
+write_all(int fd, const void *buf, size_t len)
+{
+	const char *p = buf;
+
+	while (len > 0)
+	{
+		ssize_t		n = write(fd, p, len);
+
+		if (n > 0)
+		{
+			p += n;
+			len -= n;
+		}
+		else if (n < 0 && (errno == EINTR || errno == EAGAIN))
+			continue;
+		else
+			return -1;
+	}
+	return 0;
+}
+
+static void
+reply_error(wire_client *wc, const char *func, const char *fmt, ...)
+{
+	XpuCommand	resp;
+	va_list		ap;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Error;
+	resp.length = offsetof(XpuCommand, u.error) + sizeof(kern_errorbuf);
+	resp.u.error.errcode = ERRCODE_DEVICE_ERROR;
+	snprintf(resp.u.error.filename, sizeof(resp.u.error.filename), "gpuserv");
+	snprintf(resp.u.error.funcname, sizeof(resp.u.error.funcname), "%s", func);
+	va_start(ap, fmt);
+	vsnprintf(resp.u.error.message, sizeof(resp.u.error.message), fmt, ap);
+	va_end(ap);
+	if (write_all(wc->fd, &resp, resp.length) != 0)
+		wc->closing = 1;
+}
+
+static void
+reply_success(wire_client *wc, int final_plan_task)
+{
+	XpuCommand	resp;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Success;
+	resp.length = offsetof(XpuCommand, u.results.stats);
+	resp.u.results.scan_relidx = -1;
+	resp.u.results.final_plan_task = final_plan_task ? true : false;
+	if (write_all(wc->fd, &resp, resp.length) != 0)
+		wc->closing = 1;
+}
+
+/* ----------------------------------------------------------------
+ * command handlers
+ * ----------------------------------------------------------------
+ */
+static void
+handle_open_session(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
+{
+	const kern_session_info *s = &xcmd->u.session;
+
+	if (wc->session)
+	{
+		reply_error(wc, "OpenSession", "OpenSession is called twice");
+		return;
+	}
+	if (xcmd->length < offsetof(XpuCommand, u.session) + offsetof(kern_session_info, poffset))
+	{
+		reply_error(wc, "OpenSession", "session information is too short");
+		return;
+	}
+	wc->session = malloc(xcmd->length);
+	if (!wc->session)
+	{
+		reply_error(wc, "OpenSession", "out of memory");
+		return;
+	}
+	memcpy(wc->session, xcmd, xcmd->length);
+	dump_session(ws, s);
+	reply_success(wc, 0);
+}
+
+static void
+handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
+{
+	if (!wc->session)
+	{
+		reply_error(wc, "XpuTaskExec", "no session is opened");
+		return;
+	}
+	wlog(ws, 0, "task: scan_relidx=%d kds_src_offset=%u pathname=%u iovec=%u length=%llu",
+		 xcmd->u.task.scan_relidx, xcmd->u.task.kds_src_offset,
+		 xcmd->u.task.kds_src_pathname, xcmd->u.task.kds_src_iovec,
+		 (unsigned long long) xcmd->length);
+	reply_error(wc, "XpuTaskExec", "GpuScan execution is not implemented in the Vulkan service yet");
+}
+
+static void
+handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
+{
+	switch (xcmd->tag)
+	{
+		case XpuCommandTag__OpenSession:
+			handle_open_session(ws, wc, xcmd);
+			break;
+		case XpuCommandTag__XpuTaskExec:
+		case XpuCommandTag__XpuTaskExecGpuCache:
+			handle_task_exec(ws, wc, xcmd);
+			break;
+		case XpuCommandTag__XpuTaskFinal:
+			reply_success(wc, 1);
+			break;
+		default:
+			reply_error(wc, "wire", "unknown command tag %u", xcmd->tag);
+			break;
+	}
+}
+
+/* ----------------------------------------------------------------
+ * connection handling
+ * ----------------------------------------------------------------
+ */
+static void
+client_free(wire_client *wc)
+{
+	if (wc->fd >= 0)
+		close(wc->fd);
+	free(wc->rbuf);
+	free(wc->session);
+	free(wc);
+}
+
+static void
+handle_ping(wire_server *ws, wire_client *wc)
+{
+	gpuserv_sock_pong pong;
+
+	memset(&pong, 0, sizeof(pong));
+	pong.magic = GPUSERV_SOCK_MAGIC;
+	pong.pid = (int32_t) getpid();
+	pong.generation = __atomic_load_n(&ws->ctl->generation, __ATOMIC_SEQ_CST);
+	pong.device = ws->device;
+	pong.tier = ws->ctl->devcaps[ws->device].tier;
+	(void) write_all(wc->fd, &pong, sizeof(pong));
+	wc->closing = 1;
+}
+
+/* consume the complete frames in the receive buffer */
+static void
+client_process(wire_server *ws, wire_client *wc)
+{
+	for (;;)
+	{
+		const XpuCommand *xcmd = (const XpuCommand *) wc->rbuf;
+		uint32_t	magic;
+		uint64_t	length;
+
+		if (wc->closing || wc->rlen < sizeof(uint32_t))
+			return;
+		memcpy(&magic, wc->rbuf, sizeof(magic));
+		if (magic == GPUSERV_SOCK_MAGIC)
+		{
+			if (wc->rlen >= sizeof(gpuserv_sock_req))
+				handle_ping(ws, wc);
+			return;
+		}
+		if (wc->rlen < offsetof(XpuCommand, u))
+			return;
+		if (xcmd->magic != XpuCommandMagicNumber ||
+			xcmd->length < offsetof(XpuCommand, u) ||
+			xcmd->length > WIRE_MAX_FRAME)
+		{
+			wlog(ws, 1, "invalid command frame (magic %08x, length %llu), closing the connection",
+				 xcmd->magic, (unsigned long long) xcmd->length);
+			wc->closing = 1;
+			return;
+		}
+		length = xcmd->length;
+		if (wc->rlen < length)
+		{
+			if (wc->rcap < length)
+			{
+				unsigned char *nb = realloc(wc->rbuf, length);
+
+				if (!nb)
+				{
+					wc->closing = 1;
+					return;
+				}
+				wc->rbuf = nb;
+				wc->rcap = length;
+			}
+			return;
+		}
+		handle_command(ws, wc, (const XpuCommand *) wc->rbuf);
+		memmove(wc->rbuf, wc->rbuf + length, wc->rlen - length);
+		wc->rlen -= length;
+	}
+}
+
+static void
+client_read(wire_server *ws, wire_client *wc)
+{
+	ssize_t		n;
+
+	if (wc->rcap - wc->rlen < 65536)
+	{
+		size_t	ncap = (wc->rcap ? wc->rcap * 2 : 262144);
+		unsigned char *nb = realloc(wc->rbuf, ncap);
+
+		if (!nb)
+		{
+			wc->closing = 1;
+			return;
+		}
+		wc->rbuf = nb;
+		wc->rcap = ncap;
+	}
+	n = read(wc->fd, wc->rbuf + wc->rlen, wc->rcap - wc->rlen);
+	if (n > 0)
+	{
+		wc->rlen += n;
+		client_process(ws, wc);
+	}
+	else if (n == 0 || (errno != EINTR && errno != EAGAIN))
+		wc->closing = 1;
+}
+
+void
+wire_server_init(wire_server *ws, gpuserv_control *ctl, gpu_vk_ctx *vk, uint32_t device)
+{
+	const char *trace = getenv("PGSTROM_GPUSERV_TRACE");
+
+	memset(ws, 0, sizeof(*ws));
+	ws->ctl = ctl;
+	ws->vk = vk;
+	ws->device = device;
+	ws->trace = (trace && trace[0] && strcmp(trace, "0") != 0);
+}
+
+void
+wire_server_accept(wire_server *ws, int listen_fd)
+{
+	wire_client *wc;
+	int			fd = accept(listen_fd, NULL, NULL);
+
+	if (fd < 0)
+		return;
+	if (ws->nclients >= WIRE_MAX_CLIENTS || !(wc = calloc(1, sizeof(*wc))))
+	{
+		close(fd);
+		return;
+	}
+	(void) fcntl(fd, F_SETFD, FD_CLOEXEC);
+	wc->fd = fd;
+	ws->clients[ws->nclients++] = wc;
+}
+
+int
+wire_server_pollfds(wire_server *ws, struct pollfd *pfds, int max)
+{
+	int		i, n = 0;
+
+	for (i = 0; i < ws->nclients && n < max; i++)
+	{
+		pfds[n].fd = ws->clients[i]->fd;
+		pfds[n].events = POLLIN;
+		pfds[n].revents = 0;
+		n++;
+	}
+	return n;
+}
+
+void
+wire_server_service(wire_server *ws, const struct pollfd *pfds, int n)
+{
+	int		i, j;
+
+	for (i = 0; i < n; i++)
+	{
+		wire_client *wc = NULL;
+
+		if (pfds[i].revents == 0)
+			continue;
+		for (j = 0; j < ws->nclients; j++)
+			if (ws->clients[j]->fd == pfds[i].fd)
+				wc = ws->clients[j];
+		if (!wc)
+			continue;
+		if (pfds[i].revents & (POLLIN | POLLHUP | POLLERR))
+			client_read(ws, wc);
+	}
+	/* reap closed connections */
+	for (i = 0; i < ws->nclients; )
+	{
+		if (ws->clients[i]->closing)
+		{
+			client_free(ws->clients[i]);
+			ws->clients[i] = ws->clients[--ws->nclients];
+		}
+		else
+			i++;
+	}
+}
+
+void
+wire_server_close_all(wire_server *ws)
+{
+	while (ws->nclients > 0)
+		client_free(ws->clients[--ws->nclients]);
+}

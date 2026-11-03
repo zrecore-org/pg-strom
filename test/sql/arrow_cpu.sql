@@ -62,7 +62,7 @@ UPDATE regtest_data
 
 \! $PG2ARROW_CMD --set=timezone:Asia/Tokyo -c 'SELECT * FROM regtest_arrow_cpu_temp.regtest_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data > /dev/null 2>&1
 
-\set test_arrow_cpu_1_path `echo -n $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data`
+\set test_arrow_cpu_1_path `printf %s $ARROW_TEST_DATA_DIR/test_arrow_cpu_1.data`
 
 IMPORT FOREIGN SCHEMA regtest_arrow
   FROM SERVER arrow_fdw
@@ -88,7 +88,7 @@ INSERT INTO timezone_data (
 
 \! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_cpu_temp.timezone_data' -o $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data > /dev/null 2>&1
 
-\set timezone_arrow_file_path `echo -n $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data`
+\set timezone_arrow_file_path `printf %s $ARROW_TEST_DATA_DIR/test_arrow_cpu_2.data`
 
 IMPORT FOREIGN SCHEMA timezone_arrow
   FROM SERVER arrow_fdw

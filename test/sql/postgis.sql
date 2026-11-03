@@ -5,7 +5,7 @@ SET client_min_messages = error;
 DROP SCHEMA IF EXISTS regtest_postgis_temp CASCADE;
 CREATE SCHEMA regtest_postgis_temp;
 SET search_path = regtest_postgis_temp,public;
-\set test_giskanto_src_path `echo -n $ARROW_TEST_DATA_DIR/giskanto.sql`
+\set test_giskanto_src_path `printf %s $ARROW_TEST_DATA_DIR/giskanto.sql`
 \i :test_giskanto_src_path
 RESET client_min_messages;
 

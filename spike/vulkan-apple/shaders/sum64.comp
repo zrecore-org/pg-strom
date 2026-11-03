@@ -1,0 +1,48 @@
+#version 450
+// 64-bit sum without 64-bit atomics and without int64 subgroup ops:
+// reduce four 16-bit limbs with 32-bit subgroupAdd (32 lanes * 65535 < 2^32),
+// recombine in int64 arithmetic, then lo/hi 32-bit atomics with explicit carry.
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256) in;
+layout(std430, set = 0, binding = 0) readonly buffer Rows { uint8_t d[]; } rows;
+layout(std430, set = 0, binding = 1) buffer Acc { uint lo; uint hi; uint dummy; } acc;
+layout(push_constant) uniform PC { uint nrows; uint stride; int64_t thresh; } pc;
+
+uint ld32(uint o)
+{
+	return uint(rows.d[o]) | (uint(rows.d[o + 1]) << 8) |
+		   (uint(rows.d[o + 2]) << 16) | (uint(rows.d[o + 3]) << 24);
+}
+
+void main()
+{
+	uint gid = gl_GlobalInvocationID.x;
+	uint blo = 0u, bhi = 0u;
+
+	if (gid < pc.nrows)
+	{
+		uint base = gid * pc.stride;
+		blo = ld32(base + 4);
+		bhi = ld32(base + 8);
+	}
+	uint s0 = subgroupAdd(blo & 0xffffu);
+	uint s1 = subgroupAdd(blo >> 16);
+	uint s2 = subgroupAdd(bhi & 0xffffu);
+	uint s3 = subgroupAdd(bhi >> 16);
+	if (subgroupElect())
+	{
+		uint64_t u = uint64_t(s0) + (uint64_t(s1) << 16) +
+					 (uint64_t(s2) << 32) + (uint64_t(s3) << 48);
+		uint lo = uint(u);
+		uint hi = uint(u >> 32);
+		uint old = atomicAdd(acc.lo, lo);
+		uint carry = (old + lo < old) ? 1u : 0u;
+		atomicAdd(acc.hi, hi + carry);
+	}
+}

@@ -25,7 +25,7 @@ INSERT INTO tbl (SELECT x, pgstrom.random_int(1, -3200000,  3200000),
 		   FROM generate_series(1,40000) x);
 \! $PG2ARROW_CMD -t hoge.tbl -o $MY_DATA_DIR/hoge.arrow
 
-\set hoge_arrow `echo -n $MY_DATA_DIR/hoge.arrow`
+\set hoge_arrow `printf %s $MY_DATA_DIR/hoge.arrow`
 
 IMPORT FOREIGN SCHEMA f_tbl FROM SERVER arrow_fdw INTO hoge
   OPTIONS (file :'hoge_arrow');

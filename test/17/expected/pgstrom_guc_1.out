@@ -1,0 +1,55 @@
+--
+-- validation of the default GUC paremeter setting
+--
+\t
+SHOW pg_strom.enabled;
+ on
+
+SHOW pg_strom.enable_gpuscan;
+ERROR:  unrecognized configuration parameter "pg_strom.enable_gpuscan"
+SHOW pg_strom.enable_gpuhashjoin;
+ERROR:  unrecognized configuration parameter "pg_strom.enable_gpuhashjoin"
+SHOW pg_strom.enable_gpugistindex;
+ERROR:  unrecognized configuration parameter "pg_strom.enable_gpugistindex"
+SHOW pg_strom.enable_gpujoin;
+ERROR:  unrecognized configuration parameter "pg_strom.enable_gpujoin"
+SHOW pg_strom.enable_gpupreagg;
+ERROR:  unrecognized configuration parameter "pg_strom.enable_gpupreagg"
+SHOW pg_strom.enable_numeric_aggfuncs;
+ERROR:  unrecognized configuration parameter "pg_strom.enable_numeric_aggfuncs"
+SHOW pg_strom.enable_brin;
+ on
+
+SHOW pg_strom.cpu_fallback;
+ off
+
+SHOW pg_strom.gpu_setup_cost;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_setup_cost"
+SHOW pg_strom.gpu_tuple_cost;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_tuple_cost"
+SHOW pg_strom.gpu_operator_cost;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_operator_cost"
+SHOW pg_strom.max_async_tasks;
+ERROR:  unrecognized configuration parameter "pg_strom.max_async_tasks"
+SHOW pg_strom.gpu_direct_seq_page_cost;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_direct_seq_page_cost"
+SHOW arrow_fdw.enabled;
+ on
+
+SHOW arrow_fdw.stats_hint_enabled;
+ on
+
+SHOW arrow_fdw.metadata_cache_size;
+ 512MB
+
+SHOW pg_strom.gpu_mempool_segment_sz;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_mempool_segment_sz"
+SHOW pg_strom.gpu_mempool_max_ratio;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_mempool_max_ratio"
+SHOW pg_strom.gpu_mempool_min_ratio;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_mempool_min_ratio"
+SHOW pg_strom.gpu_mempool_release_delay;
+ERROR:  unrecognized configuration parameter "pg_strom.gpu_mempool_release_delay"
+SHOW pg_strom.explain_developer_mode;
+ off
+

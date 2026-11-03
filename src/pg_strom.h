@@ -149,8 +149,6 @@
 #include <numa.h>
 #endif /* HAS_LIBNUMA */
 #include <pthread.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
@@ -160,6 +158,7 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "pg_portable.h"
 #include "xpu_common.h"
 #include "cuda_common.h"
 #include "arrow_fdw.h"
@@ -787,6 +786,9 @@ extern CUresult	gpuOptimalBlockSize(int *p_grid_sz,
 									CUfunction kern_function,
 									unsigned int dynamic_shmem_per_block);
 extern bool		pgstrom_init_gpu_device(void);
+extern void		pgstrom_init_gpu_launcher(void);
+struct gpuserv_control;
+extern const struct gpuserv_control *pgstrom_gpuserv_control(void);
 
 /*
  * gpu_service.c
@@ -1192,6 +1194,7 @@ extern ssize_t	__preadFile(int fdesc, void *buffer, size_t nbytes, off_t f_pos);
 extern ssize_t	__writeFile(int fdesc, const void *buffer, size_t nbytes);
 extern ssize_t	__pwriteFile(int fdesc, const void *buffer, size_t nbytes, off_t f_pos);
 
+extern void		pgstromShmemObjectName(char *buf, size_t bufsz, uint32_t handle);
 extern uint32_t	__shmemCreate(void);
 extern void		__shmemDrop(uint32_t shmem_handle);
 extern void	   *__mmapShmem(uint32_t shmem_handle,

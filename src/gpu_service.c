@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/gpuserv_proto.h"
 #include "arrow_fdw.h"
 #include "cuda_common.h"
 #include <cudaProfiler.h>
@@ -83,7 +84,7 @@ static CUmemLocation		host_mlocation = {
 static volatile int			gpuserv_bgworker_got_signal = 0;
 static gpuContext		   *gpuserv_gpucontext_array;
 static dlist_head			gpuserv_gpucontext_list;
-static int					gpuserv_epoll_fdesc = -1;
+static pgstromEventLoop	   *gpuserv_eventloop = NULL;
 static int					gpuserv_listen_sockfd = -1;
 static int					gpuserv_logger_pipefd[2];
 static FILE				   *gpuserv_logger_filp;
@@ -143,7 +144,7 @@ pgstrom_max_async_tasks_assign(int newval, void *extra)
 	else
 	{
 		struct timeval ts;
-		uint64_t	conf_val;
+		uint64		conf_val;		/* PG's uint64: pg_atomic_*_u64 takes uint64 * */
 		uint64_t	curr_val;
 
 		conf_val = pg_atomic_read_u64(&gpuserv_shared_state->max_async_tasks);
@@ -184,8 +185,15 @@ pgstrom_max_async_tasks_show(void)
 bool
 gpuserv_ready_accept(void)
 {
+#ifdef PGSTROM_NO_CUDA
+	/* the exec'd GPU service publishes its state in the control segment */
+	const gpuserv_control *ctl = pgstrom_gpuserv_control();
+
+	return (ctl && __atomic_load_n(&ctl->state, __ATOMIC_SEQ_CST) == GPUSERV_STATE_READY);
+#else
 	return (gpuserv_shared_state &&
 			gpuserv_shared_state->gpuserv_ready_accept);
+#endif
 }
 
 /*
@@ -264,17 +272,10 @@ gpuClientGetSessionInfo(const gpuClient *gclient)
 static void
 gpuservLoggerOpen(void)
 {
-	struct epoll_event ev;
-
 	if (pipe(gpuserv_logger_pipefd) != 0)
 		elog(ERROR, "failed on pipe(2): %m");
-	memset(&ev, 0, sizeof(ev));
-	ev.events = EPOLLIN;
-	ev.data.fd = gpuserv_logger_pipefd[0];
-	if (epoll_ctl(gpuserv_epoll_fdesc,
-				  EPOLL_CTL_ADD,
-				  gpuserv_logger_pipefd[0], &ev) != 0)
-		elog(ERROR, "failed on epoll_ctl(2): %m");
+	if (pgstromEventLoopAdd(gpuserv_eventloop, gpuserv_logger_pipefd[0]) != 0)
+		elog(ERROR, "failed on registering the logger pipe to the event loop: %m");
 	gpuserv_logger_filp = fdopen(gpuserv_logger_pipefd[1], "ab");
 
 	initStringInfo(&gpuserv_logger_buffer);
@@ -492,7 +493,6 @@ static void
 gpuservOpenServerSocket(void)
 {
 	struct sockaddr_un	addr;
-	struct epoll_event	ev;
 
 	gpuserv_listen_sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (gpuserv_listen_sockfd < 0)
@@ -507,14 +507,9 @@ gpuservOpenServerSocket(void)
 		elog(ERROR, "failed on bind('%s'): %m", addr.sun_path);
 	if (listen(gpuserv_listen_sockfd, 32) != 0)
 		elog(ERROR, "failed on listen(2): %m");
-	/* register to epoll-fd */
-	memset(&ev, 0, sizeof(ev));
-	ev.events = EPOLLIN;
-	ev.data.fd = gpuserv_listen_sockfd;
-	if (epoll_ctl(gpuserv_epoll_fdesc,
-				  EPOLL_CTL_ADD,
-				  gpuserv_listen_sockfd, &ev) != 0)
-		elog(ERROR, "failed on epoll_ctl(2): %m");
+	/* register to the event loop */
+	if (pgstromEventLoopAdd(gpuserv_eventloop, gpuserv_listen_sockfd) != 0)
+		elog(ERROR, "failed on registering the server socket to the event loop: %m");
 }
 
 static void
@@ -2214,10 +2209,8 @@ __setupGpuQueryJoinInnerBuffer(gpuClient *gclient,
 		return true;	/* nothing to do */
 
 	gettimeofday(&tv1, NULL);
-	snprintf(namebuf, sizeof(namebuf),
-			 ".pgstrom_shmbuf_%u_%d",
-			 PostPortNumber,
-			 session->join_inner_handle);
+	pgstromShmemObjectName(namebuf, sizeof(namebuf),
+						   session->join_inner_handle);
 	fdesc = shm_open(namebuf, O_RDWR, 0600);
 	if (fdesc < 0)
 	{
@@ -6402,7 +6395,7 @@ out:
 static void
 __gpuContextAdjustWorkers(void)
 {
-	uint64_t	conf_val;
+	uint64		conf_val;		/* PG's uint64: pg_atomic_*_u64 takes uint64 * */
 	dlist_iter	iter;
 
 	conf_val = pg_atomic_read_u64(&gpuserv_shared_state->max_async_tasks);
@@ -6614,10 +6607,10 @@ gpuservBgWorkerMain(Datum arg)
 	dlist_init(&gpuserv_gpucontext_list);
 	before_shmem_exit(gpuservCleanupOnProcExit, 0);
 
-	/* Open epoll descriptor */
-	gpuserv_epoll_fdesc = epoll_create(30);
-	if (gpuserv_epoll_fdesc < 0)
-		elog(ERROR, "failed on epoll_create: %m");
+	/* Open the event loop (epoll on Linux, poll elsewhere) */
+	gpuserv_eventloop = pgstromEventLoopCreate();
+	if (!gpuserv_eventloop)
+		elog(ERROR, "failed to create the event loop: %m");
 	/* Open logger pipe for worker threads */
 	gpuservLoggerOpen();
 	/* Build the fatbin binary image on demand */
@@ -6648,7 +6641,8 @@ gpuservBgWorkerMain(Datum arg)
 			elog(ERROR, "failed on gpuDirectOpenDriver");
 		while (!gpuServiceGoingTerminate())
 		{
-			struct epoll_event	ep_ev;
+			int		ev_fdesc = -1;
+			int		ev_events = 0;
 			int		status;
 
 			if (!PostmasterIsAlive())
@@ -6657,24 +6651,25 @@ gpuservBgWorkerMain(Datum arg)
 			/* launch/eliminate worker threads */
 			__gpuContextAdjustWorkers();
 
-			status = epoll_wait(gpuserv_epoll_fdesc, &ep_ev, 1, 4000);
+			status = pgstromEventLoopWait(gpuserv_eventloop,
+										  &ev_fdesc, &ev_events, 4000);
 			if (status < 0)
 			{
 				if (errno != EINTR)
 				{
-					elog(LOG, "failed on epoll_wait: %m");
+					elog(LOG, "failed on waiting for events: %m");
 					break;
 				}
 			}
 			else if (status > 0)
 			{
 				/* errors on server socker? */
-				if ((ep_ev.events & ~EPOLLIN) != 0)
+				if ((ev_events & PGSTROM_EVENT_ERROR) != 0)
 					break;
 				/* any connection pending? */
-				if ((ep_ev.events & EPOLLIN) != 0)
+				if ((ev_events & PGSTROM_EVENT_READABLE) != 0)
 				{
-					if (ep_ev.data.fd == gpuserv_listen_sockfd)
+					if (ev_fdesc == gpuserv_listen_sockfd)
 						gpuservAcceptClient();
 					else
 						gpuservLoggerDispatch();
@@ -6756,6 +6751,23 @@ pgstrom_init_gpu_service(void)
 	BackgroundWorker worker;
 
 	Assert(numGpuDevAttrs > 0);
+#ifdef PGSTROM_NO_CUDA
+	/*
+	 * The GPU service is the exec'd pgstrom-gpuserv program run by the launcher
+	 * (gpu_launcher.c); only the client-side setting is left here.
+	 */
+	DefineCustomIntVariable("pg_strom.max_async_tasks",
+							"Limit of concurrent xPU task execution",
+							NULL,
+							&__pgstrom_max_async_tasks_dummy,
+							16,
+							1,
+							256,
+							PGC_SUSET,
+							GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							NULL, NULL, NULL);
+	return;
+#endif
 	DefineCustomIntVariable("pg_strom.gpu_mempool_segment_sz",
 							"Segment size of GPU memory pool",
 							NULL,

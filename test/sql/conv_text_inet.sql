@@ -14,7 +14,7 @@ CREATE TABLE rt_inet (
   addr  text
 );
 
-\set ip_mixed_with_masks_10k_path `echo -n ${ARROW_TEST_DATA_DIR:-$PWD/test/data}/ip_mixed_with_masks_10k.tsv`
+\set ip_mixed_with_masks_10k_path `printf %s ${ARROW_TEST_DATA_DIR:-$PWD/test/data}/ip_mixed_with_masks_10k.tsv`
 \copy rt_inet FROM :'ip_mixed_with_masks_10k_path' WITH (DELIMITER E'\t')
 VACUUM ANALYZE;
 

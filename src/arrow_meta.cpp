@@ -10,6 +10,13 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "arrow_defs.h"
+/*
+ * The module is built with -fvisibility=hidden. Keep the Arrow/Parquet types visible,
+ * otherwise their type_info is duplicated here and dynamic_cast<> across libparquet
+ * fails on macOS (libc++ compares type_info by address): e.g. the Statistics casts
+ * in __readParquetMinMaxStats() returned NULL and crashed the backend.
+ */
+#pragma GCC visibility push(default)
 #include <arrow/api.h>			/* dnf install arrow-devel, or apt install libarrow-dev */
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
@@ -21,6 +28,7 @@
 #include <parquet/statistics.h>
 #include <parquet/file_reader.h>
 #endif
+#pragma GCC visibility pop
 #include <fcntl.h>
 #include <sstream>
 #include <string>

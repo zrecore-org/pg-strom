@@ -1,5 +1,5 @@
 PG_CONFIG ?= pg_config
-VERSION ?= 6.2
+VERSION ?= 7.0
 RELEASE ?= 0
 GITHASH_IF_NOT_GIVEN := HEAD
 
@@ -8,9 +8,11 @@ GITHASH_IF_NOT_GIVEN := HEAD
 #
 PG_INCLUDEDIR_SERVER := $(shell $(PG_CONFIG) --includedir-server)
 __PG_CONFIG_H   := $(PG_INCLUDEDIR_SERVER)/pg_config.h
-PG_MAJORVERSION := $(shell grep '^#define PG_MAJORVERSION_NUM' $(__PG_CONFIG_H) | awk '{print $$3}')
-PG_MINORVERSION := $(shell grep '^#define PG_MINORVERSION_NUM' $(__PG_CONFIG_H) | awk '{print $$3}')
-PG_VERSION_NUM  := $(shell grep '^#define PG_VERSION_NUM'      $(__PG_CONFIG_H) | awk '{print $$3}')
+# ('\#' instead of '#': GNU make 3.81, the one macOS ships, takes a bare '#' inside
+#  $(shell ...) as the start of a comment)
+PG_MAJORVERSION := $(shell grep '^\#define PG_MAJORVERSION_NUM' $(__PG_CONFIG_H) | awk '{print $$3}')
+PG_MINORVERSION := $(shell grep '^\#define PG_MINORVERSION_NUM' $(__PG_CONFIG_H) | awk '{print $$3}')
+PG_VERSION_NUM  := $(shell grep '^\#define PG_VERSION_NUM'      $(__PG_CONFIG_H) | awk '{print $$3}')
 
 #
 # PG-Strom version signature

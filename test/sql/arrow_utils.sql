@@ -62,7 +62,7 @@ UPDATE tt_1 SET c.a = pgstrom.random_int(2, -3200000,  3200000),
 
 \! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_1' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow > /dev/null 2>&1
 
-\set test_pg2arrow_tt1_path `echo -n $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow` 
+\set test_pg2arrow_tt1_path `printf %s $ARROW_TEST_DATA_DIR/test_pg2arrow_tt1.arrow` 
 IMPORT FOREIGN SCHEMA ft_1
   FROM SERVER arrow_fdw
   INTO regtest_arrow_utils_temp
@@ -85,7 +85,7 @@ INSERT INTO tt_2 (
 
 \! $PG2ARROW_CMD -c 'SELECT * FROM regtest_arrow_utils_temp.tt_2' -o $ARROW_TEST_DATA_DIR/test_pg2arrow_tt2.arrow > /dev/null 2>&1
 
-\set test_pg2arrow_tt2_path `echo -n $ARROW_TEST_DATA_DIR/test_pg2arrow_tt2.arrow` 
+\set test_pg2arrow_tt2_path `printf %s $ARROW_TEST_DATA_DIR/test_pg2arrow_tt2.arrow` 
 IMPORT FOREIGN SCHEMA ft_2
   FROM SERVER arrow_fdw
   INTO regtest_arrow_utils_temp

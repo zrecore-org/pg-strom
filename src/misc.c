@@ -2253,6 +2253,22 @@ typedef struct
 static HTAB	   *shmem_tracker_htab = NULL;
 static HTAB	   *mmap_tracker_htab = NULL;
 
+/*
+ * pgstromShmemObjectName - name of the POSIX shared-memory object behind a
+ * shared buffer. Used by both sides (backend and GPU service), so they agree.
+ */
+void
+pgstromShmemObjectName(char *buf, size_t bufsz, uint32_t handle)
+{
+#ifdef __APPLE__
+	/* macOS limits the name to 31 bytes (PSHMNAMLEN) */
+	snprintf(buf, bufsz, "/pgsb.%u.%x", PostPortNumber, handle);
+#else
+	/* on Linux this is the file /dev/shm/.pgstrom_shmbuf_<port>_<handle> */
+	snprintf(buf, bufsz, "/.pgstrom_shmbuf_%u_%d", PostPortNumber, (int)handle);
+#endif
+}
+
 static void
 cleanup_shmem_chunks(ResourceReleasePhase phase,
 					 bool isCommit,
@@ -2274,8 +2290,8 @@ cleanup_shmem_chunks(ResourceReleasePhase phase,
 			if (isCommit)
 				elog(WARNING, "shared-memory '%s' leaks, and still alive",
 					 entry->shmem_name);
-			if (unlink(entry->shmem_name) != 0)
-				elog(WARNING, "failed on unlink('%s'): %m", entry->shmem_name);
+			if (shm_unlink(entry->shmem_name) != 0)
+				elog(WARNING, "failed on shm_unlink('%s'): %m", entry->shmem_name);
 			if (close(entry->shmem_fdesc) != 0)
 				elog(WARNING, "failed on close('%s'): %m", entry->shmem_name);
 			hash_search(shmem_tracker_htab,
@@ -2324,11 +2340,9 @@ uint32_t
 __shmemCreate(void)
 {
 	static uint	my_random_seed = 0;
-	const char *shmem_dir = "/dev/shm";
 	int			fdesc;
 	uint32_t	handle;
 	char		namebuf[MAXPGPATH];
-	size_t		off = 0;
 
 	if (!shmem_tracker_htab)
 	{
@@ -2345,23 +2359,17 @@ __shmemCreate(void)
 										 HASH_ELEM | HASH_BLOBS);
 		RegisterResourceReleaseCallback(cleanup_shmem_chunks, 0);
 	}
-	off = snprintf(namebuf, sizeof(namebuf), "%s/", shmem_dir);
 	do {
 		handle = rand_r(&my_random_seed);
 		if (handle == 0)
 			continue;
 		/* to avoid hash conflict */
-		if (!shmem_dir)
-			handle |= IS_POSIX_SHMEM;
-		else
-			handle &= ~IS_POSIX_SHMEM;
+		handle &= ~IS_POSIX_SHMEM;
 
-		snprintf(namebuf + off, sizeof(namebuf) - off,
-				 ".pgstrom_shmbuf_%u_%d",
-				 PostPortNumber, handle);
-		fdesc = open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
+		pgstromShmemObjectName(namebuf, sizeof(namebuf), handle);
+		fdesc = shm_open(namebuf, O_RDWR | O_CREAT | O_EXCL, 0600);
 		if (fdesc < 0 && errno != EEXIST)
-			elog(ERROR, "failed on open('%s'): %m", namebuf);
+			elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
 	} while (fdesc < 0);
 
 	PG_TRY();
@@ -2384,8 +2392,8 @@ __shmemCreate(void)
 	{
 		if (close(fdesc) != 0)
 			elog(WARNING, "failed on close('%s'): %m", namebuf);
-		if (unlink(namebuf) != 0)
-			elog(WARNING, "failed on unlink('%s'): %m", namebuf);
+		if (shm_unlink(namebuf) != 0)
+			elog(WARNING, "failed on shm_unlink('%s'): %m", namebuf);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -2406,8 +2414,8 @@ __shmemDrop(uint32_t shmem_handle)
 							NULL);
 		if (entry)
 		{
-			if (unlink(entry->shmem_name) != 0)
-				elog(WARNING, "failed on unlink('%s'): %m", entry->shmem_name);
+			if (shm_unlink(entry->shmem_name) != 0)
+				elog(WARNING, "failed on shm_unlink('%s'): %m", entry->shmem_name);
 			if (close(entry->shmem_fdesc) != 0)
 				elog(WARNING, "failed on close('%s'): %m", entry->shmem_name);
 			return;
@@ -2421,13 +2429,13 @@ __mmapShmem(uint32_t shmem_handle,
 			size_t   shmem_length)
 {
 	void	   *mmap_addr = MAP_FAILED;
-	size_t		mmap_size = TYPEALIGN(PAGE_SIZE, shmem_length);
+	/* the OS page size, not PAGE_SIZE: Apple Silicon maps in 16 KB pages */
+	size_t		mmap_size = TYPEALIGN(sysconf(_SC_PAGESIZE), shmem_length);
 	int			mmap_prot = PROT_READ | PROT_WRITE;
 	int			mmap_flags = MAP_SHARED;
 	mmapEntry  *mmap_entry = NULL;
 	shmemEntry *shmem_entry = NULL;
 	int			fdesc = -1;
-	const char *shmem_dir = "/dev/shm";
 	const char *fname = NULL;
 	struct stat	stat_buf;
 	bool		found;
@@ -2455,23 +2463,16 @@ __mmapShmem(uint32_t shmem_handle,
 								  NULL);
 		if (shmem_entry)
 		{
-			size_t		len = strlen(shmem_dir);
-
-			if (strncmp(shmem_entry->shmem_name, shmem_dir, len) != 0 ||
-				shmem_entry->shmem_name[len] != '/')
-				elog(ERROR, "Bug? shmem_dir mismatch '%s'", shmem_dir);
 			fdesc = shmem_entry->shmem_fdesc;
 			fname = shmem_entry->shmem_name;
 		}
 	}
 	if (fdesc < 0)
 	{
-		snprintf(namebuf, sizeof(namebuf),
-				 "%s/.pgstrom_shmbuf_%u_%d",
-				 shmem_dir, PostPortNumber, shmem_handle);
-		fdesc = open(namebuf, O_RDWR, 0600);
+		pgstromShmemObjectName(namebuf, sizeof(namebuf), shmem_handle);
+		fdesc = shm_open(namebuf, O_RDWR, 0600);
 		if (fdesc < 0)
-			elog(ERROR, "failed on open('%s'): %m", namebuf);
+			elog(ERROR, "failed on shm_open('%s'): %m", namebuf);
 		fname = namebuf;
 	}
 
@@ -2481,10 +2482,10 @@ __mmapShmem(uint32_t shmem_handle,
 			elog(ERROR, "failed on fstat('%s'): %m", fname);
 		if (stat_buf.st_size < mmap_size)
 		{
-			while (fallocate(fdesc, 0, 0, mmap_size) != 0)
+			while (pgstromPreallocate(fdesc, mmap_size) != 0)
 			{
 				if (errno != EINTR)
-					elog(ERROR, "failed on fallocate('%s', %lu): %m",
+					elog(ERROR, "failed on preallocating '%s' (%lu bytes): %m",
 						 fname, mmap_size);
 			}
 		}
