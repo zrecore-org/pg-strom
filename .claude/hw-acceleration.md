@@ -167,8 +167,8 @@ Verified on this Mac (Apple M1 Pro, MoltenVK) and in the arm64 Linux container (
 |---|---|---|
 | A2.1 | Wire server in the service (`src/gpuserv/wire.[ch]`): framing, connection table, OpenSession, task and final replies, error replies, `PGSTROM_GPUSERV_TRACE=1` dump of the session's xpucode | done |
 | A2.2 | Planner integration: `gpuDevAttrs` filled from the probed devcaps, GPU GUCs registered from the probe, `gpuserv_ready_accept()` reads the control segment, backend connects to the control segment's socket, old CUDA worker not registered (`PGSTROM_NO_CUDA`) | done |
-| A2.3 | Scan execution: heap-page decode (`BLOCK` source, remaining pages read from the file by the service), `kern_expression` to VM program linearizer (`LoadVars`, quals), projection into a `KDS_FORMAT_ROW` result, error reporting and CPU fallback | next |
-| A2.4 | Type and function breadth for scan quals (int1-8, float2/4; float8 gated by `required_caps`) | after A2.3 |
+| A2.3 | Scan execution: heap-page decode (`BLOCK` source, remaining pages mapped from the file by the service), `kern_expression` to VM program translator, projection into a `KDS_FORMAT_ROW` result, error reporting | **done** (core; CPU fallback and the gaps below remain) |
+| A2.4 | Planner gating by device capabilities (`required_caps`), type and function breadth (float8 off on Apple, text, numeric, time), CPU fallback for kernel errors, query parameters | next |
 | A2.5 | Delete CUDA (list under "Renames and removals"), expected files, `pending_schedule` for join/aggregate/sort/GPU-Cache | after A2.4 |
 
 **Verified so far (Apple M1 Pro)**
@@ -176,7 +176,32 @@ Verified on this Mac (Apple M1 Pro, MoltenVK) and in the arm64 Linux container (
 - Executing it opens a session on the service and sends the tasks; the service answers with a clean `Error` ("GpuScan execution is not implemented in the Vulkan service yet"), which the backend reports as an ordinary error. The A1 lifecycle test still passes.
 - Real xpucode from the planner for `WHERE v < 10 AND w + 1 > 5`: `Packed[LoadVars depth=0 resno2->slot0 resno3->slot1]` and `BoolExpr_And(int4lt(Var slot0, Const), int84gt(int84pl(Var slot1, Const), Const))`; slots carry type, length, alignment and a kvec offset. This is the input the A2.3 linearizer must consume.
 
-**Findings for A2.3**
+**A2.3 result (Apple M1 Pro; `test/gpuserv/scan_test.sh`)**
+
+What runs on the GPU: one workgroup per heap page, one thread per line pointer. Each thread deforms the columns the program needs (null bitmap, alignment, varlena skipping), runs the qual program of the scan VM (bool, int1/2/4/8 and float4 with PostgreSQL's overflow, zero-divide and NaN rules; int casts; three-valued AND/OR/NOT; IS [NOT] NULL on any column type), and for qualifying tuples evaluates the computed projection expressions. The service then forms the result tuples on the CPU, copying pass-through columns (any type, varlena and external TOAST pointers included, ctid and tableoid) straight from the source tuple.
+
+- **Differential test:** 14 + 2 query shapes on three tables, each GPU result set compared with the CPU's by md5: a table whose pages are all-visible (pages mapped from the file), one with UPDATEs and DELETEs and no vacuum (pages loaded and visibility-checked by the backend), and a mix. NULLs, NaN and Infinity, 200-byte text, int2/int4/int8 mixed arithmetic, casts, division and modulo, `IS NULL` on text, 10 and 24 computed columns (the 16- and 32-register kernels), a division-by-zero error on both sides, and parallel workers. **All pass on the M1 Pro, with and without the zero-copy path (`PGSTROM_GPUSERV_NO_MAP=1`), and on arm64 Linux with lavapipe (desktop tier, subgroup size 4, copy path).** UPDATE and DELETE (planned as GpuScans projecting `ctid`) work.
+- **Plan gating for now:** GpuPreAgg, GpuJoin, GPU-Cache and SELECT INTO direct are not registered in the Vulkan build (their init is compiled out), so aggregate and join queries run on the CPU instead of failing. Each comes back with its milestone (A3, A4, A7).
+- **Page ingest:** the pages the backend loaded go into a small buffer; the relation file's own pages are not copied: a 512 MB window of the file is `mmap`ed and imported as a Vulkan buffer (`VK_EXT_external_memory_host`) and **kept between tasks**. Importing a fresh mapping per task was no faster than `pread` (the GPU pays the page-in on first touch, about 15 ms per 64 MB); a persistent window is what the spike measured. A per-page table tells the kernel where each page is. If a window is not usable (pages past the end of the file, a buffer limit smaller than a window as on lavapipe) every page is copied.
+- **Kernel findings:** workgroup size (32 to 256) makes no difference; **register-file size does** (32 registers 3.6 ms, 8 registers 2.1 ms per 64 MB), so there are three kernel variants (8, 16 and 32 registers) chosen by the program. Loads are 32-bit words (tuples are 8-byte aligned). The kernel writes one flag per line pointer instead of compacting with atomics, so the service reads matches in heap order with no sort (a `qsort` of 8.4M records had cost 1.5 s).
+
+**Performance against the gate (16.8M rows, 964 MB, 8 CPU cores, server-side execution time of `EXPLAIN ANALYZE`)**
+
+| Query | GPU (VM) | PostgreSQL, 8 processes | PostgreSQL, 1 process |
+|---|---|---|---|
+| `SELECT id ... WHERE v < 10 AND w + 1 > 5` (0.9% of rows) | **about 90 ms** (first run 175 ms: file windows paged in) | 124 ms | 621 ms |
+| `SELECT id, v, w, e ... WHERE v < 500` (50% of rows) | 980 ms | **195 ms** | 671 ms |
+
+**The A2 gate (scan at least 2.9x faster than 8-worker PostgreSQL) is not met: the selective scan is 1.4x faster.** Where the time goes for the selective query, per 64 MB task: GPU 2.2 ms (about 30 GB/s; the spike's VM kernel on the same data class was about 35 ms for 863 MB, the same figure), flag scan and tuple forming 1.7 ms, and about 25 ms of the 90 ms is the backend (checking blocks, sending tasks, receiving results). The service is single-threaded, so tasks do not overlap. Specialized kernels (A6) take the GPU part to about a fifth, and the service can pipeline (form tuples for task N while the GPU runs task N+1) and form tuples on several threads. For the 50% query the cost is moving 8.4M tuples (about 400 MB) through the socket and forming them on one thread; that is inherent to the socket protocol (the CUDA service sent results the same way). Offload pays on selective scans and, in A3, aggregation, where only a few rows come back.
+
+**Not done yet in the Vulkan GpuScan (known gaps)**
+- **No CPU fallback:** a kernel error (division by zero, overflow) makes the query fail with the service's message instead of re-running the chunk on the CPU as the CUDA service did. The row-level error then differs from PostgreSQL when the CPU would not have evaluated that row.
+- **Operators the VM does not have** make the query fail ("... is not supported by the Vulkan GpuScan yet") instead of being kept on the CPU by the planner; float8 operators (no fp64 on Apple) and text/numeric/time functions fall in this class. Closing this is A2.4 (`required_caps` in `codegen.c`).
+- Query parameters, `Arrow`/`Parquet`/`ROW` sources, GPU-Cache tasks and xmin/xmax/cmin/cmax columns are not supported.
+- `EXPLAIN` statistics: the `exec: raw -> in` counters need a second look (the first value does not match the row count).
+- The A1 VM self-test still uses the old synthetic-row VM; it should move to the scan VM.
+
+**Findings for A2.3 (made before implementing)**
 - The CUDA scan kernel is warp-centric (stair sums, warp contexts, per-depth kvecs). The VM is one thread per row, so the heap-page walk and the result writer are new Slang code, not a port of `cuda_gpuscan.cu`.
 - `XpuTaskExec` for a `BLOCK` source carries the pages loaded by the backend plus a path and an iovec for pages the service must read itself (all-visible pages, previously read by GPUDirect or VFS). Without GPUDirect the service reads them with `pread`.
 - Final reply for a plain scan: `Success`, `scan_relidx = -1`, `final_plan_task = true`, no chunks. Task reply: `Success` with `kern_exec_results` plus one `KDS_FORMAT_ROW` chunk (row index array, tuples packed from the end).

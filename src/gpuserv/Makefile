@@ -31,11 +31,11 @@ CFLAGS  += -std=gnu11
 endif
 
 SLANG_SRCS := $(sort $(wildcard kernels/*.slang))
-SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv
+SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv
 # per-kernel extra slangc flags (the memory model kernel must declare the Vulkan memory model)
 SLANGFLAGS_memmodel := -capability vk_mem_model
 
-LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.o
+LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.o scan_prog.o scan_exec.o
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
 
@@ -69,12 +69,25 @@ build/vm_main.spv: kernels_vm/vm.slang kernels_vm/common.slang kernels_vm/common
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/vm.slang -I gen -I kernels_vm -I .. -target spirv -entry vm_main -stage compute -o $@
 
+SCAN_SLANGFLAGS ?=
+# the GpuScan kernel (heap pages -> VM -> matches); its instruction numbers are shared with scan_prog.c
+# one variant per register-file size: the register count dominates the kernel's speed
+build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_vm_ops.inc | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/scan.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry scan_main -stage compute -o $@
+
+scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+scan_exec.o: scan_exec.c scan_exec.h scan_prog.h kernels_spv.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
 vm_selftest.o: vm_selftest.c vm_selftest.h kernels_spv.h gen/opcodes.inc
 	$(CC) $(CFLAGS) -I gen -I .. -c -o $@ $<
 
 # the wire server reads the real backend protocol structs from ../xpu_common.h
-wire.o: wire.c wire.h gpu_vk.h gpuserv_proto.h ../xpu_common.h ../xpu_opcodes.h
-	$(CC) $(CFLAGS) -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+wire.o: wire.c wire.h scan_exec.h scan_prog.h gpu_vk.h gpuserv_proto.h ../xpu_common.h ../xpu_opcodes.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 # one generator run produces both files
 kernels_spv.c: kernels_spv.h
@@ -87,7 +100,8 @@ kernels_spv.h: $(SPV_FILES) gen_kspv.sh
 gpu_vk.o devcaps.o probe_main.o: gpu_vk.h
 devcaps.o probe_main.o: gpuserv_probe.h gpuserv_proto.h
 devcaps.o kernels_spv.o: kernels_spv.h
-gpuserv_main.o: gpuserv_probe.h gpuserv_proto.h vm_selftest.h gpu_vk.h
+gpuserv_main.o: gpuserv_main.c gpuserv_probe.h gpuserv_proto.h vm_selftest.h gpu_vk.h wire.h scan_exec.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 check: gpuserv-probe proto_check
 	./gpuserv-probe > build/probe.out

@@ -31,6 +31,7 @@ struct wire_client
 	size_t			rlen;
 	size_t			rcap;
 	XpuCommand	   *session;			/* copy of the OpenSession frame */
+	scan_prog		prog;				/* the session's scan program, built on the first task */
 	int				closing;
 };
 
@@ -276,6 +277,10 @@ handle_open_session(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 static void
 handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 {
+	XpuCommand *resp;
+	size_t		resp_len = 0;
+	char		msg[256];
+
 	if (!wc->session)
 	{
 		reply_error(wc, "XpuTaskExec", "no session is opened");
@@ -285,7 +290,21 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 		 xcmd->u.task.scan_relidx, xcmd->u.task.kds_src_offset,
 		 xcmd->u.task.kds_src_pathname, xcmd->u.task.kds_src_iovec,
 		 (unsigned long long) xcmd->length);
-	reply_error(wc, "XpuTaskExec", "GpuScan execution is not implemented in the Vulkan service yet");
+	if (xcmd->tag != XpuCommandTag__XpuTaskExec)
+	{
+		reply_error(wc, "XpuTaskExec", "GPU-Cache tasks are not implemented in the Vulkan service");
+		return;
+	}
+	resp = scan_exec_task(&ws->scan, wc->session, &wc->prog, xcmd, &resp_len, msg, sizeof(msg));
+	if (!resp)
+	{
+		wlog(ws, 1, "task failed: %s", msg);
+		reply_error(wc, "XpuTaskExec", "%s", msg);
+		return;
+	}
+	if (write_all(wc->fd, resp, resp_len) != 0)
+		wc->closing = 1;
+	free(resp);
 }
 
 static void
@@ -319,6 +338,7 @@ client_free(wire_client *wc)
 	if (wc->fd >= 0)
 		close(wc->fd);
 	free(wc->rbuf);
+	scan_prog_free(&wc->prog);
 	free(wc->session);
 	free(wc);
 }
@@ -429,6 +449,8 @@ wire_server_init(wire_server *ws, gpuserv_control *ctl, gpu_vk_ctx *vk, uint32_t
 	ws->vk = vk;
 	ws->device = device;
 	ws->trace = (trace && trace[0] && strcmp(trace, "0") != 0);
+	scan_engine_init(&ws->scan, vk);
+	ws->scan.trace = ws->trace;
 }
 
 void
@@ -501,4 +523,11 @@ wire_server_close_all(wire_server *ws)
 {
 	while (ws->nclients > 0)
 		client_free(ws->clients[--ws->nclients]);
+}
+
+void
+wire_server_fini(wire_server *ws)
+{
+	wire_server_close_all(ws);
+	scan_engine_fini(&ws->scan);
 }

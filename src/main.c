@@ -833,10 +833,12 @@ _PG_init(void)
 	{
 		pgstrom_init_gpu_service();
 		pgstrom_init_gpu_scan();
+#ifndef PGSTROM_NO_CUDA
 		pgstrom_init_gpu_join();
 		pgstrom_init_gpu_preagg();
 		pgstrom_init_gpu_cache();
 		pgstrom_init_select_into();
+#endif	/* the Vulkan service implements GpuScan only so far (A3: PreAgg, A4: Join, A7: GPU-Cache) */
 	}
 	/* callback for the extension checker */
 	CacheRegisterSyscacheCallback(NAMESPACEOID, pgstrom_extension_checker_callback, 0);

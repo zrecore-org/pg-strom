@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-PG-Strom is a PostgreSQL extension (C/C++ host code + CUDA device code) that offloads scan / join / group-by to NVIDIA GPUs, reads Apache Arrow / Parquet via a foreign data wrapper (Arrow_Fdw), and supports GPU-Cache and GPU-Sort. Requires PostgreSQL v15+ (see `src/pg_strom.h`), CUDA toolkit, and Linux; CI builds against 16/17/18. The development machine here is macOS, so nothing builds or runs locally: `make` needs `nvcc`, `/usr/local/cuda`, and `/proc/driver/nvidia`. Treat this as edit-only unless working on a Linux/CUDA host.
+PG-Strom is a PostgreSQL extension (C/C++ host code + GPU device code) that offloads scan / join / group-by to GPUs, reads Apache Arrow / Parquet via a foreign data wrapper (Arrow_Fdw), and supports GPU-Cache and GPU-Sort. Requires PostgreSQL v15+ (see `src/pg_strom.h`).
+
+**Two lines of development.** `master` is the CUDA/NVIDIA product (Linux, CUDA toolkit; nothing builds or runs on a Mac). The `apple-silicon` branch is a hard fork that replaces CUDA with Vulkan compute (Slang kernels, SPIR-V) and is validated on Apple Silicon (MoltenVK) only; Linux arm64 with lavapipe (a CPU Vulkan device) is used for host-code checks. The plan, status and findings are in `.claude/hw-acceleration.md`; read its "A2 status" first. On the branch, CUDA code is still present until milestone A2.5 removes it; the build uses `src/nocuda/` stubs when no CUDA toolkit is found (`-DPGSTROM_NO_CUDA`). The Vulkan build offers GpuScan only so far (GpuPreAgg, GpuJoin, GPU-Cache and SELECT INTO direct are compiled out).
 
 ## Build / install
 
@@ -27,6 +29,18 @@ Useful switches (see `src/Makefile`, `Makefile.common`, `src/Makefile.cuda`):
 The extension must be loaded at postmaster start: `shared_preload_libraries = '$libdir/pg_strom'`.
 
 `arrow-tools/` holds standalone tools (`pg2arrow`, `arrow2csv`, `tsv2arrow`, `vcf2arrow`) built separately and used by the tests.
+
+### apple-silicon branch: build and test
+
+```
+make -C src PG_CONFIG=/opt/homebrew/opt/postgresql@17/bin/pg_config install   # module + pgstrom-gpuserv
+make -C src/gpuserv                                                          # the service alone (needs slangc and the Vulkan loader)
+GPUSERV_BIN=src/gpuserv/pgstrom-gpuserv sh test/gpuserv/service_test.sh     # service lifecycle (throwaway cluster)
+GPUSERV_BIN=<installed pgstrom-gpuserv> sh test/gpuserv/scan_test.sh        # GPU vs CPU result comparison of GpuScan
+make -C test/port && test/port/port_test                                    # portability layer
+```
+
+`PGSTROM_GPUSERV_TRACE=1` in the postmaster's environment makes the service log each session's xpucode and per-task timings; `PGSTROM_GPUSERV_NO_MAP=1` disables the zero-copy file mapping. `ALLOW_CPU=on` lets the tests use lavapipe. GNU make 3.81 and the macOS `sh` are supported (no `echo -n`, `\#` in `$(shell)`).
 
 ## Tests
 

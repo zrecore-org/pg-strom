@@ -265,7 +265,7 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 	}
 	if (got_signal)
 		log_msg("terminating on signal %d", (int) got_signal);
-	wire_server_close_all(&ss.wire);
+	wire_server_fini(&ss.wire);
 	close(ss.listen_fd);
 	unlink(socket_path);
 	gpu_vk_close(&ss.vk);

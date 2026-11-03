@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include "gpu_vk.h"
 #include "gpuserv_proto.h"
+#include "scan_exec.h"
 
 #define WIRE_MAX_CLIENTS		64
 
@@ -22,6 +23,7 @@ typedef struct wire_server
 	gpuserv_control *ctl;
 	gpu_vk_ctx	   *vk;
 	uint32_t		device;
+	scan_engine		scan;
 	int				trace;				/* PGSTROM_GPUSERV_TRACE */
 	wire_client	   *clients[WIRE_MAX_CLIENTS];
 	int				nclients;
@@ -35,5 +37,6 @@ int		wire_server_pollfds(wire_server *ws, struct pollfd *pfds, int max);
 /* Process readable/hung-up clients; pfds is the array filled by wire_server_pollfds(). */
 void	wire_server_service(wire_server *ws, const struct pollfd *pfds, int n);
 void	wire_server_close_all(wire_server *ws);
+void	wire_server_fini(wire_server *ws);
 
 #endif	/* GPUSERV_WIRE_H */
