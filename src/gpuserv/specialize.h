@@ -43,6 +43,7 @@ typedef struct spec_shape
 	 * maps to slot index key - dm_base[k] in [0, dm_w[k]); NULL maps to dm_w[k]; a row with a key outside
 	 * the window is aggregated on the CPU. ga_c is the product of the (dm_w + 1).
 	 */
+	int			stats;		/* the shape was chosen knowing the groups of the session (not for the first task) */
 	int			dm;
 	int			dm_nkeys;
 	int64_t		dm_base[2];

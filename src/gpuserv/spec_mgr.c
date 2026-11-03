@@ -1133,6 +1133,7 @@ pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, c
 	*out = *in;
 	out->kind = kind;
 	out->dm = 0;
+	out->stats = (ks && ks->ngroups > 0);
 	if (kind == SPEC_AGG || kind == SPEC_JAGG)
 	{
 		out->agg_max = na;
@@ -1145,6 +1146,7 @@ pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, c
 	if (pick_dm(m, prog, ks, in, out))
 	{
 		out->kind = kind;
+		out->stats = (ks && ks->ngroups > 0);
 		return;
 	}
 	{
@@ -1159,6 +1161,7 @@ pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, c
 			/* the aggregates do not leave room for a useful table: the VM's layout */
 			*out = *in;
 			out->kind = kind;
+			out->stats = (ks && ks->ngroups > 0);
 			return;
 		}
 		if (env && atoi(env) > 0)
@@ -1273,13 +1276,18 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, co
 		}
 		else if (!prog->spec_grow_failed && m->mode != SPECM_CHECK && ks &&
 				 __atomic_load_n(&cur->state, __ATOMIC_ACQUIRE) == SPEC_READY &&
-				 (cur->shape.dm ? spec_window_exceeded(&cur->shape, ks)
-				  : ks->ngroups * 3 / 2 > (uint32_t) cur->ga_c))
+				 ((cur->shape.dm ? spec_window_exceeded(&cur->shape, ks)
+				   : ks->ngroups * 3 / 2 > (uint32_t) cur->ga_c) ||
+				  (!cur->shape.stats && ks->ngroups > 0)))
 		{
+			/*
+			 * Too small a table or a window the groups left, or a kernel that was chosen before the session had
+			 * any group (a kernel from the disk cache at the first task): look again with what has been seen.
+			 */
 			char	   *defs = NULL, *body = NULL, err[256];
 
 			pick_shape(m, prog, kind, &in, ks, &sh);
-			if ((sh.dm != cur->shape.dm || sh.ga_c > cur->ga_c ||
+			if ((sh.dm != cur->shape.dm || sh.ga_c != cur->ga_c ||
 				 (sh.dm && memcmp(sh.dm_base, cur->shape.dm_base, sizeof(sh.dm_base)) != 0)) &&
 				prog->spec_regens++ < 4 &&
 				spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) == 0)
