@@ -414,11 +414,11 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 
 		foreach (lc, inner_target_list)
 			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
-		foreach (lc, root->processed_tlist)
+		foreach (lc, joinrel->reltarget->exprs)
 		{
-			TargetEntry *tle = lfirst(lc);
+			Node   *e = lfirst(lc);
 
-			if (!IsA(tle->expr, Var) && !IsA(tle->expr, Const) && !IsA(tle->expr, Param))
+			if (!IsA(e, Var) && !IsA(e, Const) && !IsA(e, Param))
 				nexprs++;
 		}
 		/* a computed value has a slot and a register of its own above the slots (scan_prog.c), plus temporaries */
