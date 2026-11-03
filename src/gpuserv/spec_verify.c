@@ -259,7 +259,7 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 					return 1;
 				}
 			if (na > cap)
-				na = cap;
+				return 2;		/* more matches than room: which ones got a slot is a race; the task runs again with room */
 			if (!join_records_equal(a + 4 + ojw, b + 4 + ojw, na, rw, (size_t) prog->ndepth, (size_t) prog->ncomp,
 									msg, msglen))
 				return 1;
@@ -311,7 +311,7 @@ spec_dispatch(scan_engine *eng, scan_prog *prog, int kind, const spec_shape *sh,
 		}
 		else
 			fprintf(stderr, "pgstrom-gpuserv: specialize: check %s (kernel kind %d)\n",
-					cmp == 0 ? "ok" : "skipped: a group table overflowed", kind);
+					cmp == 0 ? "ok" : "skipped: the output overflowed (group table, match records)", kind);
 out:
 		free(snap);
 		free(res);
