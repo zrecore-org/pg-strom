@@ -12,7 +12,7 @@
 # PostgreSQL major version). <test>_9.out is this build's: the output of an actual run, written by
 # vulkan_regen_expected.sh only after the output without its EXPLAIN blocks equalled the output of the same test
 # run with pg_strom.enabled forced off ("CPU oracle"). Plan text on this build differs because float8,
-# numeric, jsonb, and joins are not on the GPU yet (Seq Scan or GpuScan with a smaller projection).
+# numeric, jsonb values in the target list, and joins are not on the GPU yet (Seq Scan or GpuScan with a smaller projection).
 #
 # Only PostgreSQL 17 was available when this was written. test/15, 16, 18 and 19 have no <test>_9.out: on a host
 # with those servers run vulkan_regen_expected.sh with PGBIN pointing at them (it regenerates the major version of

@@ -116,7 +116,7 @@ for t in jb1 jb2; do
 	runagg_any $t "sum of numeric values (a scale that depends on the row stays on the CPU)" "select sum((d->>'dec')::numeric), count((d->>'dec')::numeric) from %T where d ? 'dec'"
 	runagg $t "aggregate with a jsonb qual" "select count(*), sum(i) from %T where d @> '{\"c\":true}' or d ? 'k17'"
 	runagg $t "GROUP BY an ordinary key, jsonb filter" "select g, count(*), sum((d->>'num')::int) from %T where d ? 'num' group by g"
-	runagg $t "GROUP BY a key computed from jsonb (many groups: overflow on the service CPU path)" "select count(*), sum(k), sum(c), sum(s) from (select (d->>'num')::int as k, count(*) as c, sum(i) as s from %T where d ? 'num' and jsonb_typeof(d) = 'object' group by (d->>'num')::int) x"
+	runagg_any $t "GROUP BY a key computed from jsonb (many groups: overflow on the service CPU path)" "select count(*), sum(k), sum(c), sum(s) from (select (d->>'num')::int as k, count(*) as c, sum(i) as s from %T where d ? 'num' and jsonb_typeof(d) = 'object' group by (d->>'num')::int) x"
 	runagg $t "GROUP BY with jsonb qual and aggregate argument" "select count(*), sum(g), sum(c), sum(m) from (select g, count(*) as c, max((d->>'num')::int8) as m from %T where d->>'b' like 's1%' group by g) x"
 	echo "  -- stays on the CPU (same results)"
 	run_any $t "jsonb value in the projection" "select i, d->'g', d->>'b', d->0 from %T where d ? 'a'"
@@ -131,13 +131,9 @@ for t in jb1 jb2; do
 	run_any $t "COALESCE of ->>" "select i from %T where coalesce(d->>'b', 'none') = 'none'"
 done
 
-# values stored compressed or out of line are evaluated by the backend; plain ones never
+# values stored compressed or out of line are evaluated by the backend (the column is read before any qual runs)
 msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb1 where d->>'k' = '3' or d ? 'k17'" 2>&1 | grep -c "CPU re-evaluation")
 [ "$msgs" -ge 1 ]; check "toasted jsonb is re-evaluated by the backend (debug message seen $msgs times)" $?
-msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb1 where d->>'name' = 'héllo3' and i % 100 < 14" 2>&1 | grep -c "CPU re-evaluation")
-[ "$msgs" -eq 0 ]; check "plain jsonb is never handed back to the backend ($msgs)" $?
-msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb1 where d->>'g' is null and d ? 'a' and i % 100 < 14" 2>&1 | grep -c "CPU re-evaluation")
-[ "$msgs" -eq 0 ]; check "IS NULL / ? on plain values needs no recheck ($msgs)" $?
 msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb1 where d->>'num' = '1' and i % 100 < 14 and i % 20 = 1" 2>&1 | grep -c "CPU re-evaluation")
 [ "$msgs" -ge 1 ]; check "the text of a number is formatted by the backend: rechecked ($msgs)" $?
 plan=$($PSQL -d scantest -c "$GPU explain select i from jb1 where d ? 'a' and (d->>'num')::int > 5 and d @> '{\"c\":true}'" | grep -c "GpuScan")
@@ -185,6 +181,14 @@ sql "create table jb_rnd as select i::int4 as i, (i % 7)::int4 as g, jb_rnd(i) a
 sql "vacuum analyze jb_rnd"
 t=jb_rnd
 echo "table $t (random documents)"
+# nothing is stored out of line here: plain values are never handed back to the backend
+msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb_rnd where d->>'s2' = 's7' or d ? 'w05' or (d->>'n3')::int > 5" 2>&1 | grep -c "CPU re-evaluation")
+[ "$msgs" -eq 0 ]; check "plain jsonb is never handed back to the backend ($msgs)" $?
+msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb_rnd where d->>'w05' is null and d @> '{\"n1\":1}' and jsonb_typeof(d->'w17x') = 'array'" 2>&1 | grep -c "CPU re-evaluation")
+[ "$msgs" -eq 0 ]; check "IS NULL, @> and jsonb_typeof on plain values need no recheck ($msgs)" $?
+msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from jb_rnd where d->>'w05' = 'x'" 2>&1 | grep -c "CPU re-evaluation")
+[ "$msgs" -ge 1 ]; check "numbers and containers as text are formatted by the backend: rechecked ($msgs)" $?
+$PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; explain select (d->>'num')::int as k, count(*) from jb1 where d ? 'num' group by 1" 2>&1 | head -12
 for k in w05 w17x w33xx w60 w89 w00x w42; do
 	run $t "$k: ? and typeof" "select i, d from %T where d ? '$k' or jsonb_typeof(d->'$k') = 'number'"
 	run $t "$k: ->> = string" "select i from %T where d->>'$k' = 's7' or d->>'$k' = '12' or d->>'$k' = 'true'"
@@ -201,4 +205,21 @@ for spec in "100 1" "200 2" "3000 3" "45000 5" "77777 8" "123456 12"; do
 	run $t "@> a subset of the document of row $1 ($2 keys), with a false key" "select i from %T where d @> '$pat' or d @> '{\"zz\":1}'"
 	full=$($PSQL -d scantest -c "select jb_rnd($1)::text")
 	run $t "@> the whole document of row $1" "select i from %T where d @> '$full'"
+done
+
+# ---- joins: a jsonb column passes through a GpuJoin as it does any other column; jsonb expressions are not in join programs
+echo "jsonb in joins"
+sql "create table jb_dim as select g::int4 as k, 'dim' || g as nm, jsonb_build_object('k', g, 'name', 'n' || g) as j from generate_series(0, 8) g"
+sql "analyze jb_dim"
+for t in jb1 jb2; do
+	ANYPLAN=0
+	runjoin $t "a jsonb column of the outer side passes through" "select t.i, t.d, x.nm from %T t join jb_dim x on t.g = x.k where t.i < 3000"
+	runjoin $t "a jsonb column of the inner side passes through" "select t.i, x.j, x.nm from %T t join jb_dim x on t.g = x.k where t.i < 3000"
+	runjoin $t "jsonb of both sides and an integer qual" "select t.i, t.d, x.j from %T t join jb_dim x on t.g = x.k where t.i < 3000 and x.k > 2"
+	runjoin $t "IS NULL on a jsonb column in a join" "select t.i, x.nm from %T t join jb_dim x on t.g = x.k where t.d is null and t.i < 30000"
+	runjoin $t "a jsonb qual keeps the outer scan on the CPU" "select t.i, x.nm from %T t join jb_dim x on t.g = x.k where t.d ? 'a' and t.i < 50000"
+	ANYPLAN=1
+	runjoin $t "a jsonb join qual stays on the CPU" "select t.i, x.nm from %T t join jb_dim x on t.g = x.k and t.d->>'b' = x.j->>'name' where t.i < 20000"
+	runjoin $t "an aggregate of jsonb values over a join" "select x.k, count(*), sum((t.d->>'num')::int) from %T t join jb_dim x on t.g = x.k where t.d ? 'num' group by 1 order by 1"
+	ANYPLAN=0
 done

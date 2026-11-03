@@ -25,7 +25,7 @@ done, which is why a trivial qual costs more than it would in generated code.
 | Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float and text aggregates, `min`/`max` of numeric, `sum`/`avg` of numerics whose scale is not fixed by the plan; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
 | Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
 | Sorting (`GPU-Sort`, off by default: `pg_strom.enable_gpusort`) | The groups of a non-parallel GpuPreAgg: `GROUP BY ... ORDER BY` on group keys, `count`, integer `sum`/`min`/`max`, ASC/DESC, NULLS FIRST/LAST, up to 8 keys, `LIMIT` pushed into the sort, `rank()`/`dense_rank()`/`row_number()` below N per partition | Sorting of scan/join results, `avg`, float/numeric keys, parallel plans, `cpu_fallback = on` |
-| Other | | GPU-Cache, jsonb, PostGIS (dropped), SELECT INTO direct (dropped) |
+| Other | | GPU-Cache, PostGIS (dropped), SELECT INTO direct (dropped) |
 
 ## Types
 
@@ -41,10 +41,11 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 | `date`, `time`, `timestamp`, `timestamptz` | Comparison within a type, `date` against `timestamp`, `date + int4`, `date - int4`, `date - date`, `date <-> timestamp` casts, `min`/`max`, GROUP BY and join keys | `timestamptz` compared with `date`/`timestamp` (session time zone), `interval` anything, `timetz`, `extract`, `date_trunc`, `timestamptz::date`, `overlaps` |
 | `text`, `varchar`, `bpchar` | `=` and `<>` (bytewise; deterministic collations only), `<`, `<=`, `>`, `>=` in the C collation only, `LIKE`/`NOT LIKE` with a constant pattern of the shape `abc`, `abc%`, `%abc`, `%abc%` (UTF-8 or single-byte databases), `length()` in UTF-8, `IS NULL`, `count(col)` | `_` and inner `%` in `LIKE`, `ILIKE`, regular expressions, `upper`, `substr`, concatenation, `IN` lists, text GROUP BY keys and join keys, **any string expression inside a GpuJoin program (including the scan quals of the join's outer relation)** |
 | Compressed or TOAST-ed text | Evaluated by the backend: the kernel flags the row and the backend re-runs the whole row on the CPU | (`client_min_messages = debug1` shows "CPU re-evaluation of N tuples") |
-| `jsonb`, arrays, ranges, `inet`, `macaddr`, geometry, everything else | pass-through only | everything |
+| `jsonb` | Quals and aggregate arguments over constant paths: `->` / `->>` with a constant (or column) text key or an integer index (negative from the end), chains of them, `(x ->> 'k')::numeric / int2 / int4 / int8`, `?` (`jsonb_exists`), `jsonb_typeof`, `@>` against a constant object / array of scalars (nested objects, arrays of scalars, numbers compared by value), `IS [NOT] NULL` of any of these. Numbers that do not fit `{ int64, scale }`, the text of a number or of a container, a string cast to a number, and compressed or out-of-line documents are evaluated by the backend (per row, exactly) | A jsonb or text value *computed* from a document in the target list (`SELECT d->>'k'`, `d->'g'`: the column is read and the CPU evaluates it), float casts, `=` and ordering of jsonb, `#>`, `?|`, `?&`, `<@`, `@>` with a pattern containing arrays of arrays / raw scalars / the empty array, jsonb parameters, jsonb in a GpuJoin program (a jsonb column still passes through a join), jsonb in Arrow tables |
+| arrays, ranges, `inet`, `macaddr`, geometry, everything else | pass-through only | everything |
 
 `CASE`, `COALESCE`, `GREATEST`/`LEAST`, `IN (...)`, `IS TRUE`/`IS DISTINCT FROM` (`BooleanTest`,
-`DistinctExpr`), `CoerceViaIO` are not pushed down (`codegen.c` in the Vulkan build).
+`DistinctExpr`), and `CoerceViaIO` other than `(jsonb ->> key)::numeric/int` are not pushed down (`codegen.c` in the Vulkan build).
 
 ## GpuScan
 
@@ -123,6 +124,6 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 | GPU-Sort of scan / join results, window functions other than the rank filter | Not implemented (plan A7 status); GPU-Sort of GpuPreAgg groups works, see the table above |
 | GPU-Cache | A stub (plan A7); the SQL functions exist so that older upgrade scripts load |
 | Specialized kernels, fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
-| jsonb | Not started (plan A8) |
+| jsonb | Quals, aggregate arguments and number extraction run on the GPU; computed jsonb/text results in the target list, equality, `#>` and the other operators stay on the CPU (plan A8 status) |
 | GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
 | fp64, 64-bit-atomic kernels for devices that have them | Not implemented (plan A3b); `float8` stays on the CPU on every device |
