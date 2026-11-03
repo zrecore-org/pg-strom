@@ -208,15 +208,7 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 				gen_fail(g, "instruction %u: backward jump", i);
 				return;
 			}
-			if (getenv("PGSTROM_GPUSERV_SPEC_ANDOR"))
-			{
-				/* experiment: the interpreter's own AND / OR through vm_step(); a changed ip is the jump */
-				sb_printf(o, "        uint ipx = %uu;\n"
-							 "        uint e = vm_step(%uu, %uu, %uu, %uu, %uu, %uu, ipx, regs);\n"
-							 "        if (e != 0u)\n            return e;\n"
-							 "        if (ipx != %uu)\n            j%u = true;\n", i + 1, op, dst, ra, rb, k0, k1, i + 1, i);
-			}
-			else if (op == SOP_AND)
+			if (op == SOP_AND)
 				sb_printf(o,
 						  "        if (regs[%u].isnull != 0)\n            regs[%u].isnull = 1;\n"
 						  "        else if (regs[%u].v == 0)\n        {\n"
@@ -228,21 +220,6 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 						  "        else if (regs[%u].v != 0)\n        {\n"
 						  "            regs[%u].v = 1;\n            regs[%u].isnull = 0;\n            j%u = true;\n        }\n",
 						  ra, dst, ra, dst, dst, i);
-		}
-		else if (getenv("PGSTROM_GPUSERV_SPEC_NUMINLINE") && op == SOP_NUMCONST)
-		{
-			sb_printf(o,
-					  "        regs[%u].v = int64_t(uint64_t(%uu) | (uint64_t(%uu) << 32));\n"
-					  "        regs[%u].sc = %uu;\n        regs[%u].isnull = %uu;\n", dst, k0, k1, dst, rb, dst, ra);
-		}
-		else if (getenv("PGSTROM_GPUSERV_SPEC_NUMINLINE") && op == SOP_NUMCMP)
-		{
-			sb_printf(o,
-					  "        Reg x = regs[%u];\n        Reg y = regs[%u];\n"
-					  "        if ((x.isnull | y.isnull) != 0)\n            regs[%u].isnull = 1;\n"
-					  "        else\n        {\n            regs[%u].isnull = 0;\n"
-					  "            regs[%u].v = b2l(cmp_result(num_cmp(x.v, x.sc, y.v, y.sc), %uu));\n        }\n",
-					  ra, rb, dst, dst, dst, k0);
 		}
 		else
 		{
@@ -839,8 +816,6 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 		return -1;
 	}
 	g.nregs = instruction_registers(w, prog->nwords, g.nregs);
-	if (getenv("PGSTROM_GPUSERV_SPEC_MINREGS") && g.nregs < (uint32_t) atoi(getenv("PGSTROM_GPUSERV_SPEC_MINREGS")))
-		g.nregs = (uint32_t) atoi(getenv("PGSTROM_GPUSERV_SPEC_MINREGS"));
 	if (g.nregs > SCAN_MAX_REGS)
 	{
 		gen_fail(&g, "the program names %u registers", g.nregs);

@@ -570,7 +570,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = int64_t(uint64_t(k0) | (uint64_t(k1) << 32));
         regs[dst].sc = rb;
         regs[dst].isnull = ra;
-        break;
+        return 0;
     case SOP_NUMCMP:
     {
         Reg x = regs[ra];
@@ -578,11 +578,11 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         regs[dst].isnull = 0;
         regs[dst].v = b2l(cmp_result(num_cmp(x.v, x.sc, y.v, y.sc), k0));
-        break;
+        return 0;
     }
     case SOP_NUMARITH:
     {
@@ -595,7 +595,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 regs[dst].v = (k0 == SOP_NUMOP_NEG || x.v < 0) ? -x.v : x.v;
                 regs[dst].sc = x.sc;
             }
-            break;
+            return 0;
         }
         if (k0 >= SOP_NUMOP_CEIL)
         {
@@ -607,13 +607,13 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 regs[dst].v = ur;
                 regs[dst].sc = 0;
             }
-            break;
+            return 0;
         }
         Reg y = regs[rb];
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         int64_t a = x.v;
         int64_t b = y.v;
@@ -654,7 +654,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = r;
         regs[dst].sc = sc;
         regs[dst].isnull = 0;
-        break;
+        return 0;
     }
     case SOP_NUMDIV:
     {
@@ -663,7 +663,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         int64_t qr;
         uint qsc;
@@ -673,7 +673,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = qr;
         regs[dst].sc = qsc;
         regs[dst].isnull = 0;
-        break;
+        return 0;
     }
     case SOP_NUMRND:
     {
@@ -682,7 +682,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         int64_t qr;
         uint qsc;
@@ -692,7 +692,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = qr;
         regs[dst].sc = qsc;
         regs[dst].isnull = 0;
-        break;
+        return 0;
     }
     case SOP_I2N:
     {
@@ -705,7 +705,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             regs[dst].v = x.v;
             regs[dst].sc = 0;
         }
-        break;
+        return 0;
     }
     case SOP_N2I:
     {
@@ -733,7 +733,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 return SOP_RECHECK_CODE;            // PostgreSQL's range error: the backend raises it
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
     default:
         return op | 0x80000000u;
@@ -768,7 +768,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 r = d * 86400000000;
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
     case SOP_TS2D:
     {
@@ -790,7 +790,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             }
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
     case SOP_DATEOP:
     {
@@ -799,7 +799,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         regs[dst].isnull = 0;
         bool ainf = (x.v == 2147483647 || x.v == -2147483648);
@@ -818,13 +818,13 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 return k1 | (SOP_ERR_DATERANGE << 16);
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
 
     case SOP_CONSTSTR:
         regs[dst].v = int64_t(uint64_t(prog[20] * 4u + k0) | (uint64_t(k1) << 32) | (uint64_t(3u) << 60));
         regs[dst].isnull = 0;
-        break;
+        return 0;
     case SOP_STRCMP:
     {
         Reg x = regs[ra];
@@ -832,7 +832,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         uint sa = str_src(x), sb = str_src(y);
         uint oa = str_off(x), ob = str_off(y);
@@ -853,7 +853,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         }
         regs[dst].isnull = 0;
         regs[dst].v = b2l(cmp_result(c, k0));
-        break;
+        return 0;
     }
     case SOP_STRLIKE:
     {
@@ -862,7 +862,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         uint sa = str_src(x), sb = str_src(y);
         uint oa = str_off(x), ob = str_off(y);
@@ -889,7 +889,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                     if (ldb_s(sa, oa + i) == first && str_memcmp(sa, oa + i, sb, ob, lb) == 0)
                     {
                         res = true;
-                        break;
+                        return 0;
                     }
                 }
             }
@@ -898,7 +898,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             res = !res;
         regs[dst].isnull = 0;
         regs[dst].v = b2l(res);
-        break;
+        return 0;
     }
     case SOP_STRLEN:
     {
@@ -917,7 +917,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             }
             regs[dst].v = int64_t(n);
         }
-        break;
+        return 0;
     }
     default:
         if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
@@ -956,6 +956,11 @@ bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg r
     return true;
 }
 
+// NOTE for vm_num(), vm_ext() and vm_step(): a case ends with "return 0;", not "break;". With constant
+// operands (the specialized kernels) Slang folds the switch, and a "break" in the middle of a case that sits
+// in a nested "if" came out of its SPIR-V structurizer as a fall-through (the code after the "if" ran for
+// the NULL branch too: `n1 = 12.34 or n1 = 0` counted the rows with a NULL n1). A "break" that leaves an
+// inner loop or switch (ARITH's switch on the operator) is not affected and stays.
 // Executes one instruction { op, dst, ra, rb, k0, k1 }; AND / OR set ip to their jump target. Returns the
 // FuncOpCode of a failing function, 0 on success. vm_run() below interprets a program with it; the
 // specialized kernels (specialize.c) call it with constant operands, so the generated code runs
@@ -971,7 +976,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
         case SOP_CONST:
             regs[dst].v = int64_t(uint64_t(k0) | (uint64_t(k1) << 32));
             regs[dst].isnull = ra;
-            break;
+            return 0;
 
         // three-valued AND / OR as accumulate-and-jump
         case SOP_AND:
@@ -983,7 +988,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 regs[dst].isnull = 0;
                 ip = rb;
             }
-            break;
+            return 0;
         case SOP_OR:
             if (regs[ra].isnull != 0)
                 regs[dst].isnull = 1;
@@ -993,22 +998,22 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 regs[dst].isnull = 0;
                 ip = rb;
             }
-            break;
+            return 0;
         case SOP_NOT:
             regs[dst].isnull = regs[ra].isnull;
             regs[dst].v = b2l(regs[ra].v == 0);
-            break;
+            return 0;
         case SOP_ISNULL:
             regs[dst].v = b2l(regs[ra].isnull != 0);
             regs[dst].isnull = 0;
-            break;
+            return 0;
         case SOP_ISNOTNULL:
             regs[dst].v = b2l(regs[ra].isnull == 0);
             regs[dst].isnull = 0;
-            break;
+            return 0;
         case SOP_MOV:
             regs[dst] = regs[ra];
-            break;
+            return 0;
 
         case SOP_CAST:
         {
@@ -1025,7 +1030,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                     regs[dst].v = x.v;
                 }
             }
-            break;
+            return 0;
         }
 
         case SOP_CMPI:
@@ -1039,7 +1044,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 regs[dst].isnull = 0;
                 regs[dst].v = b2l(cmp_result(x.v < y.v ? -1 : (x.v > y.v ? 1 : 0), k0));
             }
-            break;
+            return 0;
         }
 
         case SOP_CMPF:
@@ -1053,7 +1058,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 regs[dst].isnull = 0;
                 regs[dst].v = b2l(cmp_result(f4cmp(asfloat(uint(x.v)), asfloat(uint(y.v))), k0));
             }
-            break;
+            return 0;
         }
 
         case SOP_ARITH:
@@ -1063,7 +1068,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
             if ((x.isnull | y.isnull) != 0)
             {
                 regs[dst].isnull = 1;
-                break;
+                return 0;
             }
             uint    aop = k0 & 0xffu;
             uint    w   = k0 >> 8;
@@ -1147,7 +1152,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 return k1 | (why << 16);
             regs[dst].v = r;
             regs[dst].isnull = 0;
-            break;
+            return 0;
         }
 
         case SOP_FARITH:
@@ -1157,7 +1162,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
             if ((x.isnull | y.isnull) != 0)
             {
                 regs[dst].isnull = 1;
-                break;
+                return 0;
             }
             float a = asfloat(uint(x.v));
             float b = asfloat(uint(y.v));
@@ -1195,13 +1200,13 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 return k1 | (why << 16);
             regs[dst].v = int64_t(asuint(r));
             regs[dst].isnull = 0;
-            break;
+            return 0;
         }
 
         case SOP_HASHINIT:
             regs[dst].v = int64_t(0xffffffffu);
             regs[dst].isnull = 0;
-            break;
+            return 0;
         case SOP_HASHMERGE:
             if (regs[ra].isnull == 0)
             {
@@ -1210,10 +1215,10 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 uint acc = uint(regs[dst].v);
                 regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
             }
-            break;
+            return 0;
         case SOP_HASHFIN:
             regs[dst].v = int64_t(uint(regs[dst].v) ^ 0xffffffffu);
-            break;
+            return 0;
 
         case SOP_I2F:
         {
@@ -1221,7 +1226,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
             regs[dst].isnull = x.isnull;
             if (x.isnull == 0)
                 regs[dst].v = int64_t(asuint(float(x.v)));
-            break;
+            return 0;
         }
 
         case SOP_F2I:
@@ -1238,7 +1243,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                     return k1 | (SOP_ERR_INTRANGE << 16);
                 regs[dst].v = r;
             }
-            break;
+            return 0;
         }
 
         default:
@@ -1246,7 +1251,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
             uint e = vm_ext(op, dst, ra, rb, k0, k1, regs);
             if (e != 0)
                 return e;
-            break;
+            return 0;
         }
         }
         return 0;
