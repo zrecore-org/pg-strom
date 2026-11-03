@@ -17,7 +17,7 @@ JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=o
 JOINPAT="Custom Scan (GpuJoin)"
 ANYPLAN=0
 TAIL
-echo ". \"$D/numeric_tests.inc\"" >> "$GEN"
+echo ". \"$D/${NUMINC:-numeric_tests.inc}\"" >> "$GEN"
 cat >> "$GEN" <<'TAIL'
 [ -z "$KEEP" ] && stop
 echo

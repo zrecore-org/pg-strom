@@ -147,4 +147,17 @@ int  gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *
 					 const void *pc, uint32_t gx, uint32_t gy, uint32_t gz,
 					 double *elapsed_ms);
 
+/*
+ * A sequence of dispatches submitted at once with a compute-to-compute memory barrier after each (steps
+ * that share a pipeline share its buffers). One fence wait for the whole sequence (gpu_vk_seq.c).
+ */
+typedef struct gpu_vk_step
+{
+	gpu_vk_pipeline *p;
+	gpu_vk_buffer *const *bufs;
+	const void	   *pc;
+	uint32_t		gx, gy, gz;
+} gpu_vk_step;
+int  gpu_vk_dispatch_seq(gpu_vk_ctx *ctx, const gpu_vk_step *steps, uint32_t nsteps, double *elapsed_ms);
+
 #endif	/* GPU_VK_H */

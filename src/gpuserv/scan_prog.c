@@ -619,6 +619,11 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			if (emit(b, SOP_NUMARITH, dst, ra, rb, fc.kind, kexp->opcode) < 0)
 				return -1;
 			break;
+		case SOP_NUMDIV:
+		case SOP_NUMRND:
+			if (emit(b, fc.cls, dst, ra, rb, fc.kind, kexp->opcode) < 0)
+				return -1;
+			break;
 		case SOP_ARITH:
 			if (emit(b, SOP_ARITH, dst, ra, rb, fc.kind | (fc.width << 8), kexp->opcode) < 0)
 				return -1;
@@ -663,8 +668,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	uint32_t	agg_tab[4 * SCAN_AGG_MAX];
 	int			nagg = 0, nattrs_out = 0;
 	int			nkeys = 0;
-	uint32_t	key_reg_tab[SCAN_GROUP_KEYS];
+	uint32_t	key_reg_tab[2 * SCAN_GROUP_KEYS];	/* registers, then (numeric key) scale + 1 or 0 */
 	int			key_slot[SCAN_GROUP_KEYS];
+	int			key_isnum[SCAN_GROUP_KEYS];
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));
@@ -682,7 +688,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			 session->xpu_task_flags);
 		goto error;
 	}
-	if (session->xpucode_gpusort_keydesc || session->xpucode_join_quals_packed)
+	/* GPU-Sort is applied to the groups of a GpuPreAgg by the service itself (gpusort.c), not by the scan */
+	if ((session->xpucode_gpusort_keydesc && !agg_mode) || session->xpucode_join_quals_packed)
 	{
 		fail(&b, "join and sort are not implemented by the Vulkan service yet");
 		goto error;
@@ -783,16 +790,21 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					goto error;
 				}
 				vt = reg_vtype(kk->exptype, &bytes);
-				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL)
+				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_NUM)
 				{
 					fail(&b, "GROUP BY key of an unsupported type (opcode type %u)", kk->exptype);
 					goto error;
 				}
+				key_isnum[nkeys] = (vt == SOP_VT_NUM);
+				prog->key_scale[nkeys] = -1;
+				key_reg_tab[nkeys] = 0;				/* (the scale words follow the registers; filled below) */
 				kin = KEXP_FIRST_ARG(kk);
 				if (kin->opcode == FuncOpCode__VarExpr &&
 					kin->u.v.var_slot_id < b.nslots && b.slot_resno[kin->u.v.var_slot_id] > 0)
 				{
 					b.slot_used[kin->u.v.var_slot_id] = 1;
+					b.slot_valread[kin->u.v.var_slot_id] = 1;
+					b.slot_strval[kin->u.v.var_slot_id] = 1;		/* a numeric key is read, not only its NULL-ness */
 					r = (int) kin->u.v.var_slot_id;
 				}
 				else
@@ -845,6 +857,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					goto error;
 				}
 				b.slot_used[kin->u.v.var_slot_id] = 1;
+				b.slot_valread[kin->u.v.var_slot_id] = 1;
+				b.slot_strval[kin->u.v.var_slot_id] = 1;
 				slot_reg[slot] = (int) kin->u.v.var_slot_id;
 			}
 			else
@@ -887,6 +901,19 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					goto error;
 				}
 				prog->key_of_col[i] = (int8_t) kidx;
+				prog->key_scale[kidx] = -1;
+				key_reg_tab[nkeys + kidx] = 0;
+				if (key_isnum[kidx])
+				{
+					/* a numeric key has the scale the plan derived (typmod of the output column) */
+					if (d->typmod < (int32_t) 4)
+					{
+						fail(&b, "a numeric GROUP BY key without a known scale");
+						goto error;
+					}
+					prog->key_scale[kidx] = (int) (((uint32_t)(d->typmod - 4)) & 0x7ffU);
+					key_reg_tab[nkeys + kidx] = (uint32_t) prog->key_scale[kidx] + 1;
+				}
 				continue;
 			}
 			if (d->action == KAGG_ACTION__VREF_NOKEY)
@@ -895,6 +922,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				goto error;
 			}
 			prog->agg_of_col[i] = (int8_t) nagg;
+			prog->agg_scale[nagg] = -1;
 			int		sources[2] = {d->arg0_slot_id, d->filter_slot_id};
 			int		regs_of[2] = {-1, -1};
 			uint32_t	cls;
@@ -907,6 +935,17 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				case KAGG_ACTION__PSUM_INT64:
 				case KAGG_ACTION__PAVG_INT:
 				case KAGG_ACTION__PAVG_INT64:	cls = 3; break;
+				case KAGG_ACTION__PSUM_NUMERIC:
+				case KAGG_ACTION__PAVG_NUMERIC:
+					/* a sum of numerics of one known scale is a sum of their unscaled int64 values */
+					if (d->typmod < (int32_t) 4)
+					{
+						fail(&b, "a numeric aggregate without a known scale");
+						goto error;
+					}
+					prog->agg_scale[nagg] = (int) (((uint32_t)(d->typmod - 4)) & 0x7ffU);
+					cls = 3;
+					break;
 				case KAGG_ACTION__PMIN_INT32:
 				case KAGG_ACTION__PMIN_INT64:	cls = 4; break;
 				case KAGG_ACTION__PMAX_INT32:
@@ -938,6 +977,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 						goto error;
 					}
 					b.slot_used[sl] = 1;
+					b.slot_valread[sl] = 1;
+					b.slot_strval[sl] = 1;
 					regs_of[k] = sl;
 				}
 				else
@@ -954,9 +995,15 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			agg_tab[4 * nagg + 0] = cls;
 			agg_tab[4 * nagg + 1] = regs_of[0] < 0 ? 0xffffffffU : (uint32_t) regs_of[0];
 			agg_tab[4 * nagg + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
-			agg_tab[4 * nagg + 3] = 0;
+			agg_tab[4 * nagg + 3] = (prog->agg_scale[nagg] >= 0) ? (uint32_t) prog->agg_scale[nagg] + 1 : 0;
 			nagg++;
 		}
+		for (int k = 0; k < nkeys; k++)
+			if (key_isnum[k] && prog->key_scale[k] < 0)
+			{
+				fail(&b, "a numeric GROUP BY key %d is not an output column", k + 1);
+				goto error;
+			}
 		prog->agg_mode = 1;
 		prog->nagg = nagg;
 		prog->nkeys = nkeys;
@@ -1102,7 +1149,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		}
 	}
 
-	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys + b.pool_len / 4;
+	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys + b.pool_len / 4;
 	w = calloc(nwords, sizeof(uint32_t));
 	if (!w)
 	{
@@ -1123,7 +1170,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	w[11] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp;	/* aggoff */
 	w[12] = nkeys;
 	w[13] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;	/* keyoff */
-	w[20] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;	/* constant pool (strings) */
+	w[20] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys;	/* constant pool (strings) */
 	for (int c = 0; c < ncols; c++)
 	{
 		const kern_colmeta *cm = &kds_src->colmeta[c];
@@ -1141,9 +1188,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	memcpy(w + PROG_HDR_WORDS + ncols, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp, agg_tab, sizeof(uint32_t) * 4 * nagg);
-	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg, key_reg_tab, sizeof(uint32_t) * nkeys);
+	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg, key_reg_tab, sizeof(uint32_t) * 2 * nkeys);
 	if (b.pool_len > 0)
-		memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys, b.pool, b.pool_len);
+		memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys, b.pool, b.pool_len);
 
 	prog->words = w;
 	prog->nwords = nwords;
@@ -1416,7 +1463,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		fail(&b, "not a GpuJoin session");
 		goto error;
 	}
-	if (session->xpucode_gpusort_keydesc || (agg_mode != (session->xpucode_groupby_actions != 0)))
+	if ((session->xpucode_gpusort_keydesc && !agg_mode) || (agg_mode != (session->xpucode_groupby_actions != 0)))
 	{
 		fail(&b, "sort on top of a join, or a join session with aggregate actions, is not implemented by the Vulkan service");
 		goto error;

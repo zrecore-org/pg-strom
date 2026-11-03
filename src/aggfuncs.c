@@ -227,8 +227,29 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
 	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
+	/*
+	 * fmin_i1 / fmin_i2 / fmin_i4 / fmin_i8 (and fmax_*) are all bound to this symbol by the old SQL
+	 * scripts, so the width comes from the declared result type. (Before, every one of them range-checked
+	 * as int1: the final projection of a GpuPreAgg without an Aggregate node, i.e. GPU-Sort, failed
+	 * for min/max of int2/int4/int8.)
+	 */
+	switch (get_fn_expr_rettype(fcinfo->flinfo))
+	{
+		case INT2OID:
+			if (state->value < SHRT_MIN || state->value > SHRT_MAX)
+				elog(ERROR, "min/max(int2) out of range");
+			PG_RETURN_INT16((int16) state->value);
+		case INT4OID:
+			if (state->value < INT_MIN || state->value > INT_MAX)
+				elog(ERROR, "min/max(int4) out of range");
+			PG_RETURN_INT32((int32) state->value);
+		case INT8OID:
+			PG_RETURN_INT64(state->value);
+		default:
+			break;		/* int1 */
+	}
 	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
-		elog(ERROR, "min(int8) out of range");
+		elog(ERROR, "min/max(int1) out of range");
 	PG_RETURN_INT32(state->value);
 }
 
@@ -356,35 +377,186 @@ pgstrom_partial_sum_fp(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
+/*
+ * sum(numeric), avg(numeric) partial state (kagg_state__psum_numeric_packed).
+ *
+ * attrs & WEIGHT is the display scale (dscale) of the sum, which PostgreSQL's sum()/avg() return: the maximum
+ * dscale of the inputs. 'sum' is the exact sum as an unscaled 128-bit integer at that scale. The GPU service
+ * (a GROUP BY or a whole-table aggregate over numeric(p,s) columns or expressions of a known scale) builds
+ * the same state. A sum that does not fit 128 bits, or an input that does not, switches the state to the BIG
+ * form: the struct is followed by the sum as a numeric varlena (attrs & BIG). NaN, +Infinity and -Infinity
+ * are flags (they are never rows of the GPU: such rows are evaluated by the backend).
+ */
+#define __PAGG_NUMERIC_ATTRS__BIG		0x080000U
+
+static inline int
+__psum_numeric_dscale(const kagg_state__psum_numeric_packed *st)
+{
+	return (int)(st->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
+}
+
+/* the largest power of ten that fits an int128 is 10^38 */
+static bool
+__int128_mul_pow10(int128_t *v, int n)
+{
+	while (n-- > 0)
+		if (__builtin_mul_overflow(*v, (int128_t) 10, v))
+			return false;
+	return true;
+}
+
+/* an unscaled int128 and its scale as a numeric (through the text form, which keeps the dscale) */
+static Datum
+__int128_to_numeric(int128_t value, int dscale)
+{
+	char		buf[160];
+	char		digits[48];
+	int			nd = 0, pos = 0;
+	bool		neg = (value < 0);
+	unsigned __int128 u = neg ? -(unsigned __int128) value : (unsigned __int128) value;
+
+	do {
+		digits[nd++] = '0' + (int)(u % 10);
+		u /= 10;
+	} while (u != 0);
+	while (nd <= dscale)
+		digits[nd++] = '0';					/* at least one digit before the decimal point */
+	if (neg)
+		buf[pos++] = '-';
+	for (int i = nd - 1; i >= 0; i--)
+	{
+		buf[pos++] = digits[i];
+		if (i == dscale && dscale > 0)
+			buf[pos++] = '.';
+	}
+	buf[pos] = '\0';
+	return DirectFunctionCall3(numeric_in, CStringGetDatum(buf), ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
+}
+
+/* the sum of a state as a numeric */
+static Datum
+__psum_numeric_to_datum(const kagg_state__psum_numeric_packed *st)
+{
+	if (st->attrs & __PAGG_NUMERIC_ATTRS__BIG)
+	{
+		const struct varlena *vl = (const struct varlena *)((const char *) st + sizeof(*st));
+		struct varlena *copy = palloc(VARSIZE_ANY(vl));
+
+		memcpy(copy, vl, VARSIZE_ANY(vl));
+		return PointerGetDatum(copy);
+	}
+	return __int128_to_numeric(__fetch_int128_packed(&st->sum), __psum_numeric_dscale(st));
+}
+
+/* a BIG state from a numeric datum */
+static kagg_state__psum_numeric_packed *
+__psum_numeric_make_big(MemoryContext cxt, Datum numeric, uint32_t attrs, uint64_t nitems)
+{
+	struct varlena *vl = (struct varlena *) PG_DETOAST_DATUM(numeric);
+	Size		len = VARSIZE_ANY(vl);
+	kagg_state__psum_numeric_packed *r;
+	MemoryContext oldcxt = MemoryContextSwitchTo(cxt);
+
+	r = palloc0(sizeof(*r) + len);
+	MemoryContextSwitchTo(oldcxt);
+	r->attrs = (attrs | __PAGG_NUMERIC_ATTRS__BIG);
+	r->nitems = nitems;
+	memcpy((char *) r + sizeof(*r), vl, len);
+	SET_VARSIZE(r, sizeof(*r) + len);
+	return r;
+}
+
+/*
+ * Decode a numeric into an unscaled int128 at its display scale: 0 if it is a plain value, 1 if it is
+ * NaN / +Inf / -Inf (*p_special is the flag), 2 if it does not fit 128 bits (or has digits beyond its dscale).
+ */
+static int
+__numeric_to_scaled_int128(Numeric num, uint32_t *p_dscale, int128_t *p_value, uint32_t *p_special)
+{
+	const varlena *addr = (const varlena *) num;
+	uint32_t	len = VARSIZE_ANY_EXHDR(addr);
+	NumericChoice *nc = (NumericChoice *) VARDATA_ANY(addr);
+	uint16_t	n_head;
+	int128_t	acc = 0;
+	int			nd, e;
+	NumericDigit *digits;
+
+	if (len < sizeof(uint16_t))
+		elog(ERROR, "corrupted numeric header");
+	n_head = __Fetch(&nc->n_header);
+	*p_special = 0;
+	*p_dscale = 0;
+	*p_value = 0;
+	if (NUMERIC_IS_SPECIAL(n_head))
+	{
+		if (NUMERIC_IS_NAN(n_head))
+			*p_special = __PAGG_NUMERIC_ATTRS__NAN;
+		else if (NUMERIC_IS_PINF(n_head))
+			*p_special = __PAGG_NUMERIC_ATTRS__PINF;
+		else if (NUMERIC_IS_NINF(n_head))
+			*p_special = __PAGG_NUMERIC_ATTRS__NINF;
+		else
+			elog(ERROR, "unknown special numeric value");
+		return 1;
+	}
+	digits = NUMERIC_DIGITS(nc, n_head);
+	nd = NUMERIC_NDIGITS(n_head, len);
+	*p_dscale = NUMERIC_DSCALE(nc, n_head);
+	if (*p_dscale > __PAGG_NUMERIC_ATTRS__WEIGHT)
+		return 2;
+	for (int i = 0; i < nd; i++)
+	{
+		NumericDigit dig = __Fetch(&digits[i]);
+
+		if (__builtin_mul_overflow(acc, (int128_t) PG_NBASE, &acc) ||
+			__builtin_add_overflow(acc, (int128_t) dig, &acc))
+			return 2;
+	}
+	e = PG_DEC_DIGITS * (NUMERIC_WEIGHT(nc, n_head) - nd + 1) + (int) *p_dscale;
+	if (acc != 0)
+	{
+		if (e >= 0)
+		{
+			if (!__int128_mul_pow10(&acc, e))
+				return 2;
+		}
+		else
+		{
+			int128_t	p = 1;
+
+			if (-e > 38 || !__int128_mul_pow10(&p, -e) || acc % p != 0)
+				return 2;
+			acc /= p;
+		}
+	}
+	if (NUMERIC_SIGN(n_head) == NUMERIC_NEG)
+		acc = -acc;
+	*p_value = acc;
+	return 0;
+}
+
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_sum_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_numeric_packed *r;
-	uint8_t		kind;
-	int16_t		weight;
+	Numeric		num;
+	uint32_t	dscale, special;
 	int128_t	value;
-	const char *emsg;
+	int			rc;
 
-	if (PG_NARGS() > 1 && !PG_GETARG_BOOL(1))
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
 		PG_RETURN_NULL();
-	emsg = __decimal_from_varlena(&kind,
-								  &weight,
-								  &value,
-								  (varlena *)PG_GETARG_NUMERIC(0));
-	if (emsg)
-		elog(ERROR, "%s: %s", __FUNCTION__, emsg);
-
+	num = PG_GETARG_NUMERIC(0);
+	rc = __numeric_to_scaled_int128(num, &dscale, &value, &special);
+	if (rc == 2)
+		PG_RETURN_POINTER(__psum_numeric_make_big(CurrentMemoryContext, NumericGetDatum(num),
+												  (dscale & __PAGG_NUMERIC_ATTRS__WEIGHT), 1));
 	r = palloc0(sizeof(kagg_state__psum_numeric_packed));
-	if (kind == XPU_NUMERIC_KIND__NAN)
-		r->attrs |= __PAGG_NUMERIC_ATTRS__NAN;
-	else if (kind == XPU_NUMERIC_KIND__POS_INF)
-		r->attrs |= __PAGG_NUMERIC_ATTRS__PINF;
-	else if (kind == XPU_NUMERIC_KIND__NEG_INF)
-		r->attrs |= __PAGG_NUMERIC_ATTRS__NINF;
+	if (rc == 1)
+		r->attrs = special;
 	else
 	{
-		Assert(kind == XPU_NUMERIC_KIND__VALID);
-		r->attrs |= ((uint32_t)weight & __PAGG_NUMERIC_ATTRS__WEIGHT);
+		r->attrs = (dscale & __PAGG_NUMERIC_ATTRS__WEIGHT);
 		__store_int128_packed(&r->sum, value);
 	}
 	r->nitems = 1;
@@ -473,27 +645,6 @@ pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
 	kagg_state__psum_numeric_packed *state;
 	kagg_state__psum_numeric_packed *arg;
 	MemoryContext		aggcxt;
-	static uint64_t		__pow10[] = {
-		1UL,						/* 10^0 */
-		10UL,						/* 10^1 */
-		100UL,						/* 10^2 */
-		1000UL,						/* 10^3 */
-		10000UL,					/* 10^4 */
-		100000UL,					/* 10^5 */
-		1000000UL,					/* 10^6 */
-		10000000UL,					/* 10^7 */
-		100000000UL,				/* 10^8 */
-		1000000000UL,				/* 10^9 */
-		10000000000UL,				/* 10^10 */
-		100000000000UL,				/* 10^11 */
-		1000000000000UL,			/* 10^12 */
-		10000000000000UL,			/* 10^13 */
-		100000000000000UL,			/* 10^14 */
-		1000000000000000UL,			/* 10^15 */
-		10000000000000000UL,		/* 10^16 */
-		100000000000000000UL,		/* 10^17 */
-		1000000000000000000UL,		/* 10^18 */
-	};
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
@@ -502,54 +653,56 @@ pgstrom_fsum_trans_numeric(PG_FUNCTION_ARGS)
 		if (PG_ARGISNULL(1))
 			PG_RETURN_NULL();
 		arg = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(1);
-		state = MemoryContextAlloc(aggcxt, sizeof(*state));
-		memcpy(state, arg, sizeof(*state));
+		state = MemoryContextAlloc(aggcxt, VARSIZE(arg));
+		memcpy(state, arg, VARSIZE(arg));
 	}
 	else
 	{
-		uint32_t	special;
-
 		state = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(0);
 		if (!PG_ARGISNULL(1))
 		{
+			uint32_t	special;
+			int			ds_s, ds_a, ds;
+			int128_t	vs = 0, va = 0;
+			bool		big;
+
 			arg = (kagg_state__psum_numeric_packed *)PG_GETARG_BYTEA_P(1);
 			special = (arg->attrs & __PAGG_NUMERIC_ATTRS__MASK);
+			ds_s = __psum_numeric_dscale(state);
+			ds_a = __psum_numeric_dscale(arg);
+			ds = Max(ds_s, ds_a);
 			if (special != 0)
-				state->attrs |= special;
+			{
+				state->attrs |= special;			/* NaN / Infinity: the value does not matter any more */
+				state->nitems += arg->nitems;
+				PG_RETURN_POINTER(state);
+			}
+			/* the exact sum at the larger scale; anything that does not fit 128 bits goes to numeric */
+			big = ((state->attrs | arg->attrs) & __PAGG_NUMERIC_ATTRS__BIG) != 0;
+			if (!big)
+			{
+				vs = __fetch_int128_packed(&state->sum);
+				va = __fetch_int128_packed(&arg->sum);
+				if (!__int128_mul_pow10(&vs, ds - ds_s) ||
+					!__int128_mul_pow10(&va, ds - ds_a) ||
+					__builtin_add_overflow(vs, va, &vs))
+					big = true;
+			}
+			if (!big)
+			{
+				state->attrs = ((state->attrs & ~__PAGG_NUMERIC_ATTRS__WEIGHT) | (uint32_t) ds);
+				__store_int128_packed(&state->sum, vs);
+				state->nitems += arg->nitems;
+			}
 			else
 			{
-				int16_t		weight_s = (int16_t)(state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-				int16_t		weight_a = (int16_t)(arg->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-				int128_t	ival = __fetch_int128_packed(&arg->sum);
+				Datum		a = __psum_numeric_to_datum(state);
+				Datum		b = __psum_numeric_to_datum(arg);
+				Datum		sum = DirectFunctionCall2(numeric_add, a, b);
+				uint32_t	attrs = (state->attrs & __PAGG_NUMERIC_ATTRS__MASK) | (uint32_t) ds;
 
-				if (weight_s > weight_a)
-				{
-					int		shift = (weight_s - weight_a);
-
-					while (shift > 0)
-					{
-						int		k = Min(shift, 18);
-
-						ival *= (int128_t)__pow10[k];
-						shift -= k;
-					}
-				}
-				else if (weight_s < weight_a)
-				{
-					int		shift = (weight_a - weight_s);
-
-					while (shift > 0)
-					{
-						int		k = Min(shift, 18);
-
-						ival /= (int128_t)__pow10[k];
-						shift -= k;
-					}
-				}
-				__store_int128_packed(&state->sum, ival +
-									  __fetch_int128_packed(&state->sum));
+				state = __psum_numeric_make_big(aggcxt, sum, attrs, state->nitems + arg->nitems);
 			}
-			state->nitems += arg->nitems;
 		}
 	}
 	PG_RETURN_POINTER(state);
@@ -625,7 +778,6 @@ pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_numeric_packed *state;
 	uint32_t	special;
-	Datum		datum;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -643,21 +795,11 @@ pgstrom_fsum_final_numeric(PG_FUNCTION_ARGS)
 		else if (special == __PAGG_NUMERIC_ATTRS__NINF)
 			str = "-Inf";
 		else
-			str = "NaN";
-		datum = DirectFunctionCall1(numeric_in, CStringGetDatum(str));
+			str = "NaN";			/* NaN, or +Infinity and -Infinity together */
+		PG_RETURN_DATUM(DirectFunctionCall3(numeric_in, CStringGetDatum(str),
+											ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1)));
 	}
-	else
-	{
-		uint8_t		kind = XPU_NUMERIC_KIND__VALID;
-		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		int128_t	ival = __fetch_int128_packed(&state->sum);
-		int			bufsz = __decimal_to_varlena(NULL, kind, weight, ival);
-		char	   *buf = palloc(bufsz);
-
-		__decimal_to_varlena(buf, kind, weight, ival);
-		datum = PointerGetDatum(buf);
-	}
-	PG_RETURN_DATUM(datum);
+	PG_RETURN_DATUM(__psum_numeric_to_datum(state));
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -706,7 +848,6 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 {
 	kagg_state__psum_numeric_packed *state;
 	uint32_t	special;
-	Datum		datum;
 
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
@@ -725,23 +866,13 @@ pgstrom_favg_final_numeric(PG_FUNCTION_ARGS)
 			str = "-Inf";
 		else
 			str = "NaN";
-		datum = DirectFunctionCall1(numeric_in, CStringGetDatum(str));
+		PG_RETURN_DATUM(DirectFunctionCall3(numeric_in, CStringGetDatum(str),
+											ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1)));
 	}
-	else
-	{
-		uint8_t		kind = XPU_NUMERIC_KIND__VALID;
-		int16_t		weight = (state->attrs & __PAGG_NUMERIC_ATTRS__WEIGHT);
-		int128_t	ival = __fetch_int128_packed(&state->sum);
-		int			bufsz = __decimal_to_varlena(NULL, kind, weight, ival);
-		Numeric		sum = palloc(bufsz);
-		Numeric		div = int64_to_numeric(state->nitems);
-
-		__decimal_to_varlena((char *)sum, kind, weight, ival);
-		datum = DirectFunctionCall2(numeric_div,
-									NumericGetDatum(sum),
-									NumericGetDatum(div));
-	}
-	PG_RETURN_DATUM(datum);
+	/* as numeric_avg(): the sum (at the display scale of the inputs) divided by the number of inputs */
+	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div,
+										__psum_numeric_to_datum(state),
+										NumericGetDatum(int64_to_numeric((int64) state->nitems))));
 }
 
 /*

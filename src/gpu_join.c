@@ -711,8 +711,7 @@ tryAddSimpleGpuJoinPath(PlannerInfo *root,
 	outer_path = pgstrom_find_custom_path(root, outer_rel, be_parallel);
 	if (!outer_path)
 		return;
-	if (pgstromPathScansArrowFdw(root, outer_path))
-		return;		/* the Vulkan service joins heap pages only */
+	/* an Arrow_Fdw / Parquet outer relation is joined by the service as well (arrow_exec.c) */
 	/*
 	 * unless pg_strom.enable_partitionwise_gpujoin is enabled,
 	 * we don't make a path for partitioned outer relation.
@@ -836,6 +835,12 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 			 pp_info->xpu_task_flags);
 		return;		/* feture available on GPU only */
 	}
+	/*
+	 * The Vulkan service sorts the groups of a GpuPreAgg (gpu_preagg.c, gpusort.c); sorting the rows of a
+	 * GpuScan / GpuJoin (a pinned final buffer in the CUDA service) is not implemented.
+	 */
+	elog(DEBUG1, "gpusort: not implemented for GpuScan/GpuJoin results by the Vulkan service");
+	return;
 	/* pick up upper sortkeys */
 	if (root->window_pathkeys != NIL)
         sortkeys_upper = root->window_pathkeys;

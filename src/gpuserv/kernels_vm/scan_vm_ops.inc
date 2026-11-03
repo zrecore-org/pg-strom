@@ -45,6 +45,11 @@
  *   NUMARITH dst = a op b (k0 = SCANVM_ARITH_PL / MI / MUL) or, with k0 = SCANVM_NUMOP_NEG / ABS, op a
  *   I2N      dst = (numeric) a, scale 0
  *   N2I      dst = a rounded half away from zero to an integer of k0 bits (a row that does not fit is rechecked)
+ *   NUMDIV   dst = a / b (k0 = SCANVM_NUMDIV_*): numeric_div with PostgreSQL's select_div_scale() result scale and
+ *            rounding, numeric_mod, div(); division by zero and a quotient that does not fit are rechecked
+ *   NUMRND   dst = round / trunc of numeric a to the scale given by the int register b (k0 = SCANVM_NUMRND_*; a
+ *            negative scale rounds to tens, ...) or the numeric(p,s) coercion with typmod register b
+ *   NUMARITH with k0 = NUMOP_CEIL / FLOOR / SIGN: ceil, floor, sign (scale 0)
  *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
@@ -77,11 +82,24 @@ SCANVM_OP(NUMCMP,   81)
 SCANVM_OP(NUMARITH, 82)
 SCANVM_OP(I2N,      83)
 SCANVM_OP(N2I,      84)
+SCANVM_OP(NUMDIV,   85)
+SCANVM_OP(NUMRND,   86)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
 /* unary numeric operations (NUMARITH k0) */
 SCANVM_OP(NUMOP_NEG, 16)
 SCANVM_OP(NUMOP_ABS, 17)
+SCANVM_OP(NUMOP_CEIL, 18)
+SCANVM_OP(NUMOP_FLOOR, 19)
+SCANVM_OP(NUMOP_SIGN, 20)
+/* NUMDIV k0: numeric_div, numeric_mod, numeric_div_trunc (div()) */
+SCANVM_OP(NUMDIV_DIV, 0)
+SCANVM_OP(NUMDIV_MOD, 1)
+SCANVM_OP(NUMDIV_TRUNC, 2)
+/* NUMRND k0: round(numeric, int4), trunc(numeric, int4), numeric(p,s) typmod coercion */
+SCANVM_OP(NUMRND_ROUND, 0)
+SCANVM_OP(NUMRND_TRUNC, 1)
+SCANVM_OP(NUMRND_TYPMOD, 2)
 /* reasons of an error */
 SCANVM_OP(ERR_ZERODIV,  1)
 SCANVM_OP(ERR_INTRANGE, 2)

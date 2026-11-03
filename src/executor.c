@@ -1070,11 +1070,19 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			pthreadMutexUnlock(&conn->mutex);
 			if (!pts->final_done)
 			{
+				bool		is_final_worker;
+
 				pts->final_done = true;
+				/*
+				 * XpuTaskFinal is sent by the last worker only, except for GpuPreAgg: its partial
+				 * aggregates live in this backend's own session of the Vulkan service (there is no
+				 * final buffer shared between sessions as in the CUDA service), so every worker has to
+				 * fetch them, or the rows of all workers but the last one would be lost.
+				 */
+				is_final_worker = (try_final_callback && pgstromTaskStateEndScan(pts));
 				if (try_final_callback &&
-					pgstromTaskStateEndScan(pts))
+					(is_final_worker || (pts->xpu_task_flags & DEVTASK__PREAGG) != 0))
 				{
-					/* send XpuTaskFinal if we are actually the final one */
 					XpuCommand	__xcmd;
 
 					memset(&__xcmd, 0, sizeof(XpuCommand));

@@ -4789,6 +4789,129 @@ pgstrom_vulkan_expr_cannot_fail(Node *node)
 }
 
 /*
+ * pgstrom_numeric_static_dscale
+ *
+ * The display scale (dscale) that every non-NULL value of a numeric expression has, when it does not depend on
+ * the row; -1 if it does (numeric_div, unconstrained numeric columns, ...). A column numeric(p,s) always holds
+ * values of dscale s, and the dscale of the result of the functions the Vulkan VM implements follows from the
+ * dscale of the arguments (numeric.c: add/sub: the larger, mul: the sum, round(x, n): n, ...). The service
+ * aggregates and groups numerics as { unscaled int64, scale } with the scale fixed by the plan, and hands a row
+ * of any other scale to the backend, so a wrong answer here costs speed, not correctness.
+ */
+int
+pgstrom_numeric_static_dscale(Node *node)
+{
+	if (node == NULL)
+		return -1;
+	switch (nodeTag(node))
+	{
+		case T_Var:
+		{
+			Var	   *var = (Var *) node;
+
+			if (var->vartype != NUMERICOID || var->vartypmod < (int32) VARHDRSZ)
+				return -1;
+			return Max((((var->vartypmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024, 0);
+		}
+		case T_Const:
+		{
+			Const	   *con = (Const *) node;
+			int64_t		nv;
+			uint32_t	nsc;
+
+			if (con->consttype == NUMERICOID && !con->constisnull &&
+				!VARATT_IS_EXTERNAL(DatumGetPointer(con->constvalue)) &&
+				scan_vm_numeric_datum_decode((const unsigned char *) DatumGetPointer(con->constvalue), &nv, &nsc))
+				return (int) nsc;
+			if ((con->consttype == INT2OID || con->consttype == INT4OID || con->consttype == INT8OID) &&
+				!con->constisnull)
+				return 0;
+			return -1;
+		}
+		case T_RelabelType:
+			return pgstrom_numeric_static_dscale((Node *) ((RelabelType *) node)->arg);
+		case T_FuncExpr:
+		case T_OpExpr:
+		{
+			Oid			funcid;
+			Oid			collid;
+			List	   *args;
+			devfunc_info *dfunc;
+			scan_func_class fc;
+			int			s1 = 0, s2 = 0;
+
+			if (IsA(node, FuncExpr))
+			{
+				funcid = ((FuncExpr *) node)->funcid;
+				collid = ((FuncExpr *) node)->inputcollid;
+				args = ((FuncExpr *) node)->args;
+			}
+			else
+			{
+				funcid = ((OpExpr *) node)->opfuncid;
+				collid = ((OpExpr *) node)->inputcollid;
+				args = ((OpExpr *) node)->args;
+			}
+			dfunc = pgstrom_devfunc_lookup(funcid, args, collid);
+			if (!dfunc)
+				return -1;
+			fc = scan_vm_classify_func(dfunc->func_code);
+			if (list_length(args) < 1)
+				return -1;
+			if (fc.cls == SOP_I2N)
+				return 0;
+			if (fc.cls == SOP_NUMARITH && fc.kind >= SOP_NUMOP_CEIL)
+				return 0;				/* ceil, floor, sign */
+			if (fc.cls == SOP_NUMARITH || fc.cls == SOP_MOV || fc.cls == SOP_NUMDIV || fc.cls == SOP_NUMRND)
+			{
+				Node	   *a1 = linitial(args);
+
+				if (fc.cls == SOP_NUMDIV && fc.kind == SOP_NUMDIV_DIV)
+					return -1;			/* select_div_scale() depends on the values */
+				if (fc.cls == SOP_NUMDIV && fc.kind == SOP_NUMDIV_TRUNC)
+					return 0;			/* div() */
+				if (fc.cls == SOP_NUMRND)
+				{
+					Const	   *c;
+
+					if (list_length(args) != 2 || !IsA(lsecond(args), Const))
+						return -1;
+					c = (Const *) lsecond(args);
+					if (c->constisnull)
+						return -1;
+					if (fc.kind == SOP_NUMRND_TYPMOD)
+					{
+						int32		typmod = DatumGetInt32(c->constvalue);
+						int			sc;
+
+						if (typmod < (int32) VARHDRSZ)
+							return pgstrom_numeric_static_dscale(a1);
+						sc = (((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024;
+						return sc >= 0 ? sc : -1;
+					}
+					return Max(DatumGetInt32(c->constvalue), 0);
+				}
+				s1 = pgstrom_numeric_static_dscale(a1);
+				if (s1 < 0)
+					return -1;
+				if (list_length(args) == 1)
+					return s1;
+				s2 = pgstrom_numeric_static_dscale(lsecond(args));
+				if (s2 < 0)
+					return -1;
+				if (fc.cls == SOP_NUMARITH && fc.kind == SOP_ARITH_MUL)
+					return s1 + s2;
+				return Max(s1, s2);		/* add, sub, mod */
+			}
+			return -1;
+		}
+		default:
+			break;
+	}
+	return -1;
+}
+
+/*
  * pgstrom_xpu_expression
  *
  * checks whether the expression is executable on GPU devices

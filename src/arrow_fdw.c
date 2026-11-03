@@ -3278,9 +3278,10 @@ __arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
 }
 
 /*
- * The Arrow loader of the Vulkan service reads integer, float4 and bool values only (a date, time,
- * timestamp or text column is passed through, or tested with IS [NOT] NULL): an expression that
- * reads the value of one, or produces one, stays on the CPU.
+ * The Arrow loader of the Vulkan service reads integer, float4, bool, date, time, timestamp and string
+ * values (utf8, char(n)). A numeric value (Decimal is not a supported Arrow type, but an expression can
+ * produce one) may need the backend to evaluate the row again, which an Arrow record batch cannot do:
+ * a qual that reads or produces one stays on the CPU.
  */
 static bool
 __arrowQualNeedsUnsupportedValue(Node *node, void *context)
@@ -3295,13 +3296,6 @@ __arrowQualNeedsUnsupportedValue(Node *node, void *context)
 		return expression_tree_walker(node, __arrowQualNeedsUnsupportedValue, context);
 	switch (exprType(node))
 	{
-		case TEXTOID:
-		case VARCHAROID:
-		case BPCHAROID:
-		case DATEOID:
-		case TIMEOID:
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
 		case NUMERICOID:
 			return true;
 		default:

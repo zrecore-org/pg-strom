@@ -52,6 +52,9 @@ typedef struct scan_prog
 	uint16_t		agg_action[SCAN_AGG_MAX];	/* KAGG_ACTION__* of each output column */
 	int8_t			agg_of_col[SCAN_AGG_MAX];	/* output column -> aggregate index, or -1 */
 	int8_t			key_of_col[SCAN_AGG_MAX];	/* output column -> key index, or -1 */
+	/* numeric aggregates / keys: the scale the plan derived (every row must have it), or -1 */
+	int16_t			agg_scale[SCAN_AGG_MAX];
+	int16_t			key_scale[SCAN_GROUP_KEYS];
 } scan_prog;
 
 struct kern_session_info;

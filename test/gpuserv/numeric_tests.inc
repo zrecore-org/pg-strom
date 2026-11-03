@@ -67,16 +67,62 @@ for t in nm1 nm2; do
 	run $t "numeric -> int in a qual" "select i, n1 from %T where n1::int4 = 7 or n2::int8 > 499990"
 	run $t "numeric -> int4 of an expression" "select i, (n1 * 10 + n2)::int4 from %T where abs(n2) < 1000 and abs(n1) < 100"
 	run $t "numeric(18,6) -> int8 with half values" "select i, (n2 * 0.5)::int8, (n2 * 5)::int4 from %T where i % 1000 = 3"
-	echo "  -- stays on the CPU"
-	run_any $t "numeric division" "select i, n1 / n2 from %T where n2 <> 0 and i % 7 = 0"
-	run_any $t "numeric remainder" "select i, n1 % 7 from %T where i % 7 = 0"
-	run_any $t "round() and trunc()" "select i, round(n1, 1), trunc(n2, 3) from %T where i % 7 = 0"
+	echo "  -- division, remainder, rounding (A6 part 2)"
+	run $t "numeric division (select_div_scale result scale)" "select i, n1 / n2 from %T where n2 <> 0 and i % 7 = 0"
+	run $t "division by constants and of constants" "select i, n1 / 3, n2 / 7.5, 100 / n1, 1 / n2 from %T where n1 <> 0 and n2 <> 0 and i % 11 = 0"
+	run $t "division of columns of different scales" "select i, n2 / n1, n1 / n3, n3 / n2 from %T where n1 <> 0 and n3 <> 0 and n2 <> 0 and i % 13 = 0"
+	run $t "division in a qual" "select i from %T where n1 <> 0 and n2 / n1 > 1000 or n2 <> 0 and n1 / n2 > 0.001"
+	run $t "numeric remainder" "select i, n1 % 7, n2 % n1, mod(n1, 3), n1 % 0.3 from %T where n1 <> 0 and i % 7 = 0"
+	run $t "div()" "select i, div(n2, n1), div(n1, 3), div(n2, 0.07) from %T where n1 <> 0 and i % 9 = 0"
+	run $t "round() and trunc() with a scale" "select i, round(n1, 1), trunc(n2, 3), round(n2, 8), trunc(n1, 5) from %T where i % 7 = 0"
+	run $t "round() and trunc() with a negative scale" "select i, round(n1, -1), trunc(n2, -2), round(n2, -9), round(n1, -30) from %T where i % 7 = 0"
+	run $t "round(), trunc() without a scale" "select i, round(n1), trunc(n2), round(n3), trunc(n1) from %T where i % 7 = 0"
+	run $t "ceil, floor, sign" "select i, ceil(n1), floor(n2), ceiling(n1), sign(n1), sign(n2), floor(n1), ceil(n2) from %T where i % 7 = 0"
+	run $t "round() of a quotient" "select i, round(n1 / n2, 4), round(n2 / n1, 2) from %T where n1 <> 0 and n2 <> 0 and i % 7 = 0"
+	run $t "numeric typmod coercion (rounding)" "select i, n2::numeric(10,2), n2::numeric(12,3), n1::numeric(8,0), n3::numeric(30,1) from %T where abs(n2) < 100000 and abs(n1) < 5000 and i % 5 = 0"
+	run $t "numeric typmod coercion, wider scale" "select i, n1::numeric(14,6), n1::numeric(20,10), (n1 * 3)::numeric(18,2) from %T where abs(n1) < 1000 and i % 5 = 0"
+	run $t "ceil/sign/round as a qual" "select i, n1 from %T where sign(n1) < 0 and round(n2, 0) = 100 or ceil(n1) = 5 or floor(n2) = -3"
+	run_any $t "division by zero is the backend's error or result alike" "select i, n1 / n2 from %T where i % 7 = 0 and n2 is not null and i < 5000 and n2 <> 0"
+	run_any $t "n4: division, round, ceil of long fractions, NaN and Infinity" "select i, n4 / 7, n4 % 3, round(n4, 2), ceil(n4), sign(n4), trunc(n4, 1), n4 / n4 from %T where i % 12 in (1, 2, 4, 6, 8, 10, 11) and n4 <> 0"
 	run_any $t "numeric to float" "select i, n1::float4, n2::float8 from %T where i % 7 = 0"
-	run_any $t "numeric typmod cast" "select i, n2::numeric(10,2) from %T where abs(n2) < 1000 and i % 5 = 0"
-	run_any $t "sign()" "select i, sign(n1) from %T where i % 7 = 0"
 	run_any $t "numeric in IN list and CASE" "select i, case when n1 > 0 then n2 else 0 end from %T where n1 in (1, 2, 3.5)"
 	run_any $t "coalesce(numeric)" "select i, coalesce(n1, 0) from %T where coalesce(n1, 0) > 9990"
 done
+
+
+# ---- randomized operand pairs for division, remainder, round/trunc, ceil/floor/sign and the typmod coercion: 1..18
+# significant digits, scales 0..13, either sign, a few zeros. (The same shapes as numfuzz.sql, which checks the
+# algorithms against PostgreSQL's results offline.)
+sql "create table nm_fz as
+	with g as (select i, abs(hashint8(i * 2 + 1)::numeric * 1000003 + hashint8(i * 2 + 2)) as r1,
+	                     abs(hashint8(i * 2 + 100000001)::numeric * 999983 + hashint8(i * 2 + 100000002)) as r2,
+	                     (abs(hashint8(i * 3)) % 18 + 1)::int as d1, (abs(hashint8(i * 3 + 1)) % 18 + 1)::int as d2,
+	                     (abs(hashint8(i * 5)) % 14)::int as s1, (abs(hashint8(i * 5 + 1)) % 14)::int as s2,
+	                     abs(hashint8(i * 7)) % 4 as sg, abs(hashint8(i * 11)) % 20 as zz,
+	                     (abs(hashint8(i * 13)) % 40 - 12)::int as n, (abs(hashint8(i * 17)) % 22 + 1)::int as p, (abs(hashint8(i * 19)) % 12)::int as s
+	           from generate_series(1, $NMROWS) i),
+	     t as (select i, n, p, s, s1, s2, sg,
+	                  lpad(case when zz = 0 then '0' else (r1 % (10::numeric ^ d1))::numeric(40,0)::text end, s1 + 1, '0') as a,
+	                  lpad(case when zz = 1 then '0' else (r2 % (10::numeric ^ d2))::numeric(40,0)::text end, s2 + 1, '0') as b from g)
+	select i, n, p, s,
+	       ((case when sg % 2 = 1 then '-' else '' end) || left(a, length(a) - s1) || case when s1 > 0 then '.' || right(a, s1) else '' end)::numeric as a,
+	       ((case when sg / 2 = 1 then '-' else '' end) || left(b, length(b) - s2) || case when s2 > 0 then '.' || right(b, s2) else '' end)::numeric as b
+	from t"
+sql "analyze nm_fz"
+sql "delete from nm_fz where b = 0 and i % 3 <> 0"             # a few zero divisors remain: the backend raises (or skips) them
+run nm_fz "random pairs: a / b" "select i, a / b from %T where b <> 0"
+run nm_fz "random pairs: a % b, div(a, b)" "select i, a % b, div(a, b), mod(b, a) from %T where b <> 0 and a <> 0"
+run nm_fz "random pairs: round and trunc with random scales" "select i, round(a, n), trunc(b, n), round(a, n % 7), trunc(a, s) from %T where i > 0"
+run nm_fz "random pairs: ceil, floor, sign" "select i, ceil(a), floor(b), sign(a), ceiling(b), sign(b) from %T where i > 0"
+run nm_fz "random pairs: numeric(p,s) coercion" "select i, a::numeric(30,5), b::numeric(20,0), a::numeric(18,9), b::numeric(12,3) from %T where abs(a) < 1000000 and abs(b) < 1000000"
+run nm_fz "random pairs: quotient in a qual" "select i from %T where b <> 0 and a / b > 1.5 and a / b < 100000"
+runagg nm_fz "random pairs: count over a quotient qual" "select count(*), sum(i) from %T where b <> 0 and a / b > 3"
+g=$($PSQL -d scantest -c "$GPU select count(*) from nm_fz where b = 0 and a / b > 1" 2>&1 | head -1)
+c=$($PSQL -d scantest -c "$CPU select count(*) from nm_fz where b = 0 and a / b > 1" 2>&1 | head -1)
+echo "$g" | grep -q "division by zero" && [ "$g" = "$c" ]; check "division by zero is reported alike ($g)" $?
+g=$($PSQL -d scantest -c "$GPU select n2::numeric(5,2) from nm1 where n2 is not null and abs(n2) > 1000" 2>&1 | head -1)
+c=$($PSQL -d scantest -c "$CPU select n2::numeric(5,2) from nm1 where n2 is not null and abs(n2) > 1000" 2>&1 | head -1)
+echo "$g" | grep -q "numeric field overflow" && [ "$g" = "$c" ]; check "numeric field overflow is reported alike ($g)" $?
 
 echo "numeric: aggregation"
 for t in nm1 nm2; do
@@ -88,10 +134,42 @@ for t in nm1 nm2; do
 	runagg $t "numeric -> int cast as an aggregate argument" "select sum(n1::int4), max(n2::int8), min((n1 * 2)::int4) from %T where abs(n1) < 1000 and abs(n2) < 1000000"
 	runagg $t "GROUP BY an int key with a numeric qual" "select k % 7 as g, count(*), sum(i), max(k8) from %T where n1 > 0 and n3 < 20 group by 1 order by 1"
 	runagg $t "GROUP BY with a qual over rechecked numerics" "select k % 5 as g, count(*), sum(i) from %T where n3 > 0 or n4 < 10 group by 1 order by 1"
-	runagg_any $t "sum/avg/min/max of numeric stay on the CPU" "select sum(n1), avg(n2), min(n3), max(n1) from %T"
-	runagg_any $t "GROUP BY a numeric key stays on the CPU" "select n1 % 3, count(*) from %T group by n1 % 3 order by 1"
+	echo "  -- sum and avg of numerics of a known scale (A6 part 2)"
+	runagg $t "sum and avg of numeric(10,2) and numeric(18,6)" "select sum(n1), avg(n1), sum(n2), avg(n2), count(n1), count(*) from %T"
+	runagg $t "sum and avg of numeric(38,10): values beyond 64 bits go through the backend" "select sum(n3), avg(n3), count(n3) from %T"
+	runagg $t "sum of products and sums (scale of the expression)" "select sum(n1 * n2), sum(n1 + n2), avg(n1 - n2), sum(n1 * 3), sum(n2 * 0.5), sum(abs(n1)) from %T"
+	runagg $t "sum of a quotient (scale not known: CPU) and of round()" "select sum(round(n1, 1)), avg(trunc(n2, 3)), sum(ceil(n1)), sum(sign(n2)), sum(round(n2 / 7, 4)) from %T where n2 <> 0"
+	runagg $t "sum with a numeric qual and FILTER" "select sum(n1) filter (where n2 > 0), avg(n2) filter (where n1 < 0), sum(n1) from %T where n3 is not null and n1 <> 0"
+	runagg $t "sum over an empty input and over NULLs only" "select sum(n1), avg(n2), sum(n3) from %T where i < 0 or n1 is null and n2 is null"
+	runagg $t "sum of int4 as numeric and numeric from int" "select sum(k::numeric), avg(k8::numeric), sum(n1 + k) from %T"
+	runagg $t "sum and avg with an int GROUP BY" "select k % 7 as g, sum(n1), avg(n2), sum(n1 * n2), count(*) from %T group by 1 order by 1"
+	runagg $t "GROUP BY an int key, numeric(38,10) values beyond 64 bits" "select k % 11 as g, sum(n3), avg(n3) from %T group by 1 order by 1"
+	runagg_any $t "sum/avg of unconstrained numeric (the scale varies: CPU)" "select sum(n4), avg(n4) from %T where i % 12 in (1, 2, 4, 6, 8, 10, 11)"
+	runagg_any $t "sum of unconstrained numeric with NaN and Infinity (CPU)" "select sum(n4), avg(n4), count(n4) from %T"
 done
 
+
+echo "numeric: TPC-H style aggregates"
+sql "create table nm_li as select i as l_orderkey, (i % 7 + 1)::int as l_linenumber, (i % 5)::int as grp, (i % 3)::int as grp2,
+	((i * 37) % 50 + 1)::numeric(15,2) as l_quantity,
+	(((i::int8 * 7919) % 10000000) / 100.0)::numeric(15,2) as l_extendedprice,
+	((i % 11) / 100.0)::numeric(15,2) as l_discount,
+	((i % 9) / 100.0)::numeric(15,2) as l_tax,
+	(date '1992-01-01' + (i % 2500)) as l_shipdate,
+	(case when i % 97 = 0 then null else ((i % 13) - 6) / 10.0 end)::numeric(6,1) as bal,
+	((i % 20)::numeric / 4)::numeric(6,2) as g2, ((i % 7)::numeric * 100)::numeric(8,0) as g0
+	from generate_series(1, $NMROWS) i"
+sql "vacuum analyze nm_li"
+runagg nm_li "Q6: sum(extendedprice * discount) with quals" "select sum(l_extendedprice * l_discount) as revenue from %T where l_shipdate >= date '1994-01-01' and l_shipdate < date '1995-01-01' and l_discount between 0.05 and 0.07 and l_quantity < 24"
+runagg nm_li "Q1 aggregates (no GROUP BY)" "select sum(l_quantity), sum(l_extendedprice), sum(l_extendedprice * (1 - l_discount)), sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)), avg(l_quantity), avg(l_extendedprice), avg(l_discount), count(*) from %T where l_shipdate <= date '1998-09-02'"
+runagg nm_li "Q1 aggregates GROUP BY integer keys" "select grp, grp2, sum(l_quantity), sum(l_extendedprice), sum(l_extendedprice * (1 - l_discount)), sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)), avg(l_quantity), avg(l_extendedprice), avg(l_discount), count(*) from %T where l_shipdate <= date '1998-09-02' group by 1, 2 order by 1, 2"
+runagg nm_li "GROUP BY a numeric(6,2) key" "select g2, count(*), sum(l_extendedprice), avg(l_discount), sum(l_extendedprice * (1 - l_discount)) from %T group by 1 order by 1"
+runagg nm_li "GROUP BY a numeric(8,0) key and an integer key" "select g0, grp, count(*), sum(l_quantity), avg(l_tax) from %T group by 1, 2 order by 1, 2"
+runagg_any nm_li "GROUP BY a numeric key of unknown scale (unconstrained numeric: CPU)" "select bal2, count(*), sum(l_quantity) from (select l_quantity, bal::numeric as bal2 from %T) x group by 1 order by 1 nulls last"
+runagg nm_li "GROUP BY a numeric key with NULLs (the NULL group)" "select bal, count(*), sum(l_quantity), avg(l_extendedprice) from %T group by 1 order by 1 nulls last"
+runagg nm_li "GROUP BY a numeric expression of known scale" "select round(l_extendedprice, -4) as r, count(*), sum(l_quantity) from %T group by 1 order by 1"
+runagg nm_li "GROUP BY l_quantity * l_discount (scale 4)" "select l_quantity * l_discount as qd, count(*), sum(l_tax) from %T group by 1 order by 1"
+runagg nm_li "GROUP BY numeric and HAVING" "select g2, sum(l_extendedprice) as s from %T group by 1 having sum(l_extendedprice) > 1000 order by 1"
 echo "numeric: joins"
 sql "create table nm_dim as select (i % 100)::int4 as k, (i * 1.5)::numeric(10,2) as w, 'd' || i as nm from generate_series(1, 100) i"
 sql "analyze nm_dim"

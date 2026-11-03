@@ -67,16 +67,17 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE date_num between '2019-04-14' and '2023-05-23';
-                                                   QUERY PLAN                                                    
------------------------------------------------------------------------------------------------------------------
+                                                        QUERY PLAN                                                        
+--------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Foreign Scan on regtest_arrow (actual rows=373826 loops=1)
-         Filter: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date))
-         Rows Removed by Filter: 247552
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
          referenced: date_num
+         GPU Scan Quals: ((date_num >= '04-14-2019'::date) AND (date_num <= '05-23-2023'::date)) [exec: 621378 -> 373826]
+         GPU Group Key: 
          Stats-Hint: (date_num >= '04-14-2019'::date), (date_num <= '05-23-2023'::date)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 3906.25KB, size: 51.50MB)
-(7 rows)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -123,13 +124,14 @@ SELECT count(*)
                                                QUERY PLAN                                               
 --------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Custom Scan (GpuScan) on regtest_arrow (actual rows=2990 loops=1)
-         GPU Projection: 
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
          referenced: int_num
          GPU Scan Quals: ((int_num >= '-50000'::integer) AND (int_num <= 50000)) [exec: 310689 -> 2990]
+         GPU Group Key: 
          Stats-Hint: (int_num >= '-50000'::integer), (int_num <= 50000)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 3906.25KB, size: 51.50MB)
-(7 rows)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -334,16 +336,17 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE time_num between '09:00:00' and '17:00:00';
-                                                                   QUERY PLAN                                                                    
--------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Foreign Scan on regtest_arrow (actual rows=334326 loops=1)
-         Filter: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone))
-         Rows Removed by Filter: 287052
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
          referenced: time_num
+         GPU Scan Quals: ((time_num >= '09:00:00'::time without time zone) AND (time_num <= '17:00:00'::time without time zone)) [exec: 621378 -> 334326]
+         GPU Group Key: 
          Stats-Hint: (time_num >= '09:00:00'::time without time zone), (time_num <= '17:00:00'::time without time zone)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 7812.50KB, size: 51.50MB)
-(7 rows)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow
@@ -387,16 +390,17 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE timestamp_num between '2019-04-14 09:00:00' and '2023-05-23 17:00:00';
-                                                                                             QUERY PLAN                                                                                              
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                  QUERY PLAN                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Foreign Scan on regtest_arrow (actual rows=411798 loops=1)
-         Filter: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone))
-         Rows Removed by Filter: 209580
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
          referenced: 
+         GPU Scan Quals: ((timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone) AND (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)) [exec: 621378 -> 411798]
+         GPU Group Key: 
          Stats-Hint: (timestamp_num >= 'Sun Apr 14 09:00:00 2019'::timestamp without time zone), (timestamp_num <= 'Tue May 23 17:00:00 2023'::timestamp without time zone)  [loaded: 2, skipped: 2]
          file0: test_arrow_index.data (read: 7812.50KB, size: 51.50MB)
-(7 rows)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow

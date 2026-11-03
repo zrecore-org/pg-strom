@@ -19,6 +19,9 @@
 #define WITH_INNER 1
 #define JW_MODE 2
 #include "scan_common.slang"
+#ifdef ARROW_SRC
+#include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
+#endif
 #include "join_common.inc"
 
 #ifndef GA_NA

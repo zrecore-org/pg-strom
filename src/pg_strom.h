@@ -592,6 +592,7 @@ extern devfunc_info *pgstrom_devfunc_lookup(Oid func_oid,
 											List *func_args,
 											Oid func_collid);
 
+extern int		pgstrom_numeric_static_dscale(Node *node);
 extern devfunc_info *devtype_lookup_equal_func(devtype_info *dtype, Oid coll_id);
 extern devfunc_info *devtype_lookup_compare_func(devtype_info *dtype, Oid coll_id);
 

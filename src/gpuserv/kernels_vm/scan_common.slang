@@ -47,7 +47,7 @@ struct PC
     uint page_base;
     uint blcksz;        // (unused: pages are located through ptab)
     uint total_lps;     // line pointers of all pages (start of the value area is 4 + total_lps)
-#ifdef WITH_INNER
+#if defined(WITH_INNER) || defined(ARROW_SRC)
     uint extra;         // join kernels: a fifth parameter (jgagg.slang: capacity of the overflow list)
 #endif
 };
@@ -353,6 +353,231 @@ int num_cmp(int64_t va, uint sa, int64_t vb, uint sb)
     return va < vb ? -1 : (va > vb ? 1 : 0);
 }
 
+
+// ---- A6 part 2: division, rounding. The same algorithms as scan_caps.c (scan_vm_num_div & co), see there.
+uint64_t num_p10u(uint d)               // 10^d, d <= 19
+{
+    uint64_t p = 1ul;
+    for (uint i = 0; i < d; i++)
+        p = p * 10ul;
+    return p;
+}
+
+uint num_ndig(uint64_t m)               // decimal digits of m > 0
+{
+    uint n = 1;
+    uint64_t p = 10ul;
+    while (n < 19u && m >= p)
+    {
+        n++;
+        p = p * 10ul;
+    }
+    return n;
+}
+
+// weight (base 10000) and first digit of the normalized value, as select_div_scale() sees them
+void num_weight_firstdigit(int64_t v, uint sc, out int w, out uint fd)
+{
+    w = 0;
+    fd = 0;
+    if (v == 0)
+        return;
+    uint64_t m = uint64_t(v < 0 ? -v : v);
+    int e10 = int(num_ndig(m)) - 1 - int(sc);
+    w = (e10 >= 0) ? (e10 / 4) : -((-e10 + 3) / 4);
+    int k = int(sc) + 4 * w;
+    fd = (k >= 0) ? uint(m / num_p10u(uint(k))) : uint(m * num_p10u(uint(-k)));
+}
+
+// q = round_half_up(a * 10^E / b), a >= 0, b > 0; false if q > INT64_MAX.
+// Long division in chunks of 18 decimal digits; (rem * 10^k) / b is a 128-by-64-bit division done bit by bit
+// with 32-bit limb arithmetic only (there is no 128-bit integer type).
+bool num_divround(uint64_t a, uint64_t b, uint E, out uint64_t q)
+{
+    uint64_t Q = a / b;
+    uint64_t rem = a % b;
+    q = 0ul;
+    while (E > 0u)
+    {
+        uint k = min(E, 18u);
+        E -= k;
+        uint64_t p = num_p10u(k);
+        uint64_t qc = 0ul;
+        if (rem != 0ul)
+        {
+            // t = rem * p as { hi, lo }
+            uint64_t a0 = rem & 0xfffffffful, a1 = rem >> 32;
+            uint64_t b0 = p & 0xfffffffful, b1 = p >> 32;
+            uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+            uint64_t mid = (p00 >> 32) + (p01 & 0xfffffffful) + (p10 & 0xfffffffful);
+            uint64_t lo = (p00 & 0xfffffffful) | (mid << 32);
+            uint64_t hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+            // hi < b because rem < b and p < 2^64: the quotient fits 64 bits
+            uint64_t r = hi;
+            for (uint i = 0; i < 64u; i++)
+            {
+                r = (r << 1) | (lo >> 63);          // r < b < 2^63: no overflow
+                lo = lo << 1;
+                qc = qc << 1;
+                if (r >= b)
+                {
+                    r -= b;
+                    qc |= 1ul;
+                }
+            }
+            rem = r;
+        }
+        if (Q > (9223372036854775807ul - qc) / p)
+            return false;
+        Q = Q * p + qc;
+    }
+    if (rem >= b - rem)                             // 2 * rem >= b: round half up
+    {
+        if (Q == 9223372036854775807ul)
+            return false;
+        Q += 1ul;
+    }
+    q = Q;
+    return true;
+}
+
+// m / 10^d rounded half up (round) or truncated, for m >= 0
+uint64_t num_down(uint64_t m, uint d, bool rnd)
+{
+    if (d == 0u)
+        return m;
+    if (d >= 20u)
+        return 0ul;
+    if (d == 19u)
+        return (rnd && m >= 5000000000000000000ul) ? 1ul : 0ul;
+    uint64_t p = num_p10u(d);
+    uint64_t q = m / p;
+    uint64_t f = m - q * p;
+    if (rnd && f >= p - f)
+        q += 1ul;
+    return q;
+}
+
+// numeric_div (k0 = 0), numeric_mod (1), div() (2). Returns 0 or SOP_RECHECK_CODE.
+uint num_divide(uint k0, Reg x, Reg y, out int64_t r, out uint rsc)
+{
+    r = 0;
+    rsc = 0;
+    if (y.v == 0)
+        return SOP_RECHECK_CODE;                    // division by zero: the backend raises the error
+    if (k0 == SOP_NUMDIV_DIV)
+    {
+        int w1, w2;
+        uint fd1, fd2;
+        num_weight_firstdigit(x.v, x.sc, w1, fd1);
+        num_weight_firstdigit(y.v, y.sc, w2, fd2);
+        int qw = w1 - w2;
+        if (fd1 <= fd2)
+            qw--;
+        int rs = 16 - qw * 4;
+        rs = max(rs, int(x.sc));
+        rs = max(rs, int(y.sc));
+        rs = max(rs, 0);
+        rs = min(rs, 1000);
+        if (rs > 255)
+            return SOP_RECHECK_CODE;
+        uint E = y.sc + uint(rs) - x.sc;
+        uint64_t q;
+        if (!num_divround(uint64_t(x.v < 0 ? -x.v : x.v), uint64_t(y.v < 0 ? -y.v : y.v), E, q))
+            return SOP_RECHECK_CODE;
+        r = ((x.v < 0) != (y.v < 0)) ? -int64_t(q) : int64_t(q);
+        rsc = uint(rs);
+        return 0;
+    }
+    uint sc = max(x.sc, y.sc);
+    int64_t a = x.v;
+    int64_t b = y.v;
+    if (!num_up(a, sc - x.sc) || !num_up(b, sc - y.sc) || b == 0)
+        return SOP_RECHECK_CODE;
+    if (k0 == SOP_NUMDIV_MOD)
+    {
+        r = (b == -1) ? 0 : (a % b);
+        rsc = sc;
+    }
+    else
+    {
+        // a / b truncated; a is never INT64_MIN, so b == -1 is safe
+        r = a / b;
+        rsc = 0;
+    }
+    return 0;
+}
+
+// round (k0 = 0), trunc (1), numeric(p,s) coercion (2) of x to the scale / typmod n
+uint num_round(uint k0, Reg x, int64_t n, out int64_t r, out uint rsc)
+{
+    int64_t v = x.v;
+    uint sc = x.sc;
+    int64_t prec = 0;
+    r = v;
+    rsc = sc;
+    if (k0 == SOP_NUMRND_TYPMOD)
+    {
+        if (n < 4)
+            return 0;                               // not a valid typmod: the value as it is
+        int64_t t = n - 4;
+        prec = (t >> 16) & 0xffff;
+        int s = int(((t & 0x7ff) ^ 0x400) - 0x400);
+        if (s < 0 || prec < 1 || prec > 1000)
+            return SOP_RECHECK_CODE;
+        n = int64_t(s);
+    }
+    if (n > 255 || n < -64)
+        return SOP_RECHECK_CODE;
+    uint64_t m;
+    if (n >= int64_t(sc))
+    {
+        int64_t xx = v;
+        if (!num_up(xx, uint(n - int64_t(sc))))
+            return SOP_RECHECK_CODE;
+        r = xx;
+        rsc = uint(n);
+        m = uint64_t(xx < 0 ? -xx : xx);
+    }
+    else
+    {
+        uint d = uint(int64_t(sc) - n);
+        uint64_t q = num_down(uint64_t(v < 0 ? -v : v), d, k0 != SOP_NUMRND_TRUNC);
+        if (n < 0)
+        {
+            int64_t xx = int64_t(q);
+            if (!num_up(xx, uint(-n)))
+                return SOP_RECHECK_CODE;
+            q = uint64_t(xx);
+            rsc = 0;
+        }
+        else
+            rsc = uint(n);
+        r = (v < 0) ? -int64_t(q) : int64_t(q);
+        m = q;
+    }
+    if (k0 == SOP_NUMRND_TYPMOD && prec <= 18 && m >= num_p10u(uint(prec)))
+        return SOP_RECHECK_CODE;                    // "numeric field overflow": the backend raises it
+    return 0;
+}
+
+// ceil, floor, sign (scale 0)
+void num_unary(uint k0, Reg x, out int64_t r)
+{
+    if (k0 == SOP_NUMOP_SIGN)
+    {
+        r = (x.v > 0) ? 1 : ((x.v < 0) ? -1 : 0);
+        return;
+    }
+    uint64_t m = uint64_t(x.v < 0 ? -x.v : x.v);
+    uint64_t q = num_down(m, x.sc, false);
+    bool inexact = (x.sc >= 20u) ? (m != 0ul) : (m != q * num_p10u(x.sc));
+    if (x.v >= 0)
+        r = int64_t(q) + ((k0 == SOP_NUMOP_CEIL && inexact) ? 1 : 0);
+    else
+        r = -int64_t(q) - ((k0 == SOP_NUMOP_FLOOR && inexact) ? 1 : 0);
+}
+
 // The numeric instructions. Returns 0, or SOP_RECHECK_CODE.
 uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
@@ -386,6 +611,18 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             {
                 regs[dst].v = (k0 == SOP_NUMOP_NEG || x.v < 0) ? -x.v : x.v;
                 regs[dst].sc = x.sc;
+            }
+            break;
+        }
+        if (k0 >= SOP_NUMOP_CEIL)
+        {
+            regs[dst].isnull = x.isnull;
+            if (x.isnull == 0)
+            {
+                int64_t ur;
+                num_unary(k0, x, ur);
+                regs[dst].v = ur;
+                regs[dst].sc = 0;
             }
             break;
         }
@@ -433,6 +670,44 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return SOP_RECHECK_CODE;
         regs[dst].v = r;
         regs[dst].sc = sc;
+        regs[dst].isnull = 0;
+        break;
+    }
+    case SOP_NUMDIV:
+    {
+        Reg x = regs[ra];
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        int64_t qr;
+        uint qsc;
+        uint rc = num_divide(k0, x, y, qr, qsc);
+        if (rc != 0u)
+            return rc;
+        regs[dst].v = qr;
+        regs[dst].sc = qsc;
+        regs[dst].isnull = 0;
+        break;
+    }
+    case SOP_NUMRND:
+    {
+        Reg x = regs[ra];
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        int64_t qr;
+        uint qsc;
+        uint rc = num_round(k0, x, y.v, qr, qsc);
+        if (rc != 0u)
+            return rc;
+        regs[dst].v = qr;
+        regs[dst].sc = qsc;
         regs[dst].isnull = 0;
         break;
     }
@@ -662,11 +937,40 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         break;
     }
     default:
-        if (op >= SOP_NUMCONST && op <= SOP_N2I)
+        if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
             return vm_num(op, dst, ra, rb, k0, k1, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;
+}
+
+// Numeric aggregates and GROUP BY keys: the plan fixed the scale of the value (word 3 of the aggregate entry, the
+// word after the key registers: scale + 1, 0 = not numeric), so that the sum of unscaled int64 values and the key
+// equality are exact. A qualifying row whose value has another scale is evaluated by the backend instead.
+bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg regs[VM_MAX_REGS])
+{
+    for (uint k = 0; k < naggs; k++)
+    {
+        uint sc1 = prog[aggoff + 4 * k + 3];
+        if (sc1 == 0u)
+            continue;
+        uint ra = prog[aggoff + 4 * k + 1];
+        uint rf = prog[aggoff + 4 * k + 2];
+        if (rf != 0xffffffffu && (regs[rf].isnull != 0 || regs[rf].v == 0))
+            continue;                               // this aggregate skips the row
+        if (regs[ra].isnull == 0 && regs[ra].sc != sc1 - 1u)
+            return false;
+    }
+    for (uint k = 0; k < nkeys; k++)
+    {
+        uint sc1 = prog[keyoff + nkeys + k];
+        if (sc1 == 0u)
+            continue;
+        uint r = prog[keyoff + k];
+        if (regs[r].isnull == 0 && regs[r].sc != sc1 - 1u)
+            return false;
+    }
+    return true;
 }
 
 // Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.

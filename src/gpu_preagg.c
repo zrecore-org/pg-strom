@@ -1659,7 +1659,29 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 		}
 		partfn_args = lappend(partfn_args, expr);
 		if (lc == list_head(aggref->args))
+		{
 			groupby_typmod = exprTypmod((Node *)expr);
+			if (aggfn_cat->partial_func_action == KAGG_ACTION__PSUM_NUMERIC ||
+				aggfn_cat->partial_func_action == KAGG_ACTION__PAVG_NUMERIC)
+			{
+				/*
+				 * The Vulkan service sums numerics as unscaled integers of one scale: it must be known
+				 * from the plan (numeric(p,s) columns and what follows from them). The typmod of the
+				 * action carries it, encoded as a numeric typmod.
+				 */
+				int		dscale = pgstrom_numeric_static_dscale((Node *) expr);
+
+				/* (numerics are not on the GPU inside a join program yet) */
+				if (con->inner_target_list != NIL || dscale < 0 || dscale > 255)
+				{
+					elog(DEBUG2, "the scale of the numeric aggregate argument is not known: %s",
+						 nodeToString(expr));
+					ReleaseSysCache(htup);
+					return NULL;
+				}
+				groupby_typmod = (38 << 16) + dscale + VARHDRSZ;
+			}
+		}
 	}
 	/* last argument for filtering */
 	if (aggref->aggfilter)
@@ -1973,8 +1995,12 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer or bool columns */
-			if (!scan_vm_groupkey_type_supported(dtype->type_code) ||
+			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer, bool or numeric (of a known scale) columns */
+			if ((!scan_vm_groupkey_type_supported(dtype->type_code) &&
+				 !(dtype->type_code == TypeOpCode__numeric &&
+				   con->inner_target_list == NIL &&
+				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
+				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
 				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
@@ -2098,7 +2124,9 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 											   ? KAGG_ACTION__VREF_NOKEY
 											   : KAGG_ACTION__VREF);
 		pp_info->groupby_typmods = lappend_int(pp_info->groupby_typmods,
-											   exprTypmod((Node *)key));
+											   exprType((Node *)key) == NUMERICOID
+											   ? (38 << 16) + pgstrom_numeric_static_dscale((Node *) key) + VARHDRSZ
+											   : exprTypmod((Node *)key));
 	}
 	set_pathtarget_cost_width(root, con->target_proj_final);
 	set_pathtarget_cost_width(root, con->target_agg_final);
@@ -2240,9 +2268,11 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
  * lookup_gpusort_keykind
  */
 static int
-lookup_gpusort_keykind(Node *f_expr, PathTarget *part_target)
+lookup_gpusort_keykind(Node *f_expr, PathTarget *part_target, int *p_action)
 {
 	ListCell	   *lc;
+
+	*p_action = 0;
 
 	/* whether it is a final function? */
 	if (IsA(f_expr, FuncExpr))
@@ -2288,7 +2318,10 @@ lookup_gpusort_keykind(Node *f_expr, PathTarget *part_target)
 			if (!signature)
 				signature = aggfunc_catalog_array[i].partfn_signature;
 			if (strcmp(namebuf, signature) == 0)
+			{
+				*p_action = aggfunc_catalog_array[i].partfn_action;
 				return aggfunc_catalog_array[i].gpusort_keykind;
+			}
 		}
 	}
 skip:
@@ -2389,7 +2422,8 @@ consider_sorted_groupby_path(PlannerInfo *root,
 
 				if (equal(u_expr, em_expr))
 				{
-					int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget);
+					int		action;
+					int		kind = lookup_gpusort_keykind(f_expr, cpath->path.pathtarget, &action);
 
 					if (kind < 0)
 					{
@@ -2397,27 +2431,32 @@ consider_sorted_groupby_path(PlannerInfo *root,
 							 nodeToString(f_expr));
 						continue;
 					}
-					/* check whether the referenced raw key is device executable */
-					if (kind == KSORT_KEY_KIND__VREF)
+					/*
+					 * A GROUP BY key (action 0) must be device executable; the Vulkan service sorts
+					 * the integer representation of bool, int1-8 and the date/time types, so the
+					 * device compare handler of the type is not needed. count(*)/count(x) are VREF
+					 * kinds of an aggregate action: nothing to check.
+					 */
+					if (kind == KSORT_KEY_KIND__VREF && action == 0 &&
+						!pgstrom_xpu_expression((Expr *)f_expr,
+												pp_info->xpu_task_flags,
+												pp_info->base_relid,
+												inner_target_list,
+												NULL))
 					{
-						devtype_info *dtype;
+						elog(DEBUG1, "gpusort: key expression is not device executable: %s",
+							 nodeToString(f_expr));
+						continue;
+					}
+					/* the Vulkan service sorts on a subset of the keys (the others stay on the CPU) */
+					{
+						devtype_info *kdtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
 
-						if (!pgstrom_xpu_expression((Expr *)f_expr,
-													pp_info->xpu_task_flags,
-													pp_info->base_relid,
-													inner_target_list,
-													NULL))
+						if (!scan_vm_gpusort_key_supported(kind, action,
+														   kdtype ? kdtype->type_code : 0))
 						{
-							elog(DEBUG1, "gpusort: key expression is not device executable: %s",
+							elog(DEBUG1, "gpusort: key is not supported by the Vulkan service: %s",
 								 nodeToString(f_expr));
-							continue;
-						}
-						/* check compare functions */
-						dtype = pgstrom_devtype_lookup(exprType((Node *)em_expr));
-						if (!dtype || (dtype->type_flags & DEVTYPE__HAS_COMPARE) == 0)
-						{
-							elog(DEBUG1, "gpusort: type '%s' is not device supported",
-								 format_type_be(exprType((Node *)em_expr)));
 							continue;
 						}
 					}
@@ -2425,7 +2464,7 @@ consider_sorted_groupby_path(PlannerInfo *root,
 						kind |= KSORT_KEY_ATTR__NULLS_FIRST;
 					if (__PathKeyUseLessThanCompare(pk))
 						kind |= KSORT_KEY_ATTR__ORDER_ASC;
-					else if (__PathKeyUseGreaterThanCompare(pk))
+					else if (!__PathKeyUseGreaterThanCompare(pk))
 					{
 						elog(DEBUG1, "Bug? PathKey has neither ASC nor DESC sorting order");
 						return false;	/* should not happen */
@@ -2450,6 +2489,73 @@ consider_sorted_groupby_path(PlannerInfo *root,
 	*p_sortkeys_refs  = sortkeys_refs;
 	*p_gpusort_cost   = 10.0 + comparison_cost * ntuples * LOG2(ntuples);
 	return true;
+}
+
+/*
+ * tryAddGpuSortedGroupByPath
+ *
+ * GPU-Sort for GROUP BY ... ORDER BY / window-rank: the service returns each group once, final and in
+ * sort order, so the path is Projection (final functions on the CPU) -> GpuPreAgg without an Aggregate
+ * node. That needs a single session to see every row, so it is built for the non-parallel path only
+ * (parallel workers have a session each and PostgreSQL's Aggregate combines them), and the service
+ * fails the query if the CPU would have had to evaluate rows itself (pg_strom.cpu_fallback must be
+ * 'off': consider_sorted_groupby_path checks that).
+ */
+static void
+tryAddGpuSortedGroupByPath(xpugroupby_build_path_context *con, CustomPath *cpath_agg,
+						   double num_groups, bool be_parallel)
+{
+	PlannerInfo *root = con->root;
+	Query	   *parse = root->parse;
+	pgstromPlanInfo *pp_info;
+	CustomPath *cpath;
+	Path	   *__path;
+	List	   *sortkeys_upper = NIL;
+	List	   *sortkeys_expr = NIL;
+	List	   *sortkeys_kind = NIL;
+	List	   *sortkeys_refs = NIL;
+	Cost		gpusort_cost = 0.0;
+	Cost		per_tuple;
+
+	if (be_parallel || !pgstrom_enable_gpusort)
+		return;
+	if (!parse->groupClause || parse->distinctClause || con->havingProjQuals != NIL)
+		return;
+	if (!consider_sorted_groupby_path(root,
+									  cpath_agg,
+									  con->group_rel->reltarget,
+									  con->target_proj_final,
+									  num_groups,
+									  &sortkeys_upper,
+									  &sortkeys_expr,
+									  &sortkeys_kind,
+									  &sortkeys_refs,
+									  &gpusort_cost))
+		return;
+	per_tuple = (cpath_agg->path.pathtarget->cost.per_tuple + pgstrom_gpu_tuple_cost);
+	cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath_agg->path);
+	pp_info = copy_pgstrom_plan_info(linitial(cpath_agg->custom_private));
+	pp_info->xpu_task_flags |= DEVTASK__MERGE_FINAL_BUFFER;
+	pp_info->gpusort_keys_expr = sortkeys_expr;
+	pp_info->gpusort_keys_kind = sortkeys_kind;
+	pp_info->gpusort_keys_refs = sortkeys_refs;
+	linitial(cpath->custom_private) = pp_info;
+	lsecond(cpath->custom_private) = con->target_proj_final;
+	lthird(cpath->custom_private) = con->havingProjQuals;
+	cpath->path.startup_cost = (cpath->path.total_cost
+								- per_tuple * cpath->path.rows / 2.0
+								+ gpusort_cost);
+	cpath->path.total_cost = (cpath->path.startup_cost
+							  + per_tuple * cpath->path.rows / 2.0);
+	/* the projection computes the final functions of the aggregates from the partial states */
+	__path = (Path *)create_projection_path(root,
+											con->group_rel,
+											&cpath->path,
+											con->target_proj_final);
+	__path->pathkeys = sortkeys_upper;
+	if (con->has_aggfuncs)
+		__path = pgstrom_create_dummy_path(root, __path);
+	add_path(con->group_rel, __path);
 }
 
 /*
@@ -2632,87 +2738,12 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		}
 		try_add_final_groupby_paths(&con, __path);
 	}
-	else
-	{
-		pgstromPlanInfo	*pp_info = linitial(cpath->custom_private);
-		Path   *__path = &cpath->path;
-		List   *__sortkeys_upper = NIL;
-		List   *__sortkeys_expr = NIL;
-		List   *__sortkeys_kind = NIL;
-		List   *__sortkeys_refs = NIL;
-		Cost	__gpusort_cost = 0.0;
 
-		/*
-		 * final buffer should be merged for both of complete aggregation
-		 * or GPU-Sorting.
-		 */
-		pp_info->xpu_task_flags |= DEVTASK__MERGE_FINAL_BUFFER;
-
-		/* save a few extra properties */
-		lsecond(cpath->custom_private) = con.target_proj_final;
-		lthird(cpath->custom_private) = con.havingProjQuals;
-	retry_gpusort:
-		/* attach Projection path */
-		__path = (Path *)
-			create_projection_path(root,
-								   group_rel,
-								   __path,
-								   con.target_proj_final);
-		__path->pathkeys = __sortkeys_upper;
-
-		/* attach Gather path, if parallel */
-		if (be_parallel)
-		{
-			__path = (Path *)
-				create_gather_path(root,
-								   group_rel,
-								   __path,
-								   __path->pathtarget,
-								   NULL,
-								   &num_groups);
-			__path->pathkeys = __sortkeys_upper;
-		}
-		/*
-		 * inject dummy path to resolve outer-references by Aggref
-		 */
-		if (con.has_aggfuncs)
-			__path = pgstrom_create_dummy_path(root, __path);
-		/* add fully-work */
-		add_path(group_rel, __path);
-
-		/*
-		 * consider the Sorted GPU-PreAgg Path opportunity, if available
-		 */
-		if (__sortkeys_upper == NIL &&
-			con.havingProjQuals == NIL &&
-			consider_sorted_groupby_path(root,
-										 cpath,
-										 group_rel->reltarget,
-										 con.target_proj_final,
-										 num_groups,
-										 &__sortkeys_upper,
-										 &__sortkeys_expr,
-										 &__sortkeys_kind,
-										 &__sortkeys_refs,
-										 &__gpusort_cost))
-		{
-			Cost	__per_tuple = (cpath->path.pathtarget->cost.per_tuple +
-								   pgstrom_gpu_tuple_cost);
-			cpath = (CustomPath *)pgstrom_copy_pathnode(&cpath->path);
-			pp_info = copy_pgstrom_plan_info(pp_info);
-			pp_info->gpusort_keys_expr = __sortkeys_expr;
-			pp_info->gpusort_keys_kind = __sortkeys_kind;
-			pp_info->gpusort_keys_refs = __sortkeys_refs;
-			linitial(cpath->custom_private) = pp_info;
-			cpath->path.startup_cost = (cpath->path.total_cost
-										- __per_tuple * cpath->path.rows / 2.0
-										+ __gpusort_cost);
-			cpath->path.total_cost = (cpath->path.startup_cost
-									  + __per_tuple * cpath->path.rows / 2.0);
-			__path = &cpath->path;
-			goto retry_gpusort;
-		}
-	}
+	/*
+	 * GPU-Sort: the same GpuPreAgg path, with the final groups sorted by the service and no Aggregate
+	 * above (non-parallel only: the service keeps the groups of one session, see tryAddGpuSortedGroupByPath).
+	 */
+	tryAddGpuSortedGroupByPath(&con, cpath, num_groups, be_parallel);
 }
 
 static void
@@ -2754,8 +2785,7 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 											  try_parallel > 0);
 		if (!input_path)
 			continue;
-		if (pgstromPathScansArrowFdw(root, input_path))
-			continue;	/* the Vulkan service aggregates heap pages only */
+		/* an Arrow_Fdw / Parquet input is aggregated by the service as well (arrow_exec.c) */
 		/*
 		 * unless pg_strom.enable_partitionwise_gpupreagg is enabled,
 		 * we don't make a path for partitioned outer relation.
@@ -3495,9 +3525,31 @@ GpuPreAggAddCustomPath(PlannerInfo *root,
 				{
 					Path   *__path = lfirst(lc);
 
+					FinalPathExtraData *fextra = extra;
+					Query	   *parse = root->parse;
+
+					/* WITH TIES needs the rows after the limit too */
+					if (parse->limitOption == LIMIT_OPTION_WITH_TIES)
+						continue;
 					__path = tryGpuSortWithLimitPath(root, extra, __path, false);
 					if (__path)
+					{
+						/*
+						 * The sorter keeps the first limit+offset rows; the Limit node (the planner has
+						 * not put one on this path: it only adds it to the paths of its own list) drops
+						 * the OFFSET rows and enforces the count.
+						 */
+						if (fextra->limit_needed)
+							__path = (Path *)create_limit_path(root,
+															   upper_rel,
+															   __path,
+															   parse->limitOffset,
+															   parse->limitCount,
+															   parse->limitOption,
+															   fextra->offset_est,
+															   fextra->count_est);
 						pathlist = lappend(pathlist, __path);
+					}
 				}
 				foreach (lc, pathlist)
 					add_path(upper_rel, (Path *)lfirst(lc));
