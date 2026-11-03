@@ -139,13 +139,14 @@ def tok(r, typ):
     if typ in ("date", "ts", "tz", "time"):
         nm = {"date": "date", "ts": "timestamp", "tz": "timestamptz", "time": "time"}[typ]
         return lit("'" + r.choice(LITS[typ]) + "'::" + nm, typ)
+    small = r.random() < 0.7        # mostly small values: the boundary ones make most queries raise errors
     if typ in INTS:
-        return lit("(" + r.choice(LITS[typ]) + ")::" + INTSQL[typ], typ)
+        return lit("(" + r.choice(LITS[typ][:6] if small else LITS[typ]) + ")::" + INTSQL[typ], typ)
     if typ == "f4":
-        v = r.choice(LITS["f4"])
+        v = r.choice(LITS["f4"][:6] if small else LITS["f4"])
         return lit("(" + v + ")::float4", typ)
     if typ == "num":
-        v = r.choice(LITS["num"])
+        v = r.choice(LITS["num"][:8] if small else LITS["num"])
         return lit("(" + v + ")::numeric", typ)
     if typ == "f8":
         return lit("(" + r.choice(LITS["f4"]) + ")::float8", typ)
@@ -271,7 +272,7 @@ class Gen:
         t = {2: "i2", 4: "i4", 8: "i8"}[w]
         k = r.random()
         if k < 0.60:
-            op = r.choice(["+", "-", "*", "*", "/", "%"])
+            op = r.choice(["+", "+", "+", "-", "-", "-", "*", "*", "*", "/", "%"])
             a = self.expr(t, d - 1)
             ot = t
             if op != "%" and r.random() < 0.25:
@@ -279,8 +280,8 @@ class Gen:
             b = self.expr(ot, d - 1)
             if op == "%" and ot != t:
                 b = self.cast(b, INTSQL[t])
-            if op in ("/", "%") and r.random() < 0.3:
-                b = lit("(" + r.choice(["0", "1", "-1", "2", "3", "7", "10", "-3"]) + ")::" + INTSQL[ot if op != "%" else t], ot)
+            if op in ("/", "%") and r.random() < 0.6:
+                b = lit("(" + r.choice(["1", "-1", "2", "3", "7", "10", "-3", "1", "-1", "0"]) + ")::" + INTSQL[ot if op != "%" else t], ot)
             res = t if ot == t else max(t, ot, key=lambda x: int(x[1:]))
             return N("({0} " + op + " {1})", [a, b], res, pr=True)
         if k < 0.70:
@@ -761,6 +762,9 @@ class Runner:
         errs = [l for l in err.splitlines() if l.startswith("ERROR")]
         if errs:
             return plan, False, errs[0]
+        if err.strip() and not body.strip():
+            # no result and no ERROR: the connection was lost (a crashed backend or service)
+            return plan, False, "ERROR:  fuzzer: no result: " + err.strip().replace("\n", " | ")[:300]
         if "SET" in body.split("\n")[0] and False:
             pass
         return plan, True, body.strip()
@@ -777,12 +781,28 @@ def invalid_query(msg):
             "invalid escape" in msg or "LIKE pattern" in msg)
 
 
-SERVICE_ERR = ("gpuserv", "Vulkan", "registers", "program", "kernel variable", "service", "xpucode", "slot")
+# messages of scan_prog.c's fail() (the service refused to translate the program), see scan_prog.c
+SERVICE_ERR = ("registers", "kernel variables", "by the Vulkan", "by this service", "variable slot", "program is too large",
+               "does not have the type the expression expects", "has no value", "malformed", "output columns (up to",
+               "GROUP BY keys (up to", "of an unsupported type", "unexpected ", "not loaded from the scan relation",
+               "is out of range", "too many", "cannot create the", "cannot allocate", "dispatch failed",
+               "not a GpuJoin session", "join and sort", "does not exist")
+PREFIX = re.compile(r"^ERROR:  gpuserv:\d+\s+")
+SUFFIX = re.compile(r"\s+\(in [^)]*\)\s*$")
+
+
+def norm_err(msg):
+    """error text without the service's prefix and its location suffix"""
+    m = PREFIX.sub("ERROR:  ", msg)
+    return SUFFIX.sub("", m)
 
 
 def is_service_error(msg):
-    low = msg.lower()
-    return any(k.lower() in low for k in SERVICE_ERR) and "out of range" not in low
+    low = norm_err(msg).lower()
+    if "fuzzer: no result" in msg or "terminating connection" in msg:
+        return True				# a crashed backend or service
+    return msg.startswith("ERROR:  gpuserv") and any(k.lower() in low for k in SERVICE_ERR) and "integer out of range" not in low \
+        and "smallint out of range" not in low and "bigint out of range" not in low
 
 
 def classify(run, q, quick=False):
@@ -795,8 +815,8 @@ def classify(run, q, quick=False):
     if gok and cok:
         if gres == cres:
             return "ok", (gres, cres)
-        g2 = run.result(gset, sql)[2:]
-        if g2[0] and g2[1] != gres:
+        _, ok2, r2 = run.result(gset, sql)
+        if ok2 and r2 != gres:
             return "unstable", (gres, cres)
         return "fail_rows", (gres, cres)
     if not gok and not cok:
@@ -804,8 +824,8 @@ def classify(run, q, quick=False):
             return "invalid", (gres, cres)
         if is_service_error(gres) and not is_service_error(cres):
             return "fail_service", (gres, cres)
-        a = ERR_NUM.sub("#", gres)
-        b = ERR_NUM.sub("#", cres)
+        a = ERR_NUM.sub("#", norm_err(gres))
+        b = ERR_NUM.sub("#", norm_err(cres))
         return ("same_error" if a == b else "diff_error"), (gres, cres)
     # one side only
     if not gok:
@@ -919,11 +939,13 @@ def main():
     ap.add_argument("--only", type=int, default=-1)
     ap.add_argument("--no-minimize", action="store_true")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--samples", type=int, default=int(os.environ.get("FUZZ_SAMPLES", "3")))
     ap.add_argument("--start", type=int, default=0)
     a = ap.parse_args()
     run = Runner(a.psql, a.sock, a.port, a.db)
     tally = {}
     plans = {}
+    samples = {}
     nfail = 0
     t0 = time.time()
     done = 0
@@ -967,6 +989,8 @@ def main():
         q = gen_query(a.seed, idx)
         v, d = classify(run, q)
         tally[v] = tally.get(v, 0) + 1
+        if v in ("asym", "diff_error", "invalid", "unstable") and len(samples.setdefault(v, [])) < a.samples:
+            samples[v].append((idx, q.settings, q.sql(), d[0], d[1]))
         note_plan(q)
         if a.verbose:
             print("[%d] %s %s: %s" % (idx, v, q.settings, q.sql()))
@@ -992,6 +1016,12 @@ def main():
         done += 1
         idx += 1
     el = time.time() - t0
+    for v, lst in sorted(samples.items()):
+        print("samples of %s:" % v)
+        for (i, st, sql, g, c) in lst:
+            print("  [%d] %s: %s" % (i, st, sql[:600]))
+            print("      GPU: %s" % g[:200])
+            print("      CPU: %s" % c[:200])
     print("-" * 72)
     print("fuzz: seed=%d queries=%d (%.0fs, %.1f q/s)" % (a.seed, done, el, done / max(el, 1e-9)))
     print("  results: " + ", ".join("%s=%d" % kv for kv in sorted(tally.items())))
