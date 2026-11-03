@@ -2668,13 +2668,40 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		 * kernel variables: the referenced columns of every relation, and one slot per computed
 		 * argument or filter of a partial aggregate (a plain column argument uses its column's slot)
 		 */
-		int			nslots = bms_num_members(pp_input->outer_refs);
+		List	   *pvars = list_concat_unique(NIL, pull_var_clause((Node *) con.target_partial->exprs, 0));
+		int			nslots = list_length(pvars);	/* columns the aggregates and keys read */
 		int			nexprs = 0;		/* computed arguments/filters/keys: a slot each, and a register that stays */
 		List	   *seen = NIL;
 		ListCell   *lc3;
+		int			bit = -1;
 
+		/* plus the columns only the lower node's quals and join keys read (not listed in pvars) */
+		while ((bit = bms_next_member(pp_input->outer_refs, bit)) >= 0)
+		{
+			AttrNumber	attno = bit + FirstLowInvalidHeapAttributeNumber;
+			bool		found = false;
+
+			foreach (lc, pvars)
+			{
+				Var	   *v = lfirst(lc);
+
+				if (v->varno == pp_input->base_relid && v->varattno == attno)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				nslots++;
+		}
 		foreach (lc, inner_target_list)
-			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
+		{
+			ListCell   *lc5;
+
+			foreach (lc5, ((PathTarget *) lfirst(lc))->exprs)
+				if (!list_member(pvars, lfirst(lc5)))
+					nslots++;
+		}
 		foreach (lc3, con.target_partial->exprs)
 		{
 			Node   *e = lfirst(lc3);
