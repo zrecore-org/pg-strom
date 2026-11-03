@@ -56,4 +56,13 @@ bool	scan_vm_agg_action_supported(int action);
 #define SCAN_JOIN_MAXDEPTH	4		/* inner relations of one GpuJoin; must equal JOIN_MAXD of join.slang */
 bool	scan_vm_groupkey_type_supported(int type_code);
 
+/*
+ * GPU-Sort (A7): which sort keys of a GpuPreAgg result the service sorts on. 'kind' is KSORT_KEY_KIND__*,
+ * 'action' the KAGG_ACTION__* of the aggregate the key comes from (0 for a GROUP BY key), 'type_code' the
+ * TypeOpCode of a GROUP BY key. At most this many keys; GPU-Sort needs the group count to fit a
+ * device buffer (gpusort.c) or it sorts on the CPU of the service.
+ */
+#define SCAN_SORT_KEYS		8
+bool	scan_vm_gpusort_key_supported(int kind, int action, int type_code);
+
 #endif	/* GPUSERV_SCAN_CAPS_H */

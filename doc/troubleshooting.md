@@ -127,7 +127,7 @@ Custom Scan (GpuScan) on t
 | `Scan-Engine: VFS with GPU0` | Storage is read by the CPU (VFS) and fed to GPU0 (the only mode in this build; there is no GPU-Direct). With `ANALYZE` it adds `buffer=`, `vfs=` (blocks read through the buffer manager or the file) and `ntuples=`. |
 | `Fallback-stats: depth[0]=N, ...` | With `ANALYZE`, when non-zero: tuples handled by the CPU fallback path, per join depth. Whether the CPU re-evaluation of compressed or TOAST-ed text is counted here was not checked. |
 | `GPU Pinned Buffer` | Not produced in this build. |
-| `GPU-Sort keys`, `Window-Rank Filter` | Not produced (GPU-Sort and window functions are not implemented; `pg_strom.enable_gpusort` is `off`). |
+| `GPU-Sort keys`, `GPU-Sort Limit`, `Window-Rank Filter` | A GpuPreAgg whose groups the service sorts (needs `pg_strom.enable_gpusort = on`, `pg_strom.cpu_fallback = off`, no parallel workers; the plan has no Aggregate or Sort above it). If the CPU would have to evaluate rows (compressed/external values) the query fails with "GPU-Sort cannot combine ... rows": turn `enable_gpusort` off for it. |
 | Arrow: `referenced: ...`, file lists, `Parquet-cache` | From Arrow_Fdw; the Parquet cache is a stub. |
 
 When an aggregate uses the GPU the plan is `Aggregate -> Custom Scan (GpuPreAgg)` (PostgreSQL combines the

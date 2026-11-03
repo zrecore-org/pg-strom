@@ -24,7 +24,8 @@ done, which is why a trivial qual costs more than it would in generated code.
 | Scan (`GpuScan`) | Quals and computed projections over the types below; pass-through columns of any type; UPDATE and DELETE scans; query parameters | See "types" |
 | Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float and text aggregates, `min`/`max` of numeric, `sum`/`avg` of numerics whose scale is not fixed by the plan; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
 | Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
-| Other | | GPU-Sort and window functions, GPU-Cache, jsonb, PostGIS (dropped), SELECT INTO direct (dropped) |
+| Sorting (`GPU-Sort`, off by default: `pg_strom.enable_gpusort`) | The groups of a non-parallel GpuPreAgg: `GROUP BY ... ORDER BY` on group keys, `count`, integer `sum`/`min`/`max`, ASC/DESC, NULLS FIRST/LAST, up to 8 keys, `LIMIT` pushed into the sort, `rank()`/`dense_rank()`/`row_number()` below N per partition | Sorting of scan/join results, `avg`, float/numeric keys, parallel plans, `cpu_fallback = on` |
+| Other | | GPU-Cache, jsonb, PostGIS (dropped), SELECT INTO direct (dropped) |
 
 ## Types
 
@@ -115,7 +116,7 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 
 | Feature | State |
 |---|---|
-| GPU-Sort, window functions on the GPU | Not implemented (plan A7); `pg_strom.enable_gpusort` defaults to `off` and does nothing |
+| GPU-Sort of scan / join results, window functions other than the rank filter | Not implemented (plan A7 status); GPU-Sort of GpuPreAgg groups works, see the table above |
 | GPU-Cache | A stub (plan A7); the SQL functions exist so that older upgrade scripts load |
 | Specialized kernels, fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
 | jsonb | Not started (plan A8) |

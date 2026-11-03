@@ -8,3 +8,4 @@ kernels_spv.h
 probe.err
 pgstrom-gpuserv
 gen/
+gpusort_check

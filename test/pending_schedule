@@ -5,10 +5,6 @@
 # One line of reason each; details in vulkan_known_failures.txt.
 # ----------
 
-# GPU-Sort (A7): the plan has "GPU-Sort keys" / "Window-Rank Filter" under GpuPreAgg; the Vulkan build
-# sorts on the CPU, and the test's \t output (no QUERY PLAN header) cannot be compared by plan text alone.
-test: gpu_sort
-
 # conv_text_inet needs test/data/ip_mixed_with_masks_10k.tsv, which is not in the repository: every \copy fails and
 # the queries run on an empty table (a pass would mean nothing). Add the file, then move it to vulkan_schedule.
 test: conv_text_inet

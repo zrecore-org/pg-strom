@@ -46,6 +46,9 @@ LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.
 ARROW_SPV  := $(foreach r,8 16 32,build/gpuarrow$(r).spv)
 SPV_FILES  += $(ARROW_SPV)
 LIB_OBJS   += arrow_exec.o
+# GPU-Sort (A7): the bitonic sort kernel and the host side
+SPV_FILES  += build/gsort.spv
+LIB_OBJS   += gpusort.o gpu_vk_seq.o
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
 
@@ -124,6 +127,20 @@ build/jgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm
 build/gpuarrow%.spv: kernels_vm/arrow.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/arrow.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry arrow_main -stage compute -o $@
+
+build/gsort.spv: kernels_vm/gsort.slang | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/gsort.slang -I kernels_vm -target spirv -entry gsort_main -stage compute -o $@
+
+gpusort.o: gpusort.c gpusort.h scan_exec.h kernels_spv.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+# self-check of GPU-Sort against the CPU sort and naive window-rank (not part of "all")
+gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+gpusort_check: gpusort_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS)
 
 arrow_exec.o: arrow_exec.c scan_exec.h scan_prog.h scan_caps.h kernels_spv.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<

@@ -28,3 +28,7 @@ test: partition
 
 # misc
 test: misc
+
+# GPU-Sort (A7): the test groups by char(10) columns, which GpuPreAgg does not take, so its plans stay on the CPU
+# (the GPU-Sort path itself is covered by test/gpuserv/gpusort_tests.inc); the rows must equal the CPU run
+test: gpu_sort

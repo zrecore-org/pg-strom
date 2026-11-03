@@ -227,8 +227,29 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
 	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
 		PG_RETURN_NULL();
+	/*
+	 * fmin_i1 / fmin_i2 / fmin_i4 / fmin_i8 (and fmax_*) are all bound to this symbol by the old SQL
+	 * scripts, so the width comes from the declared result type. (Before, every one of them range-checked
+	 * as int1: the final projection of a GpuPreAgg without an Aggregate node, i.e. GPU-Sort, failed
+	 * for min/max of int2/int4/int8.)
+	 */
+	switch (get_fn_expr_rettype(fcinfo->flinfo))
+	{
+		case INT2OID:
+			if (state->value < SHRT_MIN || state->value > SHRT_MAX)
+				elog(ERROR, "min/max(int2) out of range");
+			PG_RETURN_INT16((int16) state->value);
+		case INT4OID:
+			if (state->value < INT_MIN || state->value > INT_MAX)
+				elog(ERROR, "min/max(int4) out of range");
+			PG_RETURN_INT32((int32) state->value);
+		case INT8OID:
+			PG_RETURN_INT64(state->value);
+		default:
+			break;		/* int1 */
+	}
 	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
-		elog(ERROR, "min(int8) out of range");
+		elog(ERROR, "min/max(int1) out of range");
 	PG_RETURN_INT32(state->value);
 }
 

@@ -19,6 +19,7 @@
 #include "scan_exec.h"
 #include "scan_caps.h"
 #include "cpu_vm.h"
+#include "gpusort.h"
 
 #define SCAN_WG_MAX		65535U
 #define AGG_PAGES_PER_WG	32U		/* pages one aggregation workgroup runs over */
@@ -477,6 +478,7 @@ scan_engine_fini(scan_engine *eng)
 	for (int i = 0; i < SCAN_MAP_CACHE; i++)
 		map_entry_drop(eng, &eng->maps[i]);
 	arrow_engine_fini(eng);
+	gpusort_engine_fini(eng);
 	for (int i = 0; i < 3; i++)
 	{
 		if (eng->pipe_ready[i])
@@ -2125,9 +2127,13 @@ done:
  * combines (kagg_state__* of xpu_common.h in bytea; counts as int8): one row without GROUP BY,
  * one row per group with it.
  */
-XpuCommand *
-scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
-					const agg_state *st, size_t *p_len, char *err, size_t errlen)
+/*
+ * 'order' (GPU-Sort): the groups to return, in this order, nrows_out of them (NULL: all, in table order).
+ */
+static XpuCommand *
+agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
+				const agg_state *st, const uint32_t *order, uint32_t nrows_out,
+				size_t *p_len, char *err, size_t errlen)
 {
 	const kern_session_info *session = &session_cmd->u.session;
 	const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(session);
@@ -2142,6 +2148,8 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 	kern_data_store *kds;
 	uint64_t   *rowindex;
 
+	if (order)
+		nrows = nrows_out;
 	if (!kds_dst_head || !kagg || ncols > SCAN_AGG_MAX || kds_dst_head->ncols < ncols)
 	{
 		snprintf(err, errlen, "the result store has %u columns, %u are needed",
@@ -2162,7 +2170,7 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 	{
 		int			sz;
 		size_t		idx_sz = MAXALIGN(sizeof(uint64_t) * nrows);
-		const group_entry *g = (grouped ? &st->groups->ents[r] : NULL);
+		const group_entry *g = (grouped ? &st->groups->ents[order ? order[r] : r] : NULL);
 
 		for (uint32_t j = 0; j < ncols; j++)
 		{
@@ -2291,6 +2299,166 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 	}
 	*p_len = resp->length;
 	return resp;
+}
+
+/*
+ * GPU-Sort of the groups: the session carries the sort keys (xpucode_gpusort_keydesc). Builds the key
+ * words of every group from its keys and aggregate states (the final value of a sum/min/max/count is
+ * known here because this session saw every row: the plan has no Aggregate node above), sorts, and
+ * applies the top-N cut or the window-rank filter. Returns the group numbers in output order.
+ */
+static int
+group_sort_order(scan_engine *eng, const kern_session_info *session, const scan_prog *prog,
+				 const kern_expression *kagg, const struct group_table *gt,
+				 uint32_t **p_order, uint32_t *p_nout, char *err, size_t errlen)
+{
+	const kern_expression *ksort = SESSION_KEXP_GPUSORT_KEYDESC(session);
+	uint32_t	ncols = kagg->u.pagg.nattrs;
+	uint32_t	n = gt->nents;
+	gpusort_spec spec;
+	uint32_t   *keys;
+	int			used_gpu = 0, rv;
+
+	if (ksort->u.sort.nkeys < 1 || ksort->u.sort.nkeys > GPUSORT_MAX_KEYS)
+	{
+		snprintf(err, errlen, "GPU-Sort supports 1 to %d sort keys, the plan has %d",
+				 GPUSORT_MAX_KEYS, (int) ksort->u.sort.nkeys);
+		return -1;
+	}
+	memset(&spec, 0, sizeof(spec));
+	spec.nkeys = ksort->u.sort.nkeys;
+	for (int s = 0; s < spec.nkeys; s++)
+	{
+		const kern_sortkey_desc *d = &ksort->u.sort.desc[s];
+
+		spec.key[s].asc = d->order_asc;
+		spec.key[s].nulls_first = d->nulls_first;
+		spec.key[s].wide = (d->kind == KSORT_KEY_KIND__PSUM_INT64 ||
+							d->kind == KSORT_KEY_KIND__PSUM_NUMERIC);
+	}
+	gpusort_spec_layout(&spec);
+	spec.window_func = ksort->u.sort.window_rank_func;
+	spec.window_limit = ksort->u.sort.window_rank_limit;
+	spec.partby_nkeys = ksort->u.sort.window_partby_nkeys;
+	spec.orderby_nkeys = ksort->u.sort.window_orderby_nkeys;
+	spec.limit = session->gpusort_limit_count;
+	if (spec.window_func &&
+		spec.partby_nkeys + spec.orderby_nkeys > spec.nkeys)
+	{
+		snprintf(err, errlen, "GPU-Sort: the window keys exceed the sort keys");
+		return -1;
+	}
+	keys = malloc(sizeof(uint32_t) * spec.nwords * (n ? n : 1));
+	if (!keys)
+	{
+		snprintf(err, errlen, "out of memory");
+		return -1;
+	}
+	for (uint32_t r = 0; r < n; r++)
+	{
+		const group_entry *g = &gt->ents[r];
+		uint32_t   *row = keys + (size_t) r * spec.nwords;
+
+		for (int s = 0; s < spec.nkeys; s++)
+		{
+			const kern_sortkey_desc *d = &ksort->u.sort.desc[s];
+			uint32_t	j = (uint32_t) d->src_anum - 1;
+			uint32_t	action;
+			int			isnull = 0;
+			__int128	v = 0;
+			int			a;
+
+			if (d->src_anum < 1 || j >= ncols)
+			{
+				snprintf(err, errlen, "GPU-Sort key %d refers to column %u of a %u-column result",
+						 s + 1, (unsigned) d->src_anum, ncols);
+				free(keys);
+				return -1;
+			}
+			action = kagg->u.pagg.desc[j].action;
+			a = prog->agg_of_col[j];
+			if (d->kind == KSORT_KEY_KIND__VREF && action == KAGG_ACTION__VREF && prog->key_of_col[j] >= 0)
+			{
+				int			k = prog->key_of_col[j];
+
+				if (g->knull & (1u << k))
+					isnull = 1;
+				else
+					v = g->key[k];
+			}
+			else if (d->kind == KSORT_KEY_KIND__VREF &&
+					 (action == KAGG_ACTION__NROWS_ANY || action == KAGG_ACTION__NROWS_COND) && a >= 0)
+				v = (__int128) g->acc[a].n;
+			else if ((d->kind == KSORT_KEY_KIND__PSUM_INT64 || d->kind == KSORT_KEY_KIND__PSUM_NUMERIC) &&
+					 (action == KAGG_ACTION__PSUM_INT || action == KAGG_ACTION__PSUM_INT64) && a >= 0)
+			{
+				if (g->acc[a].n == 0)
+					isnull = 1;
+				else
+					v = g->acc[a].sum;
+			}
+			else if (d->kind == KSORT_KEY_KIND__PMINMAX_INT64 &&
+					 (action == KAGG_ACTION__PMIN_INT32 || action == KAGG_ACTION__PMIN_INT64 ||
+					  action == KAGG_ACTION__PMAX_INT32 || action == KAGG_ACTION__PMAX_INT64) && a >= 0)
+			{
+				if (!g->acc[a].n)
+					isnull = 1;
+				else
+					v = g->acc[a].val;
+			}
+			else
+			{
+				snprintf(err, errlen, "GPU-Sort does not support sort key kind %d on result column %u (action %u)",
+						 (int) d->kind, j + 1, action);
+				free(keys);
+				return -1;
+			}
+			gpusort_encode(&spec, s, row, isnull, v);
+		}
+	}
+	rv = gpusort_run(eng, &spec, keys, n, p_order, p_nout, &used_gpu, err, errlen);
+	free(keys);
+	return rv;
+}
+
+/*
+ * The reply to XpuTaskFinal of a GpuPreAgg with GPU-Sort: the groups, sorted and cut. The backend's plan
+ * has no Aggregate above, so rows the backend would evaluate itself (rechecks: compressed or external
+ * values, numeric overflow) cannot be combined: the query fails with a message instead of returning
+ * groups that are wrong or duplicated.
+ */
+XpuCommand *
+scan_exec_agg_final_sorted(scan_engine *eng, const XpuCommand *session_cmd, const scan_prog *prog,
+						   const agg_state *st, size_t *p_len, char *err, size_t errlen)
+{
+	const kern_session_info *session = &session_cmd->u.session;
+	const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
+	uint32_t   *order = NULL;
+	uint32_t	nout = 0;
+	XpuCommand *resp;
+
+	if (!session->xpucode_gpusort_keydesc || !session->xpucode_groupby_keyhash || !kagg ||
+		!st->groups || st->groups->nents == 0)
+		return agg_final_build(session_cmd, prog, st, NULL, 0, p_len, err, errlen);
+	if (st->rck.nitems > 0)
+	{
+		snprintf(err, errlen, "GPU-Sort cannot combine %u rows that the CPU has to evaluate "
+				 "(compressed or external values); run the query with pg_strom.enable_gpusort = off",
+				 st->rck.nitems);
+		return NULL;
+	}
+	if (group_sort_order(eng, session, prog, kagg, st->groups, &order, &nout, err, errlen) != 0)
+		return NULL;
+	resp = agg_final_build(session_cmd, prog, st, order, nout, p_len, err, errlen);
+	free(order);
+	return resp;
+}
+
+XpuCommand *
+scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
+					const agg_state *st, size_t *p_len, char *err, size_t errlen)
+{
+	return agg_final_build(session_cmd, prog, st, NULL, 0, p_len, err, errlen);
 }
 
 /* ----------------------------------------------------------------

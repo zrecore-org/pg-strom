@@ -44,6 +44,8 @@ typedef struct scan_engine
 	int				jgagg_pipe_ready[2][3];
 	gpu_vk_pipeline	arrow_pipe[3];			/* the Arrow scan kernel: registers 8/16/32 */
 	int				arrow_pipe_ready[3];
+	gpu_vk_pipeline	sort_pipe;				/* GPU-Sort (gpusort.c) */
+	int				sort_pipe_ready;
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 } scan_engine;
@@ -109,6 +111,9 @@ int		scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
  */
 XpuCommand *scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 								const agg_state *st, size_t *p_len, char *err, size_t errlen);
+/* GPU-Sort (gpusort.c): the same with the groups sorted, cut or window-filtered as the session's sort keys say */
+XpuCommand *scan_exec_agg_final_sorted(scan_engine *eng, const XpuCommand *session_cmd, const scan_prog *prog,
+									   const agg_state *st, size_t *p_len, char *err, size_t errlen);
 void	agg_state_free(agg_state *st);
 
 /*

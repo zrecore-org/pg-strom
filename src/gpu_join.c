@@ -799,6 +799,12 @@ try_add_sorted_gpujoin_path(PlannerInfo *root,
 			 pp_info->xpu_task_flags);
 		return;		/* feture available on GPU only */
 	}
+	/*
+	 * The Vulkan service sorts the groups of a GpuPreAgg (gpu_preagg.c, gpusort.c); sorting the rows of a
+	 * GpuScan / GpuJoin (a pinned final buffer in the CUDA service) is not implemented.
+	 */
+	elog(DEBUG1, "gpusort: not implemented for GpuScan/GpuJoin results by the Vulkan service");
+	return;
 	/* pick up upper sortkeys */
 	if (root->window_pathkeys != NIL)
         sortkeys_upper = root->window_pathkeys;

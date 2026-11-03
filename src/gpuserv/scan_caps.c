@@ -870,3 +870,25 @@ scan_vm_groupkey_type_supported(int type_code)
 	}
 	return false;
 }
+
+bool
+scan_vm_gpusort_key_supported(int kind, int action, int type_code)
+{
+	switch (kind)
+	{
+		case KSORT_KEY_KIND__VREF:
+			/* a GROUP BY key, or count(*) / count(x) */
+			if (action == 0)
+				return scan_vm_groupkey_type_supported(type_code);
+			return (action == KAGG_ACTION__NROWS_ANY || action == KAGG_ACTION__NROWS_COND);
+		case KSORT_KEY_KIND__PSUM_INT64:		/* sum(int1/2/4) */
+		case KSORT_KEY_KIND__PSUM_NUMERIC:		/* sum(int8): a 128-bit state; sum(numeric) is another action */
+			return (action == KAGG_ACTION__PSUM_INT || action == KAGG_ACTION__PSUM_INT64);
+		case KSORT_KEY_KIND__PMINMAX_INT64:
+			return (action == KAGG_ACTION__PMIN_INT32 || action == KAGG_ACTION__PMIN_INT64 ||
+					action == KAGG_ACTION__PMAX_INT32 || action == KAGG_ACTION__PMAX_INT64);
+		default:
+			break;		/* averages, variances, float and numeric sums: the CPU sorts */
+	}
+	return false;
+}
