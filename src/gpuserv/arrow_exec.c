@@ -1499,7 +1499,7 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
 	memset(&sh, 0, sizeof(sh));
-	sp = spec_pipe(eng, prog, SPEC_SCAN | SPEC_ARROW, 0, 0, 0, NULL, &eng->arrow_pipe[variant]);
+	sp = spec_pipe(eng, prog, SPEC_SCAN | SPEC_ARROW, 0, 0, NULL, NULL, &eng->arrow_pipe[variant]);
 	if ((sp == &eng->arrow_pipe[variant] || spec_check_enabled(eng)) && !eng->arrow_pipe_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_gpuarrow8 : variant == 1 ? kspv_gpuarrow16 : kspv_gpuarrow32);
@@ -1669,6 +1669,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	gpu_vk_buffer bout;
 	int			have_out = 0, variant, avariant, grouped, rv = -1;
 	gpu_vk_pipeline *vmpipe;
+	spec_keystats ks;
 	uint32_t	nrows, nagg, ppw, pass_rows;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	uint64_t	n_overflow = 0;
@@ -1696,8 +1697,8 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	memset(&sh, 0, sizeof(sh));
 	sh.agg_max = 4 * (avariant + 1);
 	sh.ga_c = cap;
-	sp = spec_pipe(eng, prog, (grouped ? SPEC_GAGG : SPEC_AGG) | SPEC_ARROW, sh.agg_max, sh.ga_c,
-				   st->groups ? scan_group_count(st) : 0, &sh, vmpipe);
+	scan_group_keystats(st, prog->nkeys, &ks);
+	sp = spec_pipe(eng, prog, (grouped ? SPEC_GAGG : SPEC_AGG) | SPEC_ARROW, sh.agg_max, sh.ga_c, &ks, &sh, vmpipe);
 	if (grouped)
 	{
 		cap = sh.ga_c;
@@ -1890,7 +1891,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 	rec_words = 2 + prog->ndepth + 3 * ncomp;
 	variant = (prog->nregs <= 16 ? 0 : 1);
 	memset(&sh, 0, sizeof(sh));
-	sp = spec_pipe(eng, prog, SPEC_JOIN | SPEC_ARROW, 0, 0, 0, NULL, &eng->ajoin_pipe[variant]);
+	sp = spec_pipe(eng, prog, SPEC_JOIN | SPEC_ARROW, 0, 0, NULL, NULL, &eng->ajoin_pipe[variant]);
 	if ((sp == &eng->ajoin_pipe[variant] || spec_check_enabled(eng)) && !eng->ajoin_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_ajoin16 : kspv_ajoin32);
@@ -2085,6 +2086,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	gpu_vk_buffer bout;
 	int			have_out = 0, variant, avariant, grouped, rv = -1;
 	gpu_vk_pipeline *vmpipe;
+	spec_keystats ks;
 	uint32_t	nrows, nagg, ppw, pass_rows;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	uint64_t	n_overflow = 0;
@@ -2118,8 +2120,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	memset(&sh, 0, sizeof(sh));
 	sh.agg_max = 4 * (avariant + 1);
 	sh.ga_c = cap;
-	sp = spec_pipe(eng, prog, (grouped ? SPEC_JGAGG : SPEC_JAGG) | SPEC_ARROW, sh.agg_max, sh.ga_c,
-				   st->groups ? scan_group_count(st) : 0, &sh, vmpipe);
+	scan_group_keystats(st, prog->nkeys, &ks);
+	sp = spec_pipe(eng, prog, (grouped ? SPEC_JGAGG : SPEC_JAGG) | SPEC_ARROW, sh.agg_max, sh.ga_c, &ks, &sh, vmpipe);
 	if (grouped)
 	{
 		cap = sh.ga_c;

@@ -4,6 +4,7 @@
 // an emit does depends on JW_MODE, which the including kernel defines:
 //   0  join.slang:  append a match record (page, line pointer, inner items, computed values)
 //   1  jagg.slang:  add the row to the thread's aggregate accumulators (aggregation without GROUP BY)
+//   3  jgagg_dm.slang: add the row to a direct-mapped group table at once (no barriers; specialized kernels only)
 //   2  jgagg.slang: add the row to the workgroup's group table (GROUP BY). The group table works in
 //                   rounds separated by workgroup barriers (see gagg.slang): one walk iteration
 //                   is one round, and the walk loop must be uniform across the workgroup, because
@@ -304,6 +305,19 @@
                     }
                 }
 #endif
+            }
+#elif JW_MODE == 3
+            // direct-mapped GROUP BY: the row goes to its slot at once, or to the overflow list
+            if (emit)
+            {
+                my_hits += 1;
+                if (!spec_dm_row(regs))
+                {
+                    uint idx;
+                    InterlockedAdd(outb[ovf_base], 1, idx);
+                    if (idx < ovf_cap)
+                        spec_dm_ov(regs, ovf_base + 1 + idx * OV_REC);
+                }
             }
 #else
             // A: stage the row (the key and the aggregate arguments)

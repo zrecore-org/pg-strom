@@ -37,7 +37,26 @@ typedef struct spec_shape
 	int			arrow;		/* the outer relation is an Arrow record batch */
 	int			agg_max;	/* AGG_MAX / GA_NA of the kernel variant (the layout of the output) */
 	int			ga_c;		/* GA_C: slots of a workgroup's group table */
+	/*
+	 * Direct-mapped GROUP BY (gagg_dm.slang, jgagg_dm.slang): the keys are integers from a small window, a
+	 * group's slot is computed from its key, so no rows are staged and no barrier separates the rounds. Key k
+	 * maps to slot index key - dm_base[k] in [0, dm_w[k]); NULL maps to dm_w[k]; a row with a key outside
+	 * the window is aggregated on the CPU. ga_c is the product of the (dm_w + 1).
+	 */
+	int			dm;
+	int			dm_nkeys;
+	int64_t		dm_base[2];
+	int			dm_w[2];
 } spec_shape;
+
+/* the keys a session's group table holds (the planner gives no ranges): what a direct-mapped kernel is made for */
+typedef struct spec_keystats
+{
+	uint32_t	ngroups;
+	int			nkeys;
+	int64_t		kmin[2], kmax[2];
+	int			has_value[2];	/* some group has a non-NULL key k */
+} spec_keystats;
 
 /*
  * Generate the sources for a program: *defs (the #defines, included before the kernel) and *body
@@ -63,7 +82,7 @@ void	spec_mgr_destroy(spec_mgr *mgr);
  * (the variant's numbers for the VM kernel). out_shape may be NULL for the other kinds.
  */
 gpu_vk_pipeline *spec_pipe(struct scan_engine *eng, struct scan_prog *prog, int kind,
-						   int agg_max, int ga_c, uint32_t groups_seen, spec_shape *out_shape,
+						   int agg_max, int ga_c, const spec_keystats *ks, spec_shape *out_shape,
 						   gpu_vk_pipeline *vm_pipe);
 /* drop the program's reference to its compiled entry (scan_prog_free) */
 void	spec_release(struct scan_prog *prog);

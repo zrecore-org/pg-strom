@@ -517,6 +517,143 @@ gen_stage(gen_ctx *g, sbuf *o)
 	sb_printf(o, "}\n\n");
 }
 
+/*
+ * Direct-mapped GROUP BY (gagg_dm.slang, jgagg_dm.slang): the slot of a row is computed from its key values,
+ * the window of each key is a constant. spec_dm_row() adds a row to its slot with shared atomics (the
+ * accumulation of phase C of gagg.slang) and returns false when the row cannot be aggregated here (a key
+ * outside its window, a min/max argument beyond 32 bits): the caller hands it to the service.
+ */
+static void
+gen_dm(gen_ctx *g, sbuf *o, const spec_shape *sh)
+{
+	const uint32_t *w = g->w;
+	uint32_t	naggs = w[10], aggoff = w[11], nkeys = w[12], keyoff = w[13];
+	long long	cells = 1;
+
+	if (nkeys < 1 || nkeys > 2 || (int) nkeys != sh->dm_nkeys)
+	{
+		gen_fail(g, "the direct-mapped table needs the program's one or two keys");
+		return;
+	}
+	for (uint32_t k = 0; k < nkeys; k++)
+	{
+		if (sh->dm_w[k] < 1 || sh->dm_w[k] > 4096 || sh->dm_base[k] > ((int64_t) 1 << 62) ||
+			sh->dm_base[k] < -((int64_t) 1 << 62) || reg_ok(g, w[keyoff + k]))
+		{
+			gen_fail(g, "the window of key %u is not usable", k);
+			return;
+		}
+		cells *= (long long) sh->dm_w[k] + 1;
+	}
+	if (cells != sh->ga_c)
+	{
+		gen_fail(g, "the table size does not match the windows");
+		return;
+	}
+	sb_printf(o, "static const int64_t DM_B0 = int64_t(%lld);\nstatic const uint DM_W0 = %uu;\n",
+			  (long long) sh->dm_base[0], (unsigned) sh->dm_w[0]);
+	if (nkeys == 2)
+		sb_printf(o, "static const int64_t DM_B1 = int64_t(%lld);\nstatic const uint DM_W1 = %uu;\n",
+				  (long long) sh->dm_base[1], (unsigned) sh->dm_w[1]);
+	sb_printf(o, "static const uint DM_W1P = %uu;\n\n", nkeys == 2 ? (unsigned) sh->dm_w[1] + 1 : 1u);
+
+	/* spec_dm_key(slot, ...): the key of a slot */
+	sb_printf(o, "void spec_dm_key(uint s, out uint kn, out int64_t k0, out int64_t k1)\n{\n"
+				 "    kn = 0;\n    k0 = 0;\n    k1 = 0;\n"
+				 "    uint i0 = s / DM_W1P;\n"
+				 "    if (i0 == DM_W0)\n        kn |= 1u;\n    else\n        k0 = DM_B0 + int64_t(i0);\n");
+	if (nkeys == 2)
+		sb_printf(o, "    uint i1 = s %% DM_W1P;\n"
+					 "    if (i1 == DM_W1)\n        kn |= 2u;\n    else\n        k1 = DM_B1 + int64_t(i1);\n");
+	sb_printf(o, "}\n\n");
+
+	/* spec_dm_ov(regs, rb): the staged row for the overflow list (gagg.slang's OV_REC) */
+	sb_printf(o, "void spec_dm_ov(inout Reg regs[VM_MAX_REGS], uint rb)\n{\n"
+				 "    int64_t k0 = 0, k1 = 0;\n    uint kn = 0;\n");
+	for (uint32_t k = 0; k < nkeys; k++)
+	{
+		uint32_t	r = w[keyoff + k];
+
+		sb_printf(o, "    if (regs[%u].isnull != 0) kn |= %uu; else k%u = regs[%u].v;\n", r, 1u << k, k, r);
+	}
+	sb_printf(o, "    outb[rb + 0] = kn;\n"
+				 "    outb[rb + 1] = uint(uint64_t(k0) & 0xffffffffu);\n    outb[rb + 2] = uint(uint64_t(k0) >> 32);\n"
+				 "    outb[rb + 3] = uint(uint64_t(k1) & 0xffffffffu);\n    outb[rb + 4] = uint(uint64_t(k1) >> 32);\n");
+	for (uint32_t k = 0; k < naggs; k++)
+	{
+		uint32_t	cls = w[aggoff + 4 * k], ra = w[aggoff + 4 * k + 1], rf = w[aggoff + 4 * k + 2];
+
+		if (cls < 1 || cls > 5 || (cls != 1 && reg_ok(g, ra)) || (rf != 0xffffffffu && reg_ok(g, rf)))
+		{
+			gen_fail(g, "aggregate %u: unexpected class %u or register", k, cls);
+			return;
+		}
+		sb_printf(o, "    {\n        bool ok = true;\n");
+		if (rf != 0xffffffffu)
+			sb_printf(o, "        if (regs[%u].isnull != 0 || regs[%u].v == 0)\n            ok = false;\n", rf, rf);
+		if (cls != 1)
+			sb_printf(o, "        if (ok && regs[%u].isnull != 0)\n            ok = false;\n", ra);
+		if (cls == 1 || cls == 2)
+			sb_printf(o, "        int64_t v = 0;\n");
+		else
+			sb_printf(o, "        int64_t v = regs[%u].v;\n", ra);
+		sb_printf(o, "        outb[rb + 1 + 2 * GA_NK + %u] = ok ? 1u : 0u;\n"
+					 "        outb[rb + 1 + 2 * GA_NK + %u] = uint(uint64_t(v) & 0xffffffffu);\n"
+					 "        outb[rb + 1 + 2 * GA_NK + %u] = uint(uint64_t(v) >> 32);\n    }\n",
+				  3 * k, 3 * k + 1, 3 * k + 2);
+	}
+	sb_printf(o, "}\n\n");
+
+	/* spec_dm_row(regs) */
+	sb_printf(o, "bool spec_dm_row(inout Reg regs[VM_MAX_REGS])\n{\n    uint i0 = 0;\n    uint i1 = 0;\n");
+	for (uint32_t k = 0; k < nkeys; k++)
+	{
+		uint32_t	r = w[keyoff + k];
+
+		sb_printf(o, "    if (regs[%u].isnull != 0)\n        i%u = DM_W%u;\n    else\n    {\n"
+					 "        if (regs[%u].v < DM_B%u || regs[%u].v >= DM_B%u + int64_t(DM_W%u))\n            return false;\n"
+					 "        i%u = uint(regs[%u].v - DM_B%u);\n    }\n",
+				  r, k, k, r, k, r, k, k, k, r, k);
+	}
+	sb_printf(o, "    uint slot = i0 * DM_W1P + i1;\n");
+	for (uint32_t k = 0; k < naggs; k++)
+	{
+		uint32_t	cls = w[aggoff + 4 * k], ra = w[aggoff + 4 * k + 1], rf = w[aggoff + 4 * k + 2];
+
+		sb_printf(o, "    bool ok%u = true;\n", k);
+		if (rf != 0xffffffffu)
+			sb_printf(o, "    if (regs[%u].isnull != 0 || regs[%u].v == 0)\n        ok%u = false;\n", rf, rf, k);
+		if (cls != 1)
+			sb_printf(o, "    if (ok%u && regs[%u].isnull != 0)\n        ok%u = false;\n", k, ra, k);
+		if (cls == 3 || cls == 4 || cls == 5)
+			sb_printf(o, "    int64_t v%u = regs[%u].v;\n", k, ra);
+		if (cls == 4 || cls == 5)
+			sb_printf(o, "    if (ok%u && (v%u < -2147483648 || v%u > 2147483647))\n        return false;\n", k, k, k);
+	}
+	sb_printf(o, "    sh_occ[slot] = 1u;\n    uint prev;\n");
+	for (uint32_t k = 0; k < naggs; k++)
+	{
+		uint32_t	cls = w[aggoff + 4 * k];
+
+		sb_printf(o, "    if (ok%u)\n    {\n        uint a = slot * GA_NA + %u;\n", k, k);
+		if (cls == 1 || cls == 2)
+			sb_printf(o, "        InterlockedAdd(sh_an[a], 1, prev);\n");
+		else if (cls == 3)
+			sb_printf(o, "        uint64_t u = uint64_t(v%u) ^ 0x8000000000000000ull;\n"
+						 "        InterlockedAdd(sh_an[a], 1, prev);\n"
+						 "        InterlockedAdd(sh_l0[a], uint(u & 0xffffu), prev);\n"
+						 "        InterlockedAdd(sh_l1[a], uint((u >> 16) & 0xffffu), prev);\n"
+						 "        InterlockedAdd(sh_l2[a], uint((u >> 32) & 0xffffu), prev);\n"
+						 "        InterlockedAdd(sh_l3[a], uint(u >> 48), prev);\n", k);
+		else
+			sb_printf(o, "        uint b = uint(int(v%u)) ^ 0x80000000u;\n"
+						 "        InterlockedOr(sh_an[a], 1, prev);\n"
+						 "        Interlocked%s(sh_l0[a], b, prev);\n", k, cls == 4 ? "Min" : "Max");
+		sb_printf(o, "    }\n");
+	}
+	sb_printf(o, "    return true;\n}\n\n");
+}
+
 /* the computed values of a scan row: outb[vb + 3k ...] (scan.slang) or of a join match (cb = first word) */
 static void
 gen_store_comp(gen_ctx *g, sbuf *o, const char *name, int scan_style)
@@ -698,6 +835,8 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 		sb_printf(&defs, "#define AGG_MAX %d\n", shape->agg_max);
 	if (kind == SPEC_GAGG || kind == SPEC_JGAGG)
 		sb_printf(&defs, "#define GA_NA %d\n#define GA_C %d\n", shape->agg_max, shape->ga_c);
+	if ((kind == SPEC_GAGG || kind == SPEC_JGAGG) && shape->dm)
+		sb_printf(&defs, "#define SPEC_DM 1\n");
 	if (kind == SPEC_AGG)
 		sb_printf(&defs, "#define SCAN_WG 128\n");
 
@@ -724,7 +863,10 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 			break;
 		case SPEC_GAGG:
 			gen_scales_ok(&g, &body);
-			gen_stage(&g, &body);
+			if (shape->dm)
+				gen_dm(&g, &body, shape);
+			else
+				gen_stage(&g, &body);
 			break;
 		case SPEC_JOIN:
 			gen_join(&g, &body);
@@ -736,7 +878,10 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 			break;
 		case SPEC_JGAGG:
 			gen_join(&g, &body);
-			gen_stage(&g, &body);
+			if (shape->dm)
+				gen_dm(&g, &body, shape);
+			else
+				gen_stage(&g, &body);
 			break;
 		default:
 			gen_fail(&g, "unknown kernel kind %d", kind);

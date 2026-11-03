@@ -137,6 +137,28 @@ nc=$(spec_log_count 'specialize: check ok')
 fi
 [ "$(spec_log_count 'CHECK FAILED')" -eq 0 ]; check "check: no difference between the VM and the specialized kernels" $?
 
+# ---- 3b. direct-mapped GROUP BY kernels (gagg_dm.slang, jgagg_dm.slang): the windows are fixed by the environment,
+# so that small tables use them without a task of the session before (a service decides from the keys it has seen);
+# the queries' keys are partly inside the windows and partly outside, so rows go through the table and through the
+# CPU path, against the CPU's result either way
+echo "  -- direct-mapped GROUP BY (windows -8..16 and -4..8)"
+export PGSTROM_GPUSERV_SPECIALIZE=force
+export PGSTROM_GPUSERV_SPEC_DM="force:-8:24,-4:12"
+export PGSTROM_GPUSERV_CACHE_DIR="$ROOT/speccache_dm"
+rm -rf "$PGSTROM_GPUSERV_CACHE_DIR"
+spec_restart
+for t in s1 s2; do spec_shapes $t; done
+spec_join_shapes s1
+spec_join_shapes s3
+if [ "$SPEC_HAVE_CC" = 1 ]; then
+	n=$(spec_log_count 'in use .*direct-mapped')
+	[ "$n" -ge 4 ]; check "direct-mapped: $n kernels were used" $?
+	[ "$(spec_log_count 'group kernel [0-9a-f]+ in use .*direct-mapped')" -ge 1 ]; check "direct-mapped: a scan GROUP BY kernel" $?
+	[ "$(spec_log_count 'join group kernel [0-9a-f]+ in use .*direct-mapped')" -ge 1 ]; check "direct-mapped: a join GROUP BY kernel" $?
+	[ "$(spec_log_count 'specialize: .* not used')" -eq 0 ]; check "direct-mapped: no kernel failed to compile or load" $?
+fi
+unset PGSTROM_GPUSERV_SPEC_DM
+
 # ---- 4. two sessions that need the same new kernel at once: one compilation
 echo "  -- two sessions, one new kernel"
 export PGSTROM_GPUSERV_SPECIALIZE=force

@@ -906,7 +906,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
 	/* the VM kernel is only created when it is going to run (or to be compared with) */
-	sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, 0, NULL, &eng->pipe[variant]);
+	sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, NULL, NULL, &eng->pipe[variant]);
 	if ((sp == &eng->pipe[variant] || spec_check_enabled(eng)) && !eng->pipe_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_gpuscan8 : variant == 1 ? kspv_gpuscan16 : kspv_gpuscan32);
@@ -1297,7 +1297,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	}
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
-	sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, 0, NULL, &eng->agg_pipe[variant][avariant]);
+	sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, NULL, NULL, &eng->agg_pipe[variant][avariant]);
 	if ((sp == &eng->agg_pipe[variant][avariant] || spec_check_enabled(eng)) &&
 		ensure_agg_pipeline(eng, variant, avariant, err, errlen) != 0)
 		return -1;
@@ -1929,6 +1929,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, cap, rec_words, blk_words;
 	gpu_vk_pipeline *sp;
 	spec_shape	sh;
+	spec_keystats ks;
 	uint32_t   *lp_base = NULL;
 	size_t		out_words;
 	const uint32_t *out;
@@ -1977,8 +1978,8 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	/* the kernel of this task: the specialized one has its own table capacity and aggregate count (spec_shape) */
 	sh.agg_max = ga_variant_na[avariant];
 	sh.ga_c = ga_variant_cap[avariant];
-	sp = spec_pipe(eng, prog, SPEC_GAGG, sh.agg_max, sh.ga_c, st->groups ? st->groups->nents : 0, &sh,
-				   &eng->gagg_pipe[variant][avariant]);
+	scan_group_keystats(st, prog->nkeys, &ks);
+	sp = spec_pipe(eng, prog, SPEC_GAGG, sh.agg_max, sh.ga_c, &ks, &sh, &eng->gagg_pipe[variant][avariant]);
 	cap = sh.ga_c;
 	rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
 	blk_words = 1 + cap * rec_words;
@@ -2787,7 +2788,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	ncomp = prog->ncomp;
 	rec_words = 2 + prog->ndepth + 3 * ncomp;
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
-	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, 0, NULL, &eng->join_pipe[variant]);
+	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, NULL, NULL, &eng->join_pipe[variant]);
 	if ((sp == &eng->join_pipe[variant] || spec_check_enabled(eng)) && !eng->join_pipe_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_gpujoin8 : variant == 1 ? kspv_gpujoin16 : kspv_gpujoin32);
@@ -3079,6 +3080,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	gpu_vk_pipeline *sp, *vmpipe;
 	spec_shape	sh;
+	spec_keystats ks;
 	size_t		out_words, ovf_base = 0;
 	const uint32_t *out = NULL;
 	int			rv = -1;
@@ -3136,8 +3138,8 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	vmpipe = (grouped ? &eng->jgagg_pipe[variant][avariant] : &eng->jagg_pipe[variant][avariant]);
 	sh.agg_max = ga_variant_na[avariant];
 	sh.ga_c = ga_variant_cap[avariant];
-	sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, sh.agg_max, sh.ga_c,
-				   st->groups ? st->groups->nents : 0, &sh, vmpipe);
+	scan_group_keystats(st, prog->nkeys, &ks);
+	sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, sh.agg_max, sh.ga_c, &ks, &sh, vmpipe);
 	if (grouped)
 	{
 		cap = sh.ga_c;
@@ -3325,10 +3327,29 @@ scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *
 	agg_merge_workgroups(prog, st, out, ngroups_total);
 }
 
-uint32_t
-scan_group_count(const agg_state *st)
+void
+scan_group_keystats(const agg_state *st, int nkeys, spec_keystats *ks)
 {
-	return st->groups ? st->groups->nents : 0;
+	memset(ks, 0, sizeof(*ks));
+	ks->nkeys = nkeys;
+	if (!st->groups)
+		return;
+	ks->ngroups = st->groups->nents;
+	for (uint32_t i = 0; i < st->groups->nents; i++)
+	{
+		const group_entry *e = &st->groups->ents[i];
+
+		for (int k = 0; k < nkeys && k < 2; k++)
+		{
+			if (e->knull & (1u << k))
+				continue;
+			if (!ks->has_value[k] || e->key[k] < ks->kmin[k])
+				ks->kmin[k] = e->key[k];
+			if (!ks->has_value[k] || e->key[k] > ks->kmax[k])
+				ks->kmax[k] = e->key[k];
+			ks->has_value[k] = 1;
+		}
+	}
 }
 
 void

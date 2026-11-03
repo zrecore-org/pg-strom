@@ -165,6 +165,8 @@ build_join(int mode, scan_prog *prog)
 	prog->nregs = 16;
 }
 
+static int g_dm;			/* the next emit() makes a direct-mapped GROUP BY kernel */
+
 static int
 emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int ga_c, int arrow)
 {
@@ -179,6 +181,15 @@ emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int 
 		build_join(mode, &prog);
 	else
 		build(kind - 1, &prog);
+	memset(&sh, 0, sizeof(sh));
+	if (g_dm)
+	{
+		sh.dm = 1;
+		sh.dm_nkeys = 1;
+		sh.dm_base[0] = -5;
+		sh.dm_w[0] = 20;
+		ga_c = 21;
+	}
 	sh.kind = kind;
 	sh.arrow = arrow;
 	sh.agg_max = agg_max;
@@ -197,7 +208,9 @@ emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int 
 	f = fopen(path, "w"); fputs(body, f); fclose(f);
 	snprintf(path, sizeof(path), "%s/main.slang", dir);
 	f = fopen(path, "w");
-	fprintf(f, "#include \"spec_defs.inc\"\n#include \"%s\"\n", (arrow && kind == SPEC_SCAN) ? "arrow.slang" : kfile[kind]);
+	fprintf(f, "#include \"spec_defs.inc\"\n#include \"%s\"\n",
+			(arrow && kind == SPEC_SCAN) ? "arrow.slang" :
+			g_dm ? (kind == SPEC_GAGG ? "gagg_dm.slang" : "jgagg_dm.slang") : kfile[kind]);
 	fclose(f);
 	printf("%s\n", name);
 	free(defs);
@@ -221,6 +234,13 @@ main(int argc, char **argv)
 	/* a different shape of the GROUP BY kernels: exact aggregates, a small table */
 	rc |= emit(out, "gagg3", SPEC_GAGG, 0, 3, 16, 0);
 	rc |= emit(out, "jgagg3", SPEC_JGAGG, 2, 2, 32, 0);
+	/* direct-mapped GROUP BY */
+	g_dm = 1;
+	rc |= emit(out, "gaggdm", SPEC_GAGG, 0, 3, 0, 0);
+	rc |= emit(out, "jgaggdm", SPEC_JGAGG, 2, 2, 0, 0);
+	rc |= emit(out, "agaggdm", SPEC_GAGG, 0, 3, 0, 1);
+	rc |= emit(out, "ajgaggdm", SPEC_JGAGG, 2, 2, 0, 1);
+	g_dm = 0;
 	/* an Arrow record batch as the outer relation */
 	rc |= emit(out, "ascan", SPEC_SCAN, 0, 0, 0, 1);
 	rc |= emit(out, "aagg", SPEC_AGG, 0, 4, 0, 1);

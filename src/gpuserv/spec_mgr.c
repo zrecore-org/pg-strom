@@ -58,6 +58,7 @@ typedef struct spec_entry
 	int			kind;
 	int			arrow;
 	int			agg_max, ga_c;
+	spec_shape	shape;
 	char	   *defs, *body;
 	int			refs;				/* programs using it (main thread only) */
 	int			state;				/* SPEC_Q / READY / FAILED: set by the worker (atomic) */
@@ -499,7 +500,8 @@ compile_entry(spec_mgr *m, spec_entry *e, size_t *p_len, double *p_ms)
 	if (write_file(fp, e->body, strlen(e->body)) != 0)
 		goto fail_write;
 	snprintf(text, sizeof(text), "#include \"spec_defs.inc\"\n#include \"%s\"\n",
-			 (e->arrow && e->kind == SPEC_SCAN) ? "arrow.slang" : kind_file(e->kind));
+			 (e->arrow && e->kind == SPEC_SCAN) ? "arrow.slang" :
+			 e->shape.dm ? (e->kind == SPEC_GAGG ? "gagg_dm.slang" : "jgagg_dm.slang") : kind_file(e->kind));
 	snprintf(mainp, sizeof(mainp), "%s/main.slang", jobdir);
 	if (write_file(mainp, text, strlen(text)) != 0)
 		goto fail_write;
@@ -997,6 +999,7 @@ entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
 	e->arrow = sh->arrow;
 	e->agg_max = sh->agg_max;
 	e->ga_c = sh->ga_c;
+	e->shape = *sh;
 	e->defs = defs;
 	e->body = body;
 	e->state = SPEC_Q;
@@ -1034,13 +1037,102 @@ shape_stage_bytes(int na)
 	return 64 * (12 + 16 + 12 * na);	/* the staging arrays of the 64 threads of a workgroup */
 }
 
+/*
+ * A direct-mapped table for the keys the session has seen (spec_shape.dm): one key or two, integers in a window
+ * (a little wider than what has been seen, so that groups that show up later still fit); the table has one
+ * slot per cell of the windows, plus the NULL cell of each key. Not worth it for sparse keys (a hash table with
+ * few slots is smaller) or when the cells do not fit shared memory. PGSTROM_GPUSERV_SPEC_DM=off disables it;
+ * =force:<base>:<width>[,<base>:<width>] fixes the windows (tests: also without keys seen).
+ */
+static int
+pick_dm(spec_mgr *m, const scan_prog *prog, const spec_keystats *ks, const spec_shape *in, spec_shape *out)
+{
+	const char *env = getenv("PGSTROM_GPUSERV_SPEC_DM");
+	int			na = prog->nagg > 0 ? prog->nagg : 1;
+	int			nkeys = prog->nkeys;
+	int			limit = (int) ((m->vk->info.max_shared_memory ? m->vk->info.max_shared_memory : 32768) * 3 / 4);
+	int			cmax = limit / (4 + 20 * na);
+	long long	cells = 1;
+	int64_t		base[2] = {0, 0};
+	int			width[2] = {1, 1};
+
+	(void) in;
+	if (nkeys < 1 || nkeys > 2 || (env && !strcmp(env, "off")))
+		return 0;
+	if (env && !strncmp(env, "force:", 6))
+	{
+		const char *p = env + 6;
+
+		for (int k = 0; k < nkeys; k++)
+		{
+			char	   *end;
+
+			base[k] = strtoll(p, &end, 10);
+			if (*end != ':')
+				return 0;
+			width[k] = (int) strtol(end + 1, &end, 10);
+			p = (*end == ',') ? end + 1 : end;
+		}
+	}
+	else
+	{
+		if (!ks || ks->ngroups == 0 || ks->nkeys != nkeys)
+			return 0;
+		for (int k = 0; k < nkeys; k++)
+		{
+			int64_t		lo = ks->kmin[k], hi = ks->kmax[k];
+			int64_t		span, margin;
+
+			if (!ks->has_value[k])
+			{
+				base[k] = 0;
+				width[k] = 1;
+				continue;
+			}
+			if (lo < -((int64_t) 1 << 60) || hi > ((int64_t) 1 << 60))
+				return 0;
+			span = hi - lo + 1;
+			if (span > 4096)
+				return 0;
+			margin = span / 16 + 1;
+			base[k] = lo - margin;
+			width[k] = (int) (span + 2 * margin);
+		}
+	}
+	for (int k = 0; k < nkeys; k++)
+	{
+		if (width[k] < 1 || width[k] > 4096)
+			return 0;
+		cells *= (long long) width[k] + 1;
+		if (cells > 100000)
+			return 0;
+	}
+	if (cells > cmax || cells < 2)
+		return 0;
+	if (!(env && !strncmp(env, "force:", 6)) && cells > 4LL * ks->ngroups + 16)
+		return 0;						/* sparse: a small hash table is better */
+	*out = *in;
+	out->agg_max = na;
+	out->ga_c = (int) cells;
+	out->dm = 1;
+	out->dm_nkeys = nkeys;
+	for (int k = 0; k < 2; k++)
+	{
+		out->dm_base[k] = base[k];
+		out->dm_w[k] = width[k];
+	}
+	return 1;
+}
+
 static void
-pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, uint32_t groups_seen, spec_shape *out)
+pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, const spec_keystats *ks, spec_shape *out)
 {
 	int			na = prog->nagg > 0 ? prog->nagg : 1;
+	uint32_t	groups_seen = ks ? ks->ngroups : 0;
 
 	*out = *in;
 	out->kind = kind;
+	out->dm = 0;
 	if (kind == SPEC_AGG || kind == SPEC_JAGG)
 	{
 		out->agg_max = na;
@@ -1050,6 +1142,11 @@ pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, u
 		return;
 	if (m->mode == SPECM_CHECK)
 		return;
+	if (pick_dm(m, prog, ks, in, out))
+	{
+		out->kind = kind;
+		return;
+	}
 	{
 		const char *env = getenv("PGSTROM_GPUSERV_SPEC_GA_C");
 		int			limit = (int) ((m->vk->info.max_shared_memory ? m->vk->info.max_shared_memory : 32768) * 3 / 4);
@@ -1078,8 +1175,18 @@ pick_shape(spec_mgr *m, const scan_prog *prog, int kind, const spec_shape *in, u
 	}
 }
 
+/* keys the session has seen outside the window a direct-mapped kernel was made for */
+static int
+spec_window_exceeded(const spec_shape *sh, const spec_keystats *ks)
+{
+	for (int k = 0; k < sh->dm_nkeys && k < 2; k++)
+		if (ks->has_value[k] && (ks->kmin[k] < sh->dm_base[k] || ks->kmax[k] >= sh->dm_base[k] + sh->dm_w[k]))
+			return 1;
+	return 0;
+}
+
 gpu_vk_pipeline *
-spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, uint32_t groups_seen,
+spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, const spec_keystats *ks,
 		  spec_shape *out_shape, gpu_vk_pipeline *vm_pipe)
 {
 	spec_mgr   *m = eng->spec;
@@ -1104,7 +1211,7 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 		prog->spec_tasks++;
 		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold && prog->spec_state == 1)
 			return vm_pipe;				/* looked at in the first task: not on the disk */
-		pick_shape(m, prog, kind, &in, groups_seen, &sh);
+		pick_shape(m, prog, kind, &in, ks, &sh);
 		if (spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) != 0)
 		{
 			spec_log(m, 0, "%s program stays on the VM: %s", kind_name(kind | (arrow ? SPEC_ARROW : 0)), err);
@@ -1162,14 +1269,17 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 				prog->spec_grow_failed = 1;
 			}
 		}
-		else if (!prog->spec_grow_failed && m->mode != SPECM_CHECK &&
+		else if (!prog->spec_grow_failed && m->mode != SPECM_CHECK && ks &&
 				 __atomic_load_n(&cur->state, __ATOMIC_ACQUIRE) == SPEC_READY &&
-				 groups_seen * 3 / 2 > (uint32_t) cur->ga_c)
+				 (cur->shape.dm ? spec_window_exceeded(&cur->shape, ks)
+				  : ks->ngroups * 3 / 2 > (uint32_t) cur->ga_c))
 		{
 			char	   *defs = NULL, *body = NULL, err[256];
 
-			pick_shape(m, prog, kind, &in, groups_seen, &sh);
-			if (sh.ga_c > cur->ga_c &&
+			pick_shape(m, prog, kind, &in, ks, &sh);
+			if ((sh.dm != cur->shape.dm || sh.ga_c > cur->ga_c ||
+				 (sh.dm && memcmp(sh.dm_base, cur->shape.dm_base, sizeof(sh.dm_base)) != 0)) &&
+				prog->spec_regens++ < 4 &&
 				spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) == 0)
 			{
 				spec_entry *ne = entry_find_or_add(m, &sh, defs, body);
@@ -1200,8 +1310,8 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 			if (!e->announced)
 			{
 				e->announced = 1;
-				spec_log(m, 0, "%s kernel %.8s in use (%d aggregates, %d slots)", kind_name(e->kind | (e->arrow ? SPEC_ARROW : 0)), e->keyhex,
-						 e->agg_max, e->ga_c);
+				spec_log(m, 0, "%s kernel %.8s in use (%d aggregates, %d slots%s)", kind_name(e->kind | (e->arrow ? SPEC_ARROW : 0)), e->keyhex,
+						 e->agg_max, e->ga_c, e->shape.dm ? ", direct-mapped" : "");
 			}
 			if (out_shape)
 			{
