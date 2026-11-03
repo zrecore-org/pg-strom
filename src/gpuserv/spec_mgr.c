@@ -892,13 +892,10 @@ spec_mgr_destroy(spec_mgr *m)
 	free(m);
 }
 
-/* the cache entry of a generated program; takes ownership of defs and body */
-static spec_entry *
-entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
+static void
+entry_key(const spec_mgr *m, int kind, const char *defs, const char *body, uint64_t *p_k0, uint64_t *p_k1)
 {
-	spec_entry *e;
 	uint64_t	k0 = 0xcbf29ce484222325ULL, k1 = 0x84222325cbf29ce4ULL;
-	int			kind = sh->kind;
 
 	k0 = fnv64(k0, &kind, sizeof(kind));
 	k1 = fnv64(k1, &kind, sizeof(kind));
@@ -912,6 +909,35 @@ entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
 	k1 = fnv64(k1, "\n", 1);
 	k0 = fnv64(k0, body, strlen(body));
 	k1 = fnv64(k1, body, strlen(body));
+	*p_k0 = k0;
+	*p_k1 = k1;
+}
+
+/* is the kernel of this generated program in the disk cache? (the first task then does not need the VM kernel) */
+static int
+entry_on_disk(const spec_mgr *m, int kind, const char *defs, const char *body)
+{
+	uint64_t	k0, k1;
+	char		p1[1300], p2[1300];
+	struct stat sb;
+
+	if (!m->cache_dir[0])
+		return 0;
+	entry_key(m, kind, defs, body, &k0, &k1);
+	snprintf(p1, sizeof(p1), "%s/%016llx%016llx.spv", m->cache_dir, (unsigned long long) k0, (unsigned long long) k1);
+	snprintf(p2, sizeof(p2), "%s/%016llx%016llx.src", m->cache_dir, (unsigned long long) k0, (unsigned long long) k1);
+	return stat(p1, &sb) == 0 && stat(p2, &sb) == 0;
+}
+
+/* the cache entry of a generated program; takes ownership of defs and body */
+static spec_entry *
+entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
+{
+	spec_entry *e;
+	uint64_t	k0, k1;
+	int			kind = sh->kind;
+
+	entry_key(m, kind, defs, body, &k0, &k1);
 	for (e = m->entries; e; e = e->next)
 		if (e->key[0] == k0 && e->key[1] == k1 && e->kind == kind &&
 			!strcmp(e->defs, defs) && !strcmp(e->body, body))
@@ -1043,6 +1069,7 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 	spec_mgr   *m = eng->spec;
 	spec_entry *e;
 	spec_shape	in, sh;
+	int			want_wait = 0;
 
 	in.kind = kind;
 	in.agg_max = agg_max;
@@ -1056,14 +1083,30 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 		char	   *defs = NULL, *body = NULL, err[256];
 
 		prog->spec_tasks++;
-		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold)
-			return vm_pipe;
+		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold && prog->spec_state == 1)
+			return vm_pipe;				/* looked at in the first task: not on the disk */
 		pick_shape(m, prog, kind, &in, groups_seen, &sh);
 		if (spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) != 0)
 		{
 			spec_log(m, 0, "%s program stays on the VM: %s", kind_name(kind), err);
 			prog->spec_state = 2;
 			return vm_pipe;
+		}
+		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold)
+		{
+			/*
+			 * A kernel the disk cache already has is as good as a compiled one: use it from the first task (the
+			 * task waits for the pipeline, about 50 ms, instead of the VM kernel's, up to seconds the first time);
+			 * otherwise the compilation starts with the second task.
+			 */
+			if (!entry_on_disk(m, kind, defs, body))
+			{
+				free(defs);
+				free(body);
+				prog->spec_state = 1;
+				return vm_pipe;
+			}
+			want_wait = 1;
 		}
 		e = entry_find_or_add(m, &sh, defs, body);
 		if (!e)
@@ -1123,9 +1166,9 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 		}
 	}
 	e = prog->spec;
-	if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q && m->mode >= SPECM_FORCE)
+	if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q && (m->mode >= SPECM_FORCE || want_wait))
 	{
-		/* force / check: the first task waits for the compilation (tests, measurements) */
+		/* force / check: the first task waits for the compilation (tests, measurements); a cached kernel, for its pipeline */
 		pthread_mutex_lock(&m->mu);
 		while (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q)
 			pthread_cond_wait(&m->done_cv, &m->mu);

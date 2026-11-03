@@ -880,6 +880,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	gpu_vk_buffer bout, bprog, btab;
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped;
+	gpu_vk_pipeline *sp;
 	size_t		btab_sz;
 	uint32_t	npages, nloaded, total_lps = 0, ncomp, rec_words;
 	size_t		out_words;
@@ -931,7 +932,9 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	rec_words = 2 + 3 * ncomp;
 
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
-	if (!eng->pipe_ready[variant])
+	/* the VM kernel is only created when it is going to run (or to be compared with) */
+	sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, 0, NULL, &eng->pipe[variant]);
+	if ((sp == &eng->pipe[variant] || spec_check_enabled(eng)) && !eng->pipe_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_gpuscan8 : variant == 1 ? kspv_gpuscan16 : kspv_gpuscan32);
 		size_t		spv_len = (variant == 0 ? kspv_gpuscan8_len : variant == 1 ? kspv_gpuscan16_len : kspv_gpuscan32_len);
@@ -999,7 +1002,6 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	/* 3. run */
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
-		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, 0, NULL, &eng->pipe[variant]);
 
 		for (uint32_t base = 0; base < npages; base += SCAN_WG_MAX)
 		{
@@ -1271,6 +1273,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	gpu_vk_buffer bout, bprog, btab;
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant;
+	gpu_vk_pipeline *sp;
 	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, flags_base;
 	uint32_t   *lp_base = NULL;
 	size_t		out_words;
@@ -1321,7 +1324,9 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	}
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
-	if (ensure_agg_pipeline(eng, variant, avariant, err, errlen) != 0)
+	sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, 0, NULL, &eng->agg_pipe[variant][avariant]);
+	if ((sp == &eng->agg_pipe[variant][avariant] || spec_check_enabled(eng)) &&
+		ensure_agg_pipeline(eng, variant, avariant, err, errlen) != 0)
 		return -1;
 	if (npages == 0)
 		return 0;
@@ -1377,7 +1382,6 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	t2 = now_ms();
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
-		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, 0, NULL, &eng->agg_pipe[variant][avariant]);
 
 		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
 		{
@@ -2810,7 +2814,8 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	ncomp = prog->ncomp;
 	rec_words = 2 + prog->ndepth + 3 * ncomp;
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
-	if (!eng->join_pipe_ready[variant])
+	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, 0, NULL, &eng->join_pipe[variant]);
+	if ((sp == &eng->join_pipe[variant] || spec_check_enabled(eng)) && !eng->join_pipe_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_gpujoin8 : variant == 1 ? kspv_gpujoin16 : kspv_gpujoin32);
 		size_t		spv_len = (variant == 0 ? kspv_gpujoin8_len : variant == 1 ? kspv_gpujoin16_len : kspv_gpujoin32_len);
@@ -2864,7 +2869,6 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 
 	/* run; if there are more matches than the output holds, run again with room for all */
 	cap = (total_lps > 4096 ? total_lps : 4096);
-	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, 0, NULL, &eng->join_pipe[variant]);
 	for (int attempt = 0; attempt < 2; attempt++)
 	{
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
