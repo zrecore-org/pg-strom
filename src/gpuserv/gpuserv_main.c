@@ -224,6 +224,7 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 			gpuserv_tier_name(ss.ctl->devcaps[device].tier), socket_path);
 
 	wire_server_init(&ss.wire, ss.ctl, &ss.vk, device);
+	int			lost = 0;
 	while (!got_signal)
 	{
 		struct pollfd	pfds[2 + WIRE_MAX_CLIENTS];
@@ -260,6 +261,13 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 			}
 		}
 		wire_server_service(&ss.wire, pfds + nfixed, nclients);
+		if (ss.vk.lost)
+		{
+			/* every later task would fail with "device is lost": exit, the launcher starts a fresh service */
+			log_msg("the GPU device was lost (%s): exiting so that the launcher restarts the service", ss.vk.err);
+			lost = 1;
+			break;
+		}
 		if (pfds[0].revents & POLLIN)
 			wire_server_accept(&ss.wire, ss.listen_fd);
 	}
@@ -269,7 +277,7 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 	close(ss.listen_fd);
 	unlink(socket_path);
 	gpu_vk_close(&ss.vk);
-	return 0;
+	return lost ? 3 : 0;
 }
 
 /* ----------------------------------------------------------------
