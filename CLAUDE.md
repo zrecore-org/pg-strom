@@ -33,7 +33,7 @@ GPUSERV_BIN=<installed pgstrom-gpuserv> sh test/gpuserv/scan_test.sh        # GP
 make -C test/port && test/port/port_test                                    # portability layer
 ```
 
-Both shell tests build a throwaway cluster and need the module and service installed (`make install` above). `ALLOW_CPU=on` runs them on lavapipe (Linux). `PGSTROM_GPUSERV_TRACE=1` in the postmaster's environment makes the service log each session's xpucode and per-task timings; `PGSTROM_GPUSERV_NO_MAP=1` disables the zero-copy file mapping.
+`sh test/gpuserv/locked_test.sh <tree> [scan_test.sh|service_test.sh]` installs a checkout and runs a test while holding a global lock (the installed `$libdir/pg_strom` is shared, so parallel worktrees must queue). Both shell tests build a throwaway cluster and need the module and service installed (`make install` above). `ALLOW_CPU=on` runs them on lavapipe (Linux). `PGSTROM_GPUSERV_TRACE=1` in the postmaster's environment makes the service log each session's xpucode and per-task timings; `PGSTROM_GPUSERV_NO_MAP=1` disables the zero-copy file mapping.
 
 The upstream regression suite is PGXS `installcheck` from `test/` (`make -C test PG_CONFIG=... installcheck`; schedule `test/parallel_schedule`, expected output per PG major version in `test/<15..19>/expected/`, database `contrib_regression_pg_strom`, dataset revision in `test/Makefile`). **On this branch most of it does not pass yet**: the expected files assert CUDA-era plan shapes (for example float8 expressions on the GPU) and cover join, aggregate and sort. The result rows of the scan-only tests match; the `EXPLAIN` text does not. Run a single test by invoking `pg_regress` directly with the options of `test/Makefile` (`--use-existing`) and a schedule file.
 
