@@ -52,3 +52,9 @@ DEEP="w1"; k=2; while [ $k -le 40 ]; do DEEP="($DEEP + w$k)"; k=$((k+1)); done
 run_any wz "left-deep sum of 40 columns" "select $DEEP from %T where w1 > 5"
 DEEPR="w40"; k=39; while [ $k -ge 1 ]; do DEEPR="(w$k - $DEEPR)"; k=$((k-1)); done
 run_any wz "right-deep difference of 40 columns" "select i from %T where $DEEPR > 0"
+for t in s1 s2 s3; do
+	# float4 comparison with denormals (Metal flushed them to zero: 0 >= 1.4e-45 was true on the GPU)
+	run $t "float4 >= a denormal constant" "select i, d from %T where d >= 1.4e-45::float4 and d < 1::float4"
+	run $t "float4 = a denormal constant against a column" "select i from %T where d <= 1e-38::float4 and d > '-1e-38'::float4"
+	run $t "float4 vs a column through arithmetic" "select i from %T where d * 0::float4 = 0::float4 and d <> -0.0::float4 and d < 0.5::float4"
+done

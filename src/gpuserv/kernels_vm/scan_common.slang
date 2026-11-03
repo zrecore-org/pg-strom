@@ -110,6 +110,23 @@ int f4cmp(float a, float b)
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+// the same on the bit patterns: Metal flushes denormal floats to zero in a float comparison (1.4e-45 >= 0 was true),
+// so a float4 is ordered through its bits (sign-magnitude as a signed integer; -0 and +0 are equal)
+int f4cmpbits(uint a, uint b)
+{
+    uint ma = a & 0x7fffffffu;
+    uint mb = b & 0x7fffffffu;
+    bool na = ma > 0x7f800000u;
+    bool nb = mb > 0x7f800000u;
+    if (na)
+        return nb ? 0 : 1;
+    if (nb)
+        return -1;
+    int ka = ((a & 0x80000000u) != 0u) ? -int(ma) : int(ma);
+    int kb = ((b & 0x80000000u) != 0u) ? -int(mb) : int(mb);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+}
+
 bool cmp_result(int c, uint kind)
 {
     switch (kind)
@@ -751,7 +768,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             else
             {
                 regs[dst].isnull = 0;
-                regs[dst].v = b2l(cmp_result(f4cmp(asfloat(uint(x.v)), asfloat(uint(y.v))), k0));
+                regs[dst].v = b2l(cmp_result(f4cmpbits(uint(x.v), uint(y.v)), k0));
             }
             break;
         }
