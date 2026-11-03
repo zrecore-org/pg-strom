@@ -123,3 +123,26 @@ msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*
 [ "$msgs" -eq 0 ]; check "numerics that fit are never handed back to the backend" $?
 msgs=$($PSQL -d scantest -c "$GPU set client_min_messages=debug1; select count(*) from nm1 where n4 is null or n4 is not null" 2>&1 | grep -c "CPU re-evaluation")
 [ "$msgs" -eq 0 ]; check "IS NULL on numerics reads no value, so nothing is rechecked" $?
+
+# ---- overflow detection of the 64-bit arithmetic (regression: a wrapped signed product checked afterwards with
+# "r / a != b" is undefined behaviour that the Metal compiler folded away, so a numeric product beyond 64 bits
+# came back as a wrapped, wrong value, e.g. 826563.6313334870 * 467842.677)
+sql "create table nm_mul as select i as id, (826563.6313334870 + (i % 7) * 1000.5)::numeric as x, (467842.677 + (i % 11))::numeric as z,
+	((i::int8 * 7919) % 3037000499 + 1) as a, ((i::int8 * 104729) % 3037000499 + 1) as b, (i % 5 = 0) as neg
+	from generate_series(1, 30000) i"
+sql "insert into nm_mul values (0, 826563.6313334870, 467842.677, 3037000499, 3037000499, false),
+	(-1, 1000000.5, 1000000.5, -4294967296, 2147483648, false),
+	(-2, 9.5, 9.5, 9223372036854775807, 1, false), (-3, 1, 1, -9223372036854775807, -1, false),
+	(-4, 123456789012.345678, 98765.4321, 4611686018427387904, 1, false)"
+sql "analyze nm_mul"
+run nm_mul "numeric product of wide fractions (13 fractional digits, beyond 64 bits unscaled)" "select id, x * z from %T where id >= 0"
+run nm_mul "numeric product, sum and difference mixed" "select id, x * z, x + z, x - z, (x * z) - x from %T where id between -4 and 3000"
+run nm_mul "numeric product compared against a constant" "select id from %T where x * z > 386701741993.0 and x * z < 386701741994.0"
+run nm_mul "int8 products at the 64-bit boundary (fit exactly)" "select id, a * b from %T where id between -4 and 0 and id <> -2 or id > 29990"
+run nm_mul "int8 sum near INT64_MAX (fits)" "select id, a + b from %T where id <= 0 or id > 29990"
+for q in "select a * b * b from nm_mul where id = 29999" "select a * 4000000000 from nm_mul where id = 0" \
+	 "select a + 9223372036854775807 from nm_mul where id = 0" "select a - (-9223372036854775807) from nm_mul where id = 0" \
+	 "select (-a) * 3037000500 - 3037000500 from nm_mul where id = 0"; do
+	g=$($PSQL -d scantest -c "$GPU $q" 2>&1 | head -1); c=$($PSQL -d scantest -c "$CPU $q" 2>&1 | head -1)
+	echo "$g" | grep -q "bigint out of range" && echo "$c" | grep -q "bigint out of range"; check "int8 overflow is reported on the GPU and the CPU: $q" $?
+done

@@ -385,27 +385,31 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if (k0 == SOP_ARITH_MUL)
         {
             sc = x.sc + y.sc;
-            r = a * b;
-            // a == -1: r = -b cannot overflow because |b| <= INT64_MAX
-            if (a != -1 && a != 0 && r / a != b)
+            // |a| * |b| must fit in INT64_MAX. The check is made before multiplying: a wrapped signed product
+            // followed by "r / a != b" is undefined behaviour that the Metal compiler folds away.
+            int64_t ma = a < 0 ? -a : a;                // |a| <= INT64_MAX (v is never INT64_MIN)
+            int64_t mb = b < 0 ? -b : b;
+            if (ma != 0 && mb > 9223372036854775807 / ma)
                 return SOP_RECHECK_CODE;
+            r = a * b;
         }
         else
         {
             sc = max(x.sc, y.sc);
             if (!num_up(a, sc - x.sc) || !num_up(b, sc - y.sc))
                 return SOP_RECHECK_CODE;
+            // overflow is excluded before the operation (signed wrap-around is undefined behaviour)
             if (k0 == SOP_ARITH_PL)
             {
-                r = a + b;
-                if (((a ^ r) & (b ^ r)) < 0)
+                if ((b > 0 && a > 9223372036854775807 - b) || (b < 0 && a < -9223372036854775807 - b))
                     return SOP_RECHECK_CODE;
+                r = a + b;
             }
             else
             {
-                r = a - b;
-                if (((a ^ b) & (a ^ r)) < 0)
+                if ((b < 0 && a > 9223372036854775807 + b) || (b > 0 && a < -9223372036854775807 + b))
                     return SOP_RECHECK_CODE;
+                r = a - b;
             }
         }
         if (r == (-9223372036854775807 - 1) || sc > 255u)
@@ -769,25 +773,49 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
 
             switch (aop)
             {
+            // 64-bit overflow is excluded before the operation: a wrapped signed result checked afterwards is
+            // undefined behaviour that the Metal compiler may fold away
             case SOP_ARITH_PL:
-                r = x.v + y.v;
-                bad = (w == 64) ? (((x.v ^ r) & (y.v ^ r)) < 0) : out_of_range(r, w);
+                if (w == 64)
+                    bad = (y.v > 0 && x.v > 9223372036854775807 - y.v) ||
+                          (y.v < 0 && x.v < (-9223372036854775807 - 1) - y.v);
+                if (!bad)
+                {
+                    r = x.v + y.v;
+                    if (w != 64)
+                        bad = out_of_range(r, w);
+                }
                 break;
             case SOP_ARITH_MI:
-                r = x.v - y.v;
-                bad = (w == 64) ? (((x.v ^ y.v) & (x.v ^ r)) < 0) : out_of_range(r, w);
+                if (w == 64)
+                    bad = (y.v < 0 && x.v > 9223372036854775807 + y.v) ||
+                          (y.v > 0 && x.v < (-9223372036854775807 - 1) + y.v);
+                if (!bad)
+                {
+                    r = x.v - y.v;
+                    if (w != 64)
+                        bad = out_of_range(r, w);
+                }
                 break;
             case SOP_ARITH_MUL:
-                r = x.v * y.v;
                 if (w == 64)
                 {
-                    if (x.v == -1)
-                        bad = (y.v == -9223372036854775807 - 1);
-                    else if (x.v != 0)
-                        bad = (r / x.v != y.v);
+                    if (x.v != 0 && y.v != 0)
+                    {
+                        // magnitudes as unsigned; a negative product may reach 2^63, a positive one 2^63 - 1
+                        uint64_t ux = x.v < 0 ? uint64_t(-(x.v + 1)) + 1ul : uint64_t(x.v);
+                        uint64_t uy = y.v < 0 ? uint64_t(-(y.v + 1)) + 1ul : uint64_t(y.v);
+                        uint64_t lim = ((x.v < 0) == (y.v < 0)) ? 0x7fffffffffffffffull : 0x8000000000000000ull;
+                        bad = (ux > lim / uy);
+                    }
+                    if (!bad)
+                        r = x.v * y.v;
                 }
                 else
+                {
+                    r = x.v * y.v;
                     bad = out_of_range(r, w);
+                }
                 break;
             case SOP_ARITH_DIV:
                 if (y.v == 0)

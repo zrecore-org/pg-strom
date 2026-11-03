@@ -12,7 +12,7 @@ test: pgstrom_init
 test: pgstrom_guc
 
 # data types
-test: dtype_int dtype_float dtype_time dtype_text dtype_jsonb additional_dtype
+test: dtype_int dtype_float dtype_time dtype_text dtype_numeric dtype_jsonb additional_dtype
 
 # functions / expressions
 test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc dexpr_hashed_array_op

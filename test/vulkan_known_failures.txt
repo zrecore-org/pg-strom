@@ -55,10 +55,12 @@
 #    the CPU oracle ran test arrow_index. Fixed in arrow_fdw.c.
 #
 # ---------------------------------------------------------------------------------------------------------------
-# OPEN: GPU result differs from the CPU (found after merging the numeric work of vulkan-gpu; NOT fixed)
+# FIXED: GPU result differed from the CPU (found after merging the numeric work of vulkan-gpu)
 # ---------------------------------------------------------------------------------------------------------------
-# 4. numeric multiplication on the GPU is wrong for some operands, silently (test dtype_numeric, test03: thousands of rows
-#    differ; it is therefore in pending_schedule). Reproducer (the plan is Custom Scan (GpuScan), GPU Projection: x * z):
+# 4. numeric multiplication on the GPU was wrong for some operands, silently (test dtype_numeric, test03). Cause: the
+#    overflow check "r / a != b" of a wrapped signed product is undefined behaviour that the Metal compiler folds away;
+#    the 64-bit add/subtract/multiply of numeric and int8 now exclude overflow BEFORE the operation (scan_common.slang);
+#    regression tests in numeric_tests.inc (nm_mul). dtype_numeric is back in vulkan_schedule. Reproducer (the plan is Custom Scan (GpuScan), GPU Projection: x * z):
 #      create table m(id int, x numeric, z numeric);
 #      insert into m values (1, 826563.6313334870, 467842.677), (2, 826563.6313334870, 2), (3, 1000000.5, 1000000.5);
 #      set enable_seqscan = off;  select id, x * z from m where id > 0;

@@ -266,12 +266,12 @@ select c_city,s_city,(lo_orderdate/10000)::int d_year,lo_shipmode, sum(lo_revenu
                                              Filter: (lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[]))
                                              GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, lo_suppkey
                                              GPU Scan Quals: ((lo_orderdate >= 19920701) AND (lo_orderdate <= 19970630))
-                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1992_heap plineorder_1
+                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1997_heap plineorder_11
                                              Filter: (lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[]))
                                              GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, lo_suppkey
                                              GPU Scan Quals: ((lo_orderdate >= 19920701) AND (lo_orderdate <= 19970630))
                                              Brin Quals: (lo_orderdate >= 19920701), (lo_orderdate <= 19970630)
-                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1997_heap plineorder_11
+                                       ->  Parallel Custom Scan (GpuScan) on plineorder_p1992_heap plineorder_1
                                              Filter: (lo_shipmode = ANY ('{SHIP,RAIL}'::bpchar[]))
                                              GPU Projection: lo_orderdate, lo_shipmode, lo_revenue, lo_custkey, lo_suppkey
                                              GPU Scan Quals: ((lo_orderdate >= 19920701) AND (lo_orderdate <= 19970630))

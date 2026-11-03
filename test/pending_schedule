@@ -9,11 +9,6 @@
 # sorts on the CPU, and the test's \t output (no QUERY PLAN header) cannot be compared by plan text alone.
 test: gpu_sort
 
-# dtype_numeric: numeric arithmetic on the GPU returns wrong values (x * z with a 10-digit and a 3-digit fraction:
-# 826563.6313334870 * 467842.677 gives 801302.3189363433294 instead of 386701741993.8996378246990); see
-# vulkan_known_failures.txt for the reproducer. Move it back (and run vulkan_regen_expected.sh) once fixed.
-test: dtype_numeric
-
 # conv_text_inet needs test/data/ip_mixed_with_masks_10k.tsv, which is not in the repository: every \copy fails and
 # the queries run on an empty table (a pass would mean nothing). Add the file, then move it to vulkan_schedule.
 test: conv_text_inet
