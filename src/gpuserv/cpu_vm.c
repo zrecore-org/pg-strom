@@ -64,9 +64,224 @@ f_to_bits(float f)
 	return u;
 }
 
+/*
+ * A6: strings. A string register is { offset | length << 32 | source << 60 }; here the source is 0
+ * (the heap tuple's page: offsets are relative to the tuple header) or 3 (the program's constant pool).
+ */
+typedef struct
+{
+	const unsigned char *htup;
+	const unsigned char *pool;
+} vm_env;
+
+static const unsigned char *
+str_ptr(const vm_env *env, int64_t v)
+{
+	uint64_t	u = (uint64_t) v;
+
+	return ((u >> 60) & 3) == 3 ? env->pool + (u & 0xffffffffu) : env->htup + (u & 0xffffffffu);
+}
+static uint32_t
+str_len(int64_t v)
+{
+	return (uint32_t)(((uint64_t) v >> 32) & 0x0fffffffu);
+}
+static uint32_t
+str_truelen(const unsigned char *p, uint32_t len)
+{
+	while (len > 0 && p[len - 1] == 0x20)
+		len--;
+	return len;
+}
+
+/* the instructions that A6 added; the same as vm_ext() of scan_common.slang */
+static uint32_t
+vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
+	   vm_reg *regs)
+{
+	switch (op)
+	{
+		case SOP_D2TS:
+		{
+			vm_reg		x = regs[ra];
+
+			regs[dst].isnull = x.isnull;
+			if (!x.isnull)
+			{
+				int64_t		d = x.v, r;
+
+				if (d == 2147483647)
+					r = INT64_MAX;
+				else if (d == -2147483648LL)
+					r = INT64_MIN;
+				else if (d >= 106751983)
+				{
+					if (k0 == 1)
+						return k1 | (SOP_ERR_TSRANGE << 16);
+					r = INT64_MAX - 1;
+				}
+				else
+					r = d * 86400000000LL;
+				regs[dst].v = r;
+			}
+			return 0;
+		}
+		case SOP_TS2D:
+		{
+			vm_reg		x = regs[ra];
+
+			regs[dst].isnull = x.isnull;
+			if (!x.isnull)
+			{
+				int64_t		t = x.v, r;
+
+				if (t == INT64_MAX)
+					r = 2147483647;
+				else if (t == INT64_MIN)
+					r = -2147483648LL;
+				else
+				{
+					r = t / 86400000000LL;
+					if (t % 86400000000LL < 0)
+						r -= 1;
+				}
+				regs[dst].v = r;
+			}
+			return 0;
+		}
+		case SOP_DATEOP:
+		{
+			vm_reg		x = regs[ra], y = regs[rb];
+			int			ainf;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			regs[dst].isnull = 0;
+			ainf = (x.v == 2147483647 || x.v == -2147483648LL);
+			if (k0 == SOP_DATEOP_MI)
+			{
+				if (ainf || y.v == 2147483647 || y.v == -2147483648LL)
+					return k1 | (SOP_ERR_INFSUB << 16);
+				regs[dst].v = x.v - y.v;
+			}
+			else if (ainf)
+				regs[dst].v = x.v;
+			else
+			{
+				int64_t		r = (k0 == SOP_DATEOP_PLI) ? x.v + y.v : x.v - y.v;
+
+				if (r < -2451545 || r >= 2145031949)
+					return k1 | (SOP_ERR_DATERANGE << 16);
+				regs[dst].v = r;
+			}
+			return 0;
+		}
+		case SOP_CONSTSTR:
+			regs[dst].v = (int64_t)((uint64_t) k0 | ((uint64_t) k1 << 32) | ((uint64_t) 3 << 60));
+			regs[dst].isnull = 0;
+			return 0;
+		case SOP_STRCMP:
+		case SOP_STRLIKE:
+		{
+			vm_reg		x = regs[ra], y = regs[rb];
+			const unsigned char *pa, *pb;
+			uint32_t	la, lb;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			pa = str_ptr(env, x.v);
+			pb = str_ptr(env, y.v);
+			la = str_len(x.v);
+			lb = str_len(y.v);
+			regs[dst].isnull = 0;
+			if (op == SOP_STRCMP)
+			{
+				int			c;
+
+				if (k1 == 1)
+				{
+					la = str_truelen(pa, la);
+					lb = str_truelen(pb, lb);
+				}
+				if (k0 == SOP_CMP_EQ || k0 == SOP_CMP_NE)
+					c = (la != lb) ? 1 : memcmp(pa, pb, la);
+				else
+				{
+					c = memcmp(pa, pb, la < lb ? la : lb);
+					if (c == 0 && la != lb)
+						c = la < lb ? -1 : 1;
+				}
+				regs[dst].v = cmp_result(c, k0);
+			}
+			else
+			{
+				uint32_t	shape = k0 & 0xff;
+				int			res = 0;
+
+				if (k0 & 0x200)
+					la = str_truelen(pa, la);
+				if (shape == SOP_LIKE_EXACT)
+					res = (la == lb) && memcmp(pa, pb, lb) == 0;
+				else if (shape == SOP_LIKE_PREFIX)
+					res = (la >= lb) && memcmp(pa, pb, lb) == 0;
+				else if (shape == SOP_LIKE_SUFFIX)
+					res = (la >= lb) && memcmp(pa + la - lb, pb, lb) == 0;
+				else if (la >= lb)
+				{
+					if (lb == 0)
+						res = 1;
+					else
+						for (uint32_t i = 0; i + lb <= la; i++)
+							if (pa[i] == pb[0] && memcmp(pa + i, pb, lb) == 0)
+							{
+								res = 1;
+								break;
+							}
+				}
+				if (k0 & 0x100)
+					res = !res;
+				regs[dst].v = res;
+			}
+			return 0;
+		}
+		case SOP_STRLEN:
+		{
+			vm_reg		x = regs[ra];
+
+			regs[dst].isnull = x.isnull;
+			if (!x.isnull)
+			{
+				uint32_t	n = str_len(x.v);
+
+				if (k0 == 1)
+				{
+					const unsigned char *p = str_ptr(env, x.v);
+					uint32_t	cnt = 0;
+
+					for (uint32_t i = 0; i < n; i++)
+						if ((p[i] & 0xc0) != 0x80)
+							cnt++;
+					n = cnt;
+				}
+				regs[dst].v = n;
+			}
+			return 0;
+		}
+		default:
+			break;
+	}
+	return op | 0x80000000u;
+}
+
 /* instructions [ip, end); returns 0 or the error code */
 static uint32_t
-vm_run(const uint32_t *insn, uint32_t ip, uint32_t end, vm_reg *regs)
+vm_run(const vm_env *env, const uint32_t *insn, uint32_t ip, uint32_t end, vm_reg *regs)
 {
 	while (ip < end)
 	{
@@ -294,7 +509,13 @@ vm_run(const uint32_t *insn, uint32_t ip, uint32_t end, vm_reg *regs)
 				break;
 			}
 			default:
-				return op | 0x80000000u;
+			{
+				uint32_t	e = vm_ext(env, op, dst, ra, rb, k0, k1, regs);
+
+				if (e != 0)
+					return e;
+				break;
+			}
 		}
 	}
 	return 0;
@@ -312,7 +533,11 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 	int			hasnull;
 	int			hit = 1;
 	uint32_t	e = 0;
+	int			recheck = 0;
+	vm_env		env;
 
+	env.htup = htup;
+	env.pool = (const unsigned char *) (w + w[20]);
 	memcpy(&infomask2, htup + 18, 2);
 	memcpy(&infomask, htup + 20, 2);
 	natts = infomask2 & 0x7ff;
@@ -345,12 +570,27 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 				memcpy(&h, htup + off, 4);
 				sz = (h >> 2) & 0x3fffffffu;
 			}
-			off += sz;
 			if (slot != 0xff)
 			{
 				regs[slot].v = 0;
 				regs[slot].isnull = 0;
+				if (vt == SOP_VT_STR)
+				{
+					uint32_t	hl = 4;
+
+					if (htup[off] & 1)
+					{
+						hl = 1;
+						if (htup[off] == 1)
+							recheck = 1;
+					}
+					else if ((htup[off] & 3) == 2)
+						recheck = 1;
+					if (!recheck)
+						regs[slot].v = (int64_t)((uint64_t) (off + hl) | ((uint64_t) (sz - hl) << 32));
+				}
 			}
+			off += sz;
 		}
 		else if (alen == 0xfe)
 		{
@@ -393,14 +633,19 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 			off += alen;
 		}
 	}
+	if (recheck)
+	{
+		*err = 0x7ffffffeU;			/* a compressed or external string: the GPU would have flagged the row */
+		return -1;
+	}
 	if (qreg != 0xffffffffu)
 	{
-		e = vm_run(insn, 0, nq, regs);
+		e = vm_run(&env, insn, 0, nq, regs);
 		if (e == 0)
 			hit = (!regs[qreg].isnull && regs[qreg].v != 0);
 	}
 	if (e == 0 && hit && nins > nq)
-		e = vm_run(insn, nq, nins, regs);
+		e = vm_run(&env, insn, nq, nins, regs);
 	if (e != 0)
 	{
 		*err = e;

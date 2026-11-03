@@ -148,6 +148,259 @@ uint hash_any_value(uint lo, uint hi, uint len)
     return c;
 }
 
+// ---------------------------------------------------------------------------------------------
+// A6: temporal types and strings
+//
+// Strings: a register holds { byte offset (bits 0-31) | length (32-59) | source (60-61) } of the
+// payload of a varlena (heap page buffers, the join inner buffer, or the constant pool of the
+// program). A value stored compressed or out of line cannot be read here: deform_tuple() sets
+// g_recheck and the kernel reports the row for re-evaluation by the backend.
+// ---------------------------------------------------------------------------------------------
+static uint g_recheck;
+
+uint pw_s(uint src, uint wi)
+{
+    if (src == 3)
+        return prog[wi];
+#ifdef WITH_INNER
+    if (src == 2)
+        return innerb[wi];
+#endif
+    return src == 1 ? pagel[wi] : pagef[wi];
+}
+uint ldb_s(uint src, uint o) { return (pw_s(src, o >> 2) >> ((o & 3u) * 8u)) & 0xffu; }
+uint ldw_s(uint src, uint o)    // 4 bytes at any alignment
+{
+    uint sh = (o & 3u) * 8u;
+    if (sh == 0)
+        return pw_s(src, o >> 2);
+    return (pw_s(src, o >> 2) >> sh) | (pw_s(src, (o >> 2) + 1) << (32u - sh));
+}
+uint str_off(Reg r) { return uint(uint64_t(r.v) & 0xffffffffu); }
+uint str_len(Reg r) { return uint((uint64_t(r.v) >> 32) & 0x0fffffffu); }
+uint str_src(Reg r) { return uint((uint64_t(r.v) >> 60) & 3u); }
+
+// length without trailing blanks (bpchar)
+uint str_truelen(uint src, uint off, uint len)
+{
+    while (len > 0 && ldb_s(src, off + len - 1) == 0x20u)
+        len--;
+    return len;
+}
+
+// bytewise compare of n bytes: -1, 0, +1
+int str_memcmp(uint sa, uint oa, uint sb, uint ob, uint n)
+{
+    uint i = 0;
+    for (; i + 4 <= n; i += 4)
+    {
+        uint wa = ldw_s(sa, oa + i);
+        uint wb = ldw_s(sb, ob + i);
+        if (wa != wb)
+        {
+            for (uint j = 0; j < 4; j++)
+            {
+                uint ca = (wa >> (8 * j)) & 0xffu;
+                uint cb = (wb >> (8 * j)) & 0xffu;
+                if (ca != cb)
+                    return ca < cb ? -1 : 1;
+            }
+        }
+    }
+    for (; i < n; i++)
+    {
+        uint ca = ldb_s(sa, oa + i);
+        uint cb = ldb_s(sb, ob + i);
+        if (ca != cb)
+            return ca < cb ? -1 : 1;
+    }
+    return 0;
+}
+
+// Instructions of A6 (not in the original VM). Returns 0 or the error code.
+uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    switch (op)
+    {
+    case SOP_D2TS:
+    {
+        Reg x = regs[ra];
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            int64_t d = x.v;
+            int64_t r;
+            if (d == 2147483647)
+                r = int64_t(9223372036854775807);
+            else if (d == -2147483648)
+                r = -9223372036854775807 - 1;
+            else if (d >= 106751983)        // beyond the largest timestamp
+            {
+                if (k0 == 1)
+                    return k1 | (SOP_ERR_TSRANGE << 16);
+                r = int64_t(9223372036854775806);   // above every finite timestamp, below infinity
+            }
+            else
+                r = d * 86400000000;
+            regs[dst].v = r;
+        }
+        break;
+    }
+    case SOP_TS2D:
+    {
+        Reg x = regs[ra];
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            int64_t t = x.v;
+            int64_t r;
+            if (t == int64_t(9223372036854775807))
+                r = 2147483647;
+            else if (t == -9223372036854775807 - 1)
+                r = -2147483648;
+            else
+            {
+                r = t / 86400000000;
+                if (t % 86400000000 < 0)
+                    r -= 1;                 // floor
+            }
+            regs[dst].v = r;
+        }
+        break;
+    }
+    case SOP_DATEOP:
+    {
+        Reg x = regs[ra];
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        regs[dst].isnull = 0;
+        bool ainf = (x.v == 2147483647 || x.v == -2147483648);
+        if (k0 == SOP_DATEOP_MI)
+        {
+            if (ainf || y.v == 2147483647 || y.v == -2147483648)
+                return k1 | (SOP_ERR_INFSUB << 16);
+            regs[dst].v = x.v - y.v;
+        }
+        else if (ainf)
+            regs[dst].v = x.v;              // infinity does not change
+        else
+        {
+            int64_t r = (k0 == SOP_DATEOP_PLI) ? x.v + y.v : x.v - y.v;
+            if (r < -2451545 || r >= 2145031949)
+                return k1 | (SOP_ERR_DATERANGE << 16);
+            regs[dst].v = r;
+        }
+        break;
+    }
+
+    case SOP_CONSTSTR:
+        regs[dst].v = int64_t(uint64_t(prog[20] * 4u + k0) | (uint64_t(k1) << 32) | (uint64_t(3u) << 60));
+        regs[dst].isnull = 0;
+        break;
+    case SOP_STRCMP:
+    {
+        Reg x = regs[ra];
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        uint sa = str_src(x), sb = str_src(y);
+        uint oa = str_off(x), ob = str_off(y);
+        uint la = str_len(x), lb = str_len(y);
+        int  c;
+        if (k1 == 1)
+        {
+            la = str_truelen(sa, oa, la);
+            lb = str_truelen(sb, ob, lb);
+        }
+        if (k0 == SOP_CMP_EQ || k0 == SOP_CMP_NE)
+            c = (la != lb) ? 1 : str_memcmp(sa, oa, sb, ob, la);
+        else
+        {
+            c = str_memcmp(sa, oa, sb, ob, min(la, lb));
+            if (c == 0 && la != lb)
+                c = la < lb ? -1 : 1;
+        }
+        regs[dst].isnull = 0;
+        regs[dst].v = b2l(cmp_result(c, k0));
+        break;
+    }
+    case SOP_STRLIKE:
+    {
+        Reg x = regs[ra];
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        uint sa = str_src(x), sb = str_src(y);
+        uint oa = str_off(x), ob = str_off(y);
+        uint la = str_len(x), lb = str_len(y);
+        uint shape = k0 & 0xffu;
+        bool res = false;
+        if ((k0 & 0x200u) != 0)
+            la = str_truelen(sa, oa, la);
+        if (shape == SOP_LIKE_EXACT)
+            res = (la == lb) && str_memcmp(sa, oa, sb, ob, lb) == 0;
+        else if (shape == SOP_LIKE_PREFIX)
+            res = (la >= lb) && str_memcmp(sa, oa, sb, ob, lb) == 0;
+        else if (shape == SOP_LIKE_SUFFIX)
+            res = (la >= lb) && str_memcmp(sa, oa + la - lb, sb, ob, lb) == 0;
+        else if (la >= lb)
+        {
+            if (lb == 0)
+                res = true;
+            else
+            {
+                uint first = ldb_s(sb, ob);
+                for (uint i = 0; i + lb <= la; i++)
+                {
+                    if (ldb_s(sa, oa + i) == first && str_memcmp(sa, oa + i, sb, ob, lb) == 0)
+                    {
+                        res = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if ((k0 & 0x100u) != 0)
+            res = !res;
+        regs[dst].isnull = 0;
+        regs[dst].v = b2l(res);
+        break;
+    }
+    case SOP_STRLEN:
+    {
+        Reg x = regs[ra];
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            uint n = str_len(x);
+            if (k0 == 1)
+            {
+                uint sa = str_src(x), oa = str_off(x), cnt = 0;
+                for (uint i = 0; i < n; i++)
+                    if ((ldb_s(sa, oa + i) & 0xc0u) != 0x80u)
+                        cnt++;
+                n = cnt;
+            }
+            regs[dst].v = int64_t(n);
+        }
+        break;
+    }
+    default:
+        return op | 0x80000000u;    // malformed program
+    }
+    return 0;
+}
+
 // Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
 uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
 {
@@ -414,7 +667,12 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
         }
 
         default:
-            return op | 0x80000000u;    // malformed program
+        {
+            uint e = vm_ext(op, dst, ra, rb, k0, k1, regs);
+            if (e != 0)
+                return e;
+            break;
+        }
         }
     }
     return 0;
@@ -470,12 +728,29 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
                 sz = (b0 == 1u) ? ((ld8(tbase + off + 1) == 18u) ? 18u : 10u) : ((b0 >> 1) & 0x7fu);
             else
                 sz = (ld32(tbase + off) >> 2) & 0x3fffffffu;
-            off += sz;
-            if (slot != 0xffu)      // only NULL-ness of a varlena is available
+            if (slot != 0xffu)
             {
                 regs[slot].v = 0;
                 regs[slot].isnull = 0;
+                if (vt == SOP_VT_STR)
+                {
+                    // a string register: where the payload is (see above); a value stored out of line
+                    // (b0 == 1) or compressed (4-byte header with the compression flag) is not readable
+                    uint hl = 4;
+                    if ((b0 & 1u) != 0)
+                    {
+                        hl = 1;
+                        if (b0 == 1u)
+                            g_recheck = 1;
+                    }
+                    else if ((b0 & 3u) == 2u)
+                        g_recheck = 1;
+                    if (g_recheck == 0)
+                        regs[slot].v = int64_t(uint64_t(tbase + off + hl) | (uint64_t(sz - hl) << 32) |
+                                               (uint64_t(g_src) << 60));
+                }
             }
+            off += sz;
         }
         else if (alen == 0xfeu)
         {
@@ -545,6 +820,7 @@ bool eval_row(uint pbase, uint page, uint lp,
     uint lp_off   = lpd & 0x7fffu;
     uint lp_flags = (lpd >> 15) & 3u;
 
+    g_recheck = 0;
     if (lp_flags != 1)      // not LP_NORMAL
         return false;
 
@@ -556,6 +832,8 @@ bool eval_row(uint pbase, uint page, uint lp,
     }
     if (!deform_tuple(pbase + lp_off, page, lp, coloff, ncols, regs))
         return false;
+    if (g_recheck != 0)
+        return false;           // the caller looks at g_recheck: the backend must evaluate this row
 
     bool hit = true;
     uint err = 0;

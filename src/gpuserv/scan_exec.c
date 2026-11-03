@@ -310,6 +310,8 @@ describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_
 {
 	if (err & 0x80000000U)
 		snprintf(buf, buflen, "malformed GPU program (instruction %u)", err & 0x7fffffffU);
+	else if (err == 0x7ffffffeU)
+		snprintf(buf, buflen, "a compressed or external string reached the CPU re-evaluation of block index %u, line pointer %u", page, lp + 1);
 	else if (err == 0x7fffffffU)
 		snprintf(buf, buflen, "unsupported attribute layout in block index %u, line pointer %u", page, lp + 1);
 	else
@@ -335,10 +337,72 @@ describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_
 			case SOP_ERR_FLTUNDER:
 				what = "value out of range: underflow";
 				break;
+			case SOP_ERR_DATERANGE:
+				what = "date out of range";
+				break;
+			case SOP_ERR_TSRANGE:
+				what = "date out of range for timestamp";
+				break;
+			case SOP_ERR_INFSUB:
+				what = "cannot subtract infinite dates";
+				break;
 		}
 		snprintf(buf, buflen, "%s (in %s, block index %u, line pointer %u)",
 				 what, scan_vm_opcode_name(func), page, lp + 1);
 	}
+}
+
+/* ---------------------------------------------------------------- */
+/* rows for the backend to evaluate (KDS_FORMAT_RECHECK) */
+static int
+rck_add(recheck_buf *r, uint32_t blkno, uint32_t offnum, const unsigned char *htup, uint32_t len)
+{
+	size_t		isz = MAXALIGN(offsetof(kern_recheckitem, t_data) + len);
+	kern_recheckitem *it;
+
+	if (r->len + isz > r->cap)
+	{
+		size_t		ncap = (r->cap ? r->cap * 2 : 4096);
+		unsigned char *nb;
+
+		while (ncap < r->len + isz)
+			ncap *= 2;
+		nb = realloc(r->buf, ncap);
+		if (!nb)
+			return -1;
+		r->buf = nb;
+		r->cap = ncap;
+	}
+	it = (kern_recheckitem *)(r->buf + r->len);
+	memset(it, 0, offsetof(kern_recheckitem, t_data));
+	it->t_len = len;
+	it->blkno = blkno;
+	it->offnum = (uint16_t) offnum;
+	memcpy(it->t_data, htup, len);
+	memset(it->t_data + len, 0, isz - offsetof(kern_recheckitem, t_data) - len);
+	r->len += isz;
+	r->nitems++;
+	return 0;
+}
+
+/* the size of the chunk of the rows (0 if none), and filling it in at 'kds' */
+static size_t
+rck_chunk_size(const kern_data_store *kds_head, const recheck_buf *r)
+{
+	return r->nitems == 0 ? 0 : KDS_HEAD_LENGTH(kds_head) + r->len;
+}
+static void
+rck_chunk_fill(kern_data_store *kds, const kern_data_store *kds_head, const recheck_buf *r)
+{
+	size_t		head_sz = KDS_HEAD_LENGTH(kds_head);
+
+	memcpy(kds, kds_head, head_sz);
+	kds->length = head_sz + r->len;
+	kds->usage = r->len;
+	kds->nitems = r->nitems;
+	kds->format = KDS_FORMAT_RECHECK;
+	kds->hash_nslots = 0;
+	memcpy((char *) kds + head_sz, r->buf, r->len);
 }
 
 /* ---------------------------------------------------------------- */
@@ -728,7 +792,8 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	XpuCommand *resp = NULL;
 	uint32_t   *lp_base = NULL;
 	const uint32_t *flags, *vals;
-	uint32_t	nmatch = 0;
+	uint32_t	nmatch = 0, nrck = 0;
+	recheck_buf	rck = {0};
 	form_ctx	fc;
 	int			variant;
 	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0, t4 = 0;
@@ -881,7 +946,10 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 		kern_data_store *kds;
 
 		for (uint32_t i = 0; i < total_lps; i++)
-			nmatch += flags[i];
+		{
+			nmatch += (flags[i] == 1);
+			nrck += (flags[i] == 2);
+		}
 		idx_sz = MAXALIGN(sizeof(uint64_t) * nmatch);
 		/* a first guess of the tuples' size; grown on demand */
 		cap = resp_sz + head_sz + idx_sz + (size_t) nmatch * 64 + 4096;
@@ -891,7 +959,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 			snprintf(err, errlen, "out of memory");
 			goto error;
 		}
-		for (uint32_t i = 0, row = 0; i < npages && row < nmatch; i++)
+		for (uint32_t i = 0, row = 0, nrck_seen = 0; i < npages && (row < nmatch || nrck_seen < nrck); i++)
 		{
 			const unsigned char *page = PAGE_AT(&ps, i);
 			uint32_t	nlp = ((i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i]);
@@ -904,7 +972,18 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 				int			sz;
 				char	   *dest;
 
-				if (!flags[g])
+				if (flags[g] == 2)		/* a string the GPU cannot read: the backend evaluates the row */
+				{
+					memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+					if (rck_add(&rck, blkno, lp + 1, page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+					{
+						snprintf(err, errlen, "out of memory");
+						goto error;
+					}
+					nrck_seen++;
+					continue;
+				}
+				if (flags[g] != 1)
 					continue;
 				memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
 				/* the tuple needs at most its source's length plus the header, the row id and padding */
@@ -955,6 +1034,22 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 		resp->u.results.nitems_in = nmatch;
 		resp->u.results.nitems_out = nmatch;
 		resp->u.results.npages_vfs_read = (npages - nloaded) * PAGES_PER_BLOCK;
+		if (rck.nitems > 0)
+		{
+			/* a second chunk: the rows the backend has to evaluate */
+			size_t		csz = rck_chunk_size(kds_dst_head, &rck);
+			XpuCommand *nr = realloc(resp, resp->length + csz);
+
+			if (!nr)
+			{
+				snprintf(err, errlen, "out of memory");
+				goto error;
+			}
+			resp = nr;
+			rck_chunk_fill((kern_data_store *)((char *) resp + resp->length), kds_dst_head, &rck);
+			resp->length += csz;
+			resp->u.results.chunks_nitems = 2;
+		}
 		*p_len = resp->length;
 	}
 	t4 = now_ms();
@@ -962,6 +1057,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 		fprintf(stderr, "pgstrom-gpuserv: scan task: %u pages (%u from file) pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms, results %.1f ms (%u rows)\n",
 				npages, npages - nloaded, t1 - t0, mapped ? " (mapped)" : "", t2 - t1, t3 - t2, t4 - t3, nmatch);
 	free(lp_base);
+	free(rck.buf);
 	gpu_vk_buffer_destroy(vk, &bprog);
 	gpu_vk_buffer_destroy(vk, &bout);
 	gpu_vk_buffer_destroy(vk, &btab);
@@ -970,6 +1066,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 
 error:
 	free(lp_base);
+	free(rck.buf);
 	free(resp);
 	if (have_prog)
 		gpu_vk_buffer_destroy(vk, &bprog);
@@ -1025,7 +1122,8 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	gpu_vk_buffer bout, bprog, btab;
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant;
-	uint32_t	npages, nloaded, nagg, ngroups_total;
+	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, flags_base;
+	uint32_t   *lp_base = NULL;
 	size_t		out_words;
 	const uint32_t *out;
 	int			rv = -1;
@@ -1089,18 +1187,28 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 		goto done;
 	}
 	have_tab = 1;
+	lp_base = malloc(sizeof(uint32_t) * npages);
+	if (!lp_base)
+	{
+		snprintf(err, errlen, "out of memory");
+		goto done;
+	}
 	for (uint32_t i = 0; i < npages; i++)
 	{
 		uint16_t	pd_lower;
 
 		((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
-		((uint32_t *) btab.map)[2 * i + 1] = 0;
+		((uint32_t *) btab.map)[2 * i + 1] = total_lps;
+		lp_base[i] = total_lps;
 		memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
 		if (pd_lower > 24)
-			st->nitems_raw += (pd_lower - 24) / 4;
+			total_lps += (pd_lower - 24) / 4;
 	}
+	st->nitems_raw += total_lps;
 	ngroups_total = (npages + AGG_PAGES_PER_WG - 1) / AGG_PAGES_PER_WG;
-	out_words = 4 + (size_t) ngroups_total * nagg * 6;
+	/* after the per-workgroup records: one word per line pointer, 2 = the backend evaluates the row */
+	flags_base = 4 + (uint32_t)((size_t) ngroups_total * nagg * 6);
+	out_words = (size_t) flags_base + total_lps;
 	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
@@ -1109,6 +1217,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	have_out = 1;
 	out = (const uint32_t *) bout.map;
 	memset(bout.map, 0, 16);
+	memset((uint32_t *) bout.map + flags_base, 0, sizeof(uint32_t) * total_lps);
 	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
@@ -1130,7 +1239,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 			pc[0] = npages;
 			pc[1] = base;				/* first workgroup of this dispatch */
 			pc[2] = AGG_PAGES_PER_WG;
-			pc[3] = 0;
+			pc[3] = flags_base;
 			if (gpu_vk_dispatch(vk, &eng->agg_pipe[variant][avariant], bufs, pc, groups, 1, 1, NULL) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
@@ -1143,6 +1252,27 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	{
 		describe_kernel_error(out[1], out[2], out[3], err, errlen);
 		goto done;
+	}
+	/* rows with a string the GPU cannot read: the backend evaluates them */
+	for (uint32_t i = 0; i < npages; i++)
+	{
+		uint32_t	nlp = (i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i];
+		const unsigned char *page = PAGE_AT(&ps, i);
+		BlockNumber	blkno = ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i];
+
+		for (uint32_t lp = 0; lp < nlp; lp++)
+		{
+			uint32_t	lpd;
+
+			if (out[flags_base + lp_base[i] + lp] != 2)
+				continue;
+			memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+			if (rck_add(&st->rck, blkno, lp + 1, page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+			{
+				snprintf(err, errlen, "out of memory");
+				goto done;
+			}
+		}
 	}
 	/* add the per-page records to the session's aggregates */
 	for (uint32_t pg = 0; pg < ngroups_total; pg++)
@@ -1189,6 +1319,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 				npages, t1 - t0, mapped ? " (mapped)" : "", t2 - t1, t3 - t2, now_ms() - t3);
 	rv = 0;
 done:
+	free(lp_base);
 	if (have_prog)
 		gpu_vk_buffer_destroy(vk, &bprog);
 	if (have_out)
@@ -1557,6 +1688,9 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 void
 agg_state_free(agg_state *st)
 {
+	free(st->rck.buf);
+	st->rck.buf = NULL;
+	st->rck.len = st->rck.cap = st->rck.nitems = 0;
 	if (st->groups)
 	{
 		free(st->groups->ents);
@@ -1790,8 +1924,18 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 
 				if (!flags[lp_base[i] + lp])
 					continue;
-				n_overflow++;
 				memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+				if (flags[lp_base[i] + lp] == 2)		/* a string the GPU cannot read: the backend */
+				{
+					if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
+								page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+					{
+						snprintf(err, errlen, "out of memory");
+						goto done;
+					}
+					continue;
+				}
+				n_overflow++;
 				if (cpu_eval_row(prog, page + (lpd & 0x7fff), regs, &e) != 1)
 				{
 					if (e != 0)
@@ -1992,6 +2136,23 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 	resp->u.results.final_total = chunk_len;
 	if (nrows == 0)
 		resp->length = resp_sz;
+	if (st->rck.nitems > 0)
+	{
+		/* the rows the backend evaluates (strings the GPU could not read) */
+		size_t		csz = rck_chunk_size(kds_dst_head, &st->rck);
+		XpuCommand *nr = realloc(resp, resp->length + csz);
+
+		if (!nr)
+		{
+			snprintf(err, errlen, "out of memory");
+			free(resp);
+			return NULL;
+		}
+		resp = nr;
+		rck_chunk_fill((kern_data_store *)((char *) resp + resp->length), kds_dst_head, &st->rck);
+		resp->length += csz;
+		resp->u.results.chunks_nitems++;
+	}
 	*p_len = resp->length;
 	return resp;
 }

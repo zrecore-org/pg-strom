@@ -811,9 +811,13 @@ tryExecCpuFallbackChunks(pgstromTaskState *pts)
 	{
 		kern_data_store *kds = pts->curr_kds;
 
-		if (kds->format == KDS_FORMAT_FALLBACK)
+		if (kds->format == KDS_FORMAT_FALLBACK ||
+			kds->format == KDS_FORMAT_RECHECK)
 		{
-			execCpuFallbackOneChunk(pts);
+			if (kds->format == KDS_FORMAT_RECHECK)
+				execCpuRecheckOneChunk(pts);
+			else
+				execCpuFallbackOneChunk(pts);
 			/* move to the next chunk */
 			pts->curr_kds = (kern_data_store *)
 				((char *)kds + kds->length);

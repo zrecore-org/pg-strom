@@ -542,6 +542,38 @@ execCpuFallbackOneChunk(pgstromTaskState *pts)
 }
 
 /*
+ * execCpuRecheckOneChunk
+ *
+ * A KDS_FORMAT_RECHECK chunk of the Vulkan service: raw heap tuples of the base relation that the GPU
+ * could not evaluate (a compressed or external string was needed). The CPU evaluates them from the
+ * start (quals, joins, projection) like any other fallback tuple.
+ */
+void
+execCpuRecheckOneChunk(pgstromTaskState *pts)
+{
+	kern_data_store *kds = pts->curr_kds;
+	Relation		rel = pts->css.ss.ss_currentRelation;
+	char		   *pos = KDS_BODY_ADDR(kds);
+
+	Assert(kds->format == KDS_FORMAT_RECHECK);
+	elog(DEBUG1, "%s: CPU re-evaluation of %u tuples with strings the GPU cannot read",
+		 pts->css.methods->CustomName, kds->nitems);
+	for (uint32_t i=0; i < kds->nitems; i++)
+	{
+		kern_recheckitem *item = (kern_recheckitem *)pos;
+		HeapTupleData	htup;
+
+		memset(&htup, 0, sizeof(htup));
+		htup.t_len = item->t_len;
+		ItemPointerSet(&htup.t_self, item->blkno, item->offnum);
+		htup.t_tableOid = RelationGetRelid(rel);
+		htup.t_data = (HeapTupleHeader) item->t_data;
+		execCpuFallbackBaseTuple(pts, &htup);
+		pos += MAXALIGN(offsetof(kern_recheckitem, t_data) + item->t_len);
+	}
+}
+
+/*
  * ExecFallbackCpuJoinRightOuter
  */
 static void

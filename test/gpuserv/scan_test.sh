@@ -225,6 +225,8 @@ runjoin s1 "float key stays on the CPU" "select t.i, d.grp from %T t join %D d o
 ANYPLAN=0
 runjoin s1 "parallel workers" "select t.i, d.grp from %T t join %D d on t.b = d.k" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 
+. "${0%/*}/types_tests.inc"
+
 echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)
