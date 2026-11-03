@@ -1053,8 +1053,15 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 			if (!pts->final_done)
 			{
 				pts->final_done = true;
+				/*
+				 * The CUDA service kept one final buffer per plan, shared by every process, so only the
+				 * last process asked for it. The Vulkan service keeps the partial aggregates per session
+				 * (connection): each process must fetch its own, or the rows of the processes that did
+				 * not finish last are lost (the Agg node above combines them).
+				 */
 				if (try_final_callback &&
-					pgstromTaskStateEndScan(pts))
+					(pgstromTaskStateEndScan(pts) ||
+					 (pts->xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG))
 				{
 					/* send XpuTaskFinal if we are actually the final one */
 					XpuCommand	__xcmd;

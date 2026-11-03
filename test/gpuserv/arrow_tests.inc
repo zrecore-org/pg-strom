@@ -108,6 +108,10 @@ done
 aagg a1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "$APAR"
 aagg a1 "GROUP BY, parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "$APAR"
 aagg p1 "GROUP BY, parallel workers (Parquet)" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "$APAR"
+# every process fetches its own partial result (the leader does not scan: the workers' rows must not be lost)
+aagg p1 "parallel workers only, no GROUP BY (Parquet)" "select count(*), sum(a), min(c) from %T" "$APAR set parallel_leader_participation=off;"
+aagg a1 "parallel workers only, no GROUP BY" "select count(*), sum(a), min(c) from %T" "$APAR set parallel_leader_participation=off;"
+aagg p1 "parallel workers only, GROUP BY (Parquet)" "select a % 3 as k, count(*), sum(b) from %T group by 1 order by 1" "$APAR set parallel_leader_participation=off;"
 
 for t in a1 a2 a3 p1; do
 	echo "table $t: joins with the Arrow table as the outer relation"
