@@ -208,7 +208,15 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 				gen_fail(g, "instruction %u: backward jump", i);
 				return;
 			}
-			if (op == SOP_AND)
+			if (getenv("PGSTROM_GPUSERV_SPEC_ANDOR"))
+			{
+				/* experiment: the interpreter's own AND / OR through vm_step(); a changed ip is the jump */
+				sb_printf(o, "        uint ipx = %uu;\n"
+							 "        uint e = vm_step(%uu, %uu, %uu, %uu, %uu, %uu, ipx, regs);\n"
+							 "        if (e != 0u)\n            return e;\n"
+							 "        if (ipx != %uu)\n            j%u = true;\n", i + 1, op, dst, ra, rb, k0, k1, i + 1, i);
+			}
+			else if (op == SOP_AND)
 				sb_printf(o,
 						  "        if (regs[%u].isnull != 0)\n            regs[%u].isnull = 1;\n"
 						  "        else if (regs[%u].v == 0)\n        {\n"

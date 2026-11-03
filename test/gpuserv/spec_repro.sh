@@ -24,11 +24,14 @@ trap stop EXIT INT TERM
 export PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check}
 export PGSTROM_GPUSERV_CACHE_DIR=$ROOT/speccache
 export PGSTROM_GPUSERV_SPEC_LOG=1
-$PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || exit 1
-n=0; while [ $n -lt 40 ]; do
-	[ "$($PSQL -At -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
-	n=$((n+1)); sleep 1
-done
+start() {
+	$PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || exit 1
+	n=0; while [ $n -lt 40 ]; do
+		[ "$($PSQL -At -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
+		n=$((n+1)); sleep 1
+	done
+}
+start
 $PSQL -d postgres -c "create database t" >/dev/null
 $PSQL -At -d t -c "create extension pg_strom" >/dev/null
 $PSQL -At -d t >/dev/null <<SQL
@@ -40,9 +43,18 @@ create table s1 as select i, ((i % 20000) - 10000)::int2 as a, case when i % 7 =
 	((i::int8 * 1000003) % 1000000007 - 500000000) as c from generate_series(1, 300000) i;
 create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp, i::int8 as k8 from generate_series(1, 20000) i;
 insert into sd select k, grp + 100, k8 from sd where k % 10 = 0;
-create table ty1 as select i, date '1990-01-01' + ((i * 37) % 12000) as dt from generate_series(1, 300000) i;
-vacuum analyze nm1; vacuum analyze s1; analyze sd; vacuum analyze ty1;
+
+vacuum analyze nm1; vacuum analyze s1; analyze sd; 
 SQL
-$PSQL -d t -c "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0;" -f "$ADHOC" 2>&1 | head -${OUT_LINES:-60}
-echo "--- specializer log"
-grep "specialize" "$ROOT/log" | tail -${LOG_LINES:-40}
+# VARIANTS: space separated "NAME=value" settings of the service (or "-" for none), one service start each
+for v in ${VARIANTS:--}; do
+	stop
+	: > "$ROOT/log"
+	unset PGSTROM_GPUSERV_SPEC_ANDOR
+	[ "$v" != - ] && export "$v"
+	start
+	echo "=== service variant: $v (mode $PGSTROM_GPUSERV_SPECIALIZE)"
+	$PSQL -d t -c "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0;" -f "$ADHOC" 2>&1 | head -${OUT_LINES:-80}
+	echo "--- specializer log"
+	grep "specialize" "$ROOT/log" | tail -${LOG_LINES:-12}
+done
