@@ -4677,6 +4677,8 @@ vulkan_expr_regs(Node *node, int *p_nodes)
 				int			mx = 0;
 				ListCell   *lc;
 
+				if (list_length(b->args) > SCAN_VM_BOOL_ARGS)
+					return SCAN_MAX_REGS;		/* scan_prog.c: "too many arguments in AND/OR" */
 				/* AND/OR: the accumulator register, every argument computed above it */
 				foreach (lc, b->args)
 				{

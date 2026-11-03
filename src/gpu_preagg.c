@@ -2547,11 +2547,30 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	 * computed arguments and keys) must fit its registers.
 	 */
 	{
-		int			nslots = bms_num_members(pp_input->outer_refs) +
-							 list_length(con.target_partial->exprs);
+		/*
+		 * kernel variables: the referenced columns of every relation, and one slot per computed
+		 * argument or filter of a partial aggregate (a plain column argument uses its column's slot)
+		 */
+		int			nslots = bms_num_members(pp_input->outer_refs);
+		ListCell   *lc3;
 
 		foreach (lc, inner_target_list)
 			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
+		foreach (lc3, con.target_partial->exprs)
+		{
+			Node   *e = lfirst(lc3);
+
+			if (IsA(e, FuncExpr))
+			{
+				ListCell   *lc4;
+
+				foreach (lc4, ((FuncExpr *) e)->args)
+					if (!IsA(lfirst(lc4), Var))
+						nslots++;
+			}
+			else if (!IsA(e, Var))
+				nslots++;
+		}
 		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
 			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
 			nslots > SCAN_VM_SLOT_BUDGET)

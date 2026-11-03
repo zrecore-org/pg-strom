@@ -1,6 +1,18 @@
-# fail_service seed=2 index=85 GPU: f35d044082ff93c018a029d353bd9416|1 | CPU: f35d044082ff93c018a029d353bd9416|1
-join	select avg((t.w16 - t.w4)) as a0, avg(t.w13) as a1, max((t.w19 - t.w34)) as a2, count((t.w23 - t.w4)) filter (where (t.w4 > (0)::int4)) as a3, avg(t.w16) as a4, count(t.w22) as a5, max((t.w26 - t.w34)) filter (where (t.w13 > (0)::int4)) as a6, count(t.w39) as a7, max((t.w37 - t.w41)) as a8, max(t.w43) as a9, count(t.w9) as a10, max((t.w20 - t.w29)) as a11 from fz_w t left join fz_d d on (t.w2 = d.k4) where (t.w38 < t.w16) AND (t.w11 < t.w16) AND (t.w15 < t.w14) AND (t.w28 > t.w27) AND (t.w5 < t.w37) AND (t.w6 > t.w15) AND (t.w5 < t.w16) AND (t.w43 > t.w26) AND (t.w7 < t.w43) AND (t.w11 > t.w32) AND (t.w31 > t.w29) AND (t.w8 < t.w25)
 # fail_rows seed=2 index=239 GPU: d41d8cd98f00b204e9800998ecf8427e|0 | CPU: 225e2cf71f43caf3ba940321e86f5931|5414
 join	select (t.e4)::text as c0 from fz1 t inner join fz_d d on ((t.n4)::int2 = d.k4)
 # fail_rows seed=2 index=333 GPU: d41d8cd98f00b204e9800998ecf8427e|0 | CPU: fb6b4b5baeda83617047eb9874af2523|26042
 join+par	select t.bo as c0 from fz1 t where t.n2 IN (select d.k4 from fz_d d)
+# fail_service seed=3 index=61 GPU: ERROR:  smallint out of range | CPU: ERROR:  smallint out of range
+scan	select (((-(7)::int4) * e4))::int2 as c0 from fz1 t where (((n2)::float4 / abs(ef)) IS NULL)
+# fail_rows seed=3 index=693 GPU: 2d62786447f7dd31b1783e5ba5a38572|1 | CPU: bcd8b0c2eb1fce714eab6cef0d771acc|1
+agg+par	select min(n2) as a0 from fz2 t where (c LIKE 'abc')
+# fail_service seed=3 index=784 GPU: ERROR:  gpuserv:0  variable slot 2 is not loaded from the scan relation | CPU: bc0d7af3c5c117ab853db24fb8194bc2|166
+join+par	select d.ps as c0 from fz2 t inner join fz_d d on (t.n4 = d.k4) AND ((t.d > t.d) OR (d.kts IS NULL))
+# fail_service seed=3 index=829 GPU: ERROR:  fuzzer: no result: psql: error: connection to server on socket "/tmp/fz_test/.s.PGSQL.54402" | CPU: c6486a01731e6f609aa73732ff3a33a3|1
+agg	select avg(w31) filter (where true) as a0, avg((w34 - w12)) filter (where (w31 > (0)::int4)) as a1, avg(w5) as a2, max((1)::int4) filter (where (w16 > (0)::int4)) as a3, min((0)::int4) filter (where (w25 > (0)::int4)) as a4 from fz_w t where (w24 < w4) AND (w18 <> w44) AND (w15 < w27)
+# fail_rows seed=3 index=924 GPU: 4da318e55be35e9904d9629dcaf4ba1f|178 | CPU: 76de7ae9ca1447c12e49f297be506ba6|178
+join	select t.nw as k0, t.tm as k1, count((0)::int4) as a0 from fz1 t inner join fz_d d on (((-t.n2))::int2 = d.k4) AND (upper(d.ks) IS NULL) group by 1, 2
+# fail_rows seed=3 index=980 GPU: 22aa5c72ac24ad779ed8ff178bd9ad6f|1 | CPU: 5d2e3074c1898cae04cc1e1ab0e3069e|1
+agg	select count(*) filter (where (c NOT LIKE 'abc')) as a0 from fz1 t
+# fail_rows seed=3 index=1358 GPU: d42bde1166554a9a42dbb381e5387d47|26 | CPU: e45b9d257ce31dfc9ba28c71fc614b11|26
+agg+par	select nw as k0, count('infinity'::date) as a0 from fz2 t group by 1

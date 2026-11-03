@@ -508,6 +508,13 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 		dev_quals = NIL;
 		dev_costs = NIL;
 	}
+	/* the VM's AND takes up to SCAN_VM_BOOL_ARGS operands: the quals beyond that stay on the host */
+	while (list_length(dev_quals) > SCAN_VM_BOOL_ARGS)
+	{
+		host_quals = lappend(host_quals, llast(dev_quals));
+		dev_quals = list_delete_last(dev_quals);
+		dev_costs = list_delete_last(dev_costs);
+	}
 	sort_device_qualifiers(dev_quals, dev_costs);
 
 	/*
@@ -771,7 +778,14 @@ gpuscan_build_projection(RelOptInfo *baserel,
 	List	   *vars_list;
 	ListCell   *lc;
 
-	gpuscan_computed_ok = (gpuscan_slots_upperbound(baserel, pp_info->outer_refs) <= SCAN_VM_SLOT_BUDGET);
+	/*
+	 * Computed values are evaluated by the device for every row its own quals accept. If host quals
+	 * remain, PostgreSQL would test them before computing the target list: an expression that raises
+	 * an error (overflow, division by zero) on a row the host qual rejects must not run, so only plain
+	 * columns are projected then.
+	 */
+	gpuscan_computed_ok = (pp_info->host_quals == NIL &&
+						   gpuscan_slots_upperbound(baserel, pp_info->outer_refs) <= SCAN_VM_SLOT_BUDGET);
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)

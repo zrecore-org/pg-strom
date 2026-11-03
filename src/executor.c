@@ -335,13 +335,30 @@ __build_session_param_info(pgstromTaskState *pts,
 	foreach (lc, pp_info->used_params)
 	{
 		Expr	   *expr = lfirst(lc);
-		ExprState  *expr_state = ExecInitExpr(expr, NULL);
+		ExprState  *expr_state;
 		Datum		datum;
 		bool		isnull;
 		uint32_t	offset;
 
+		/*
+		 * setrefs.c rewrites an expression of custom_exprs that equals an entry of custom_scan_tlist (the
+		 * constant argument of sum(3) is both a parameter and a projected value) into a reference to that
+		 * entry; evaluate the entry's expression itself.
+		 */
+		while (IsA(expr, Var) && ((Var *) expr)->varno == INDEX_VAR)
+		{
+			CustomScan *cscan = (CustomScan *) pts->css.ss.ps.plan;
+			AttrNumber	attno = ((Var *) expr)->varattno;
+
+			if (attno < 1 || attno > list_length(cscan->custom_scan_tlist))
+				elog(ERROR, "kernel parameter %u refers to custom_scan_tlist entry %d",
+					 param_id, (int) attno);
+			expr = ((TargetEntry *) list_nth(cscan->custom_scan_tlist, attno - 1))->expr;
+		}
 		/* expr should not contain any Var nodes */
-		Assert(!contain_var_clause((Node *)expr));
+		if (contain_var_clause((Node *)expr))
+			elog(ERROR, "kernel parameter %u is not a constant expression", param_id);
+		expr_state = ExecInitExpr(expr, NULL);
 		datum = ExecEvalExprSwitchContext(expr_state, econtext, &isnull);
 		if (isnull)
 			offset = 0;

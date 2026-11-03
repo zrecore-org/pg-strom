@@ -25,7 +25,7 @@ FUZZ_START=${FUZZ_START:-0}
 FUZZ_CORPUS=${FUZZ_CORPUS:-$D/fuzz_corpus.txt}
 PSQL="$PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
 sql() { $PSQL -d fuzz -c "$1"; }
-stop() { $PGBIN/pg_ctl -D "$ROOT/data" -m fast -w stop >/dev/null 2>&1; }
+stop() { $PGBIN/pg_ctl -D "$ROOT/data" -m fast -t 20 -w stop >/dev/null 2>&1 || $PGBIN/pg_ctl -D "$ROOT/data" -m immediate -w stop >/dev/null 2>&1; }
 
 if [ -z "$REUSE" ]; then
 stop
@@ -165,6 +165,18 @@ SQL
 fi
 
 STATUS=0
+if [ -n "$DBG_SQL" ]; then		# ad-hoc: run a SQL file (psql output and stderr) against the fuzz tables, then stop
+	# chunks separated by lines "-- NEXT" run in separate sessions (a crash only ends its own chunk)
+	rm -f "$ROOT"/chunk.*
+	awk -v d="$ROOT" 'BEGIN { n = 0 } /^-- NEXT/ { n++; next } { print > (d "/chunk." n ".sql") }' "$DBG_SQL"
+	for f in "$ROOT"/chunk.*.sql; do
+		$PGBIN/psql -h "$ROOT" -p "$PORT" -U postgres -X -d fuzz -f "$f" 2>&1
+		sleep 2
+	done
+	[ -n "$DBG_LOG" ] && grep -E "$DBG_LOG" "$ROOT/log" | tail -20 | cut -c1-600
+	[ -z "$KEEP" ] && stop
+	exit 0
+fi
 if [ -s "$FUZZ_CORPUS" ] && [ -z "$NO_REPLAY" ]; then
 	echo "replaying $FUZZ_CORPUS"
 	python3 -I "$D/fuzz.py" --sock "$ROOT" --port "$PORT" --db fuzz --replay "$FUZZ_CORPUS" || STATUS=1

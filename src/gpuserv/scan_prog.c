@@ -444,9 +444,13 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				/* IS [NOT] NULL of a column of any type needs only its NULL-ness */
 				uint32_t	slot = kin->u.v.var_slot_id;
 
-				if (slot >= b->nslots || slot >= SCAN_MAX_REGS || b->slot_resno[slot] <= 0)
+				if (slot >= b->nslots || slot >= SCAN_MAX_REGS ||
+					(b->slot_resno[slot] <= 0 && b->slot_iresno[slot] <= 0))
 					return fail(b, "variable slot %u is not loaded from the scan relation", slot);
-				b->slot_used[slot] = 1;
+				if (b->slot_resno[slot] > 0)
+					b->slot_used[slot] = 1;
+				else
+					b->slot_iused[slot] = 1;		/* a column of an inner relation (a join) */
 				b->slot_nullonly[slot] = 1;
 				ra = (int) slot;
 			}

@@ -14,3 +14,41 @@ for t in s1 s2 s3; do
 	runjoin $t "int4 expression cast to int2 against an int4 key (semi join)" "select t.i from %T t where t.b::int2 in (select k from %D)"
 done
 ANYPLAN=0
+for t in s1 s2 s3; do
+	# an aggregate over a constant (the constant is a kernel parameter and a projected value; setrefs turned the
+	# parameter into a reference to custom_scan_tlist and the backend crashed evaluating it)
+	runagg_any $t "aggregates of constants" "select sum(3), min(7), max(1 + 1), avg(5), count(3), sum(b) from %T where a > 0"
+	runagg_any $t "constant aggregate argument with GROUP BY" "select a % 3 as k, sum(3), count(*) from %T group by 1 order by 1"
+	# the computed projection must not run on rows a host-only qual rejects (the error would be PG-Strom's alone)
+	run_any $t "computed projection that overflows, rows rejected by a host qual" "select a::int4 * 1000000 as x, i from %T where a > 0 and upper(f) = 'NEVER'"
+done
+for t in s1 s2 s3; do
+	ANYPLAN=1
+	runjoin $t "IS NULL of an inner string column inside a join qual" "select t.i, d.grp from %T t join %D d on t.b = d.k and (t.a > 100000 or d.txt is null or d.pay is null)"
+	ANYPLAN=0
+done
+# char(n) LIKE: the value's trailing blanks are significant (bpcharlike does not strip them)
+for t in ty1 ty2; do
+	run $t "bpchar LIKE keeps the padding" "select i, bp from %T where bp like 'b1' or bp like '%1' or bp not like 'b2' or bp like 'b1      '"
+	run $t "bpchar LIKE prefix on the padded value" "select i, bp from %T where bp like 'b1%' and bp not like '%1'"
+done
+# wide plans: more kernel variables than the VM has registers must stay on the CPU, not fail in the service
+WCOLS=""; WSEL=""; WSUM=""; WQ=""
+k=1; while [ $k -le 44 ]; do
+	WCOLS="$WCOLS, ((i * $k + $k) % 21 - 10)::int4 as w$k"
+	WSEL="$WSEL${WSEL:+, }w$k + $k"
+	[ $k -le 14 ] && WSUM="$WSUM${WSUM:+, }sum(w$k + w$((k+1))) filter (where w$((k+2)) > 0)"
+	k=$((k+1))
+done
+sql "create table wz as select i $WCOLS from generate_series(1, 20000) i"; sql "analyze wz"
+run_any wz "44 computed columns" "select $WSEL from %T where w1 > 0"
+run_any wz "14 aggregates with filters over many columns" "select $WSUM from %T where w20 < w21 and w22 <> w23"
+run_any wz "aggregates with filters (the 32 registers case of the fuzzer)" "select avg(w31) filter (where (w21 > 0)), max(w34) filter (where (w22 > 0)), avg(w34 - w12) filter (where (w31 > 0)), avg(w5), max(w26 - w29) filter (where (w16 > 0)), min(w25 - w38) filter (where (w25 > 0)) from %T where w24 < w4 and w18 <> w44 and w15 < w27"
+# 100 quals: the VM's AND takes at most 64 operands
+Q100=""; k=1; while [ $k -le 100 ]; do Q100="$Q100${Q100:+ and }w1 <> $((k + 100))"; k=$((k+1)); done
+run_any wz "100 quals" "select i from %T where $Q100 and w2 > 0"
+# a deep expression: more temporaries than registers
+DEEP="w1"; k=2; while [ $k -le 40 ]; do DEEP="($DEEP + w$k)"; k=$((k+1)); done
+run_any wz "left-deep sum of 40 columns" "select $DEEP from %T where w1 > 5"
+DEEPR="w40"; k=39; while [ $k -ge 1 ]; do DEEPR="(w$k - $DEEPR)"; k=$((k-1)); done
+run_any wz "right-deep difference of 40 columns" "select i from %T where $DEEPR > 0"

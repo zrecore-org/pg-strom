@@ -536,6 +536,9 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		}
 	}
 
+	/* the VM's AND takes a limited number of operands (scan_caps.h) */
+	if (list_length(join_quals) + list_length(other_quals) > SCAN_VM_BOOL_ARGS)
+		return NULL;
 	if (clauses_are_immutable)
 	{
 		elog(DEBUG2, "immutable join-clause is not supported: %s",

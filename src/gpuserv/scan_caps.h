@@ -68,6 +68,7 @@ bool	scan_vm_agg_action_supported(int action);
 #define SCAN_VM_PERM_RESERVE	3
 #define SCAN_VM_SLOT_BUDGET		(SCAN_MAX_REGS - SCAN_VM_TEMP_BUDGET - SCAN_VM_PERM_RESERVE)
 #define SCAN_VM_EXPR_NODES		120
+#define SCAN_VM_BOOL_ARGS		60		/* operands of one AND/OR (scan_prog.c: 64) */
 
 /* GROUP BY: up to this many key columns (gagg.slang's GA_NK), of these types */
 #define SCAN_GROUP_KEYS		2

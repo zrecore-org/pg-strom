@@ -704,6 +704,12 @@ def gen_query(seed, index):
             for _ in range(nk):
                 kt = r.choice(["i2", "i4", "i4", "i8", "date", "bool", "ts", "time", "text", "num"])
                 kx = g.expr(kt, min(depth, 3))
+                if kt == "num":
+                    # a numeric key's printed scale depends on the row that created the group (0 vs 0.00):
+                    # only fixed-scale columns, or the result would depend on the scan order
+                    kx = col(("t." if isjoin else "") + r.choice(["nm", "nl"]), "num")
+                if kt == "f4":
+                    kx = col(("t." if isjoin else "") + "nf", "f4")
                 if kt in INTS and r.random() < 0.8:
                     kx = N("(({0}) % {1})", [kx, lit(str(r.choice([2, 3, 5, 10, 100, 1000])), kt)], kt, pr=True) if r.random() < 0.8 else kx
                 q.keys.append(kx)
