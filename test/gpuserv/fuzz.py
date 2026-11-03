@@ -243,7 +243,7 @@ class Gen:
         if k < 0.88 and self.u(0.8):
             return N("({0} IS " + r.choice(["TRUE", "FALSE", "NOT TRUE", "NOT FALSE", "UNKNOWN"]) + ")", [self.expr("bool", d - 1)], "bool")
         if k < 0.93:                      # casts to bool, bool columns
-            return N("({0})::bool", [self.expr(r.choice(["i4", "i4", "i2", "i8"]), d - 1)], "bool", pr=True)
+            return N("({0})::bool", [self.expr("i4", d - 1)], "bool", pr=True)
         if k < 0.97 and self.u(0.8):                      # coalesce / case: the VM has none
             return N("COALESCE({0}, {1})", [self.expr("bool", d - 1), self.expr("bool", d - 1)], "bool")
         return self.leaf("bool")

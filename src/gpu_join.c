@@ -506,10 +506,19 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			if (!dtype || !dtype->type_hashfunc ||
 				!scan_vm_groupkey_type_supported(dtype->type_code))
 				continue;
-			dtype = pgstrom_devtype_lookup(exprType(arg2));
-			if (!dtype || !dtype->type_hashfunc ||
-				!scan_vm_groupkey_type_supported(dtype->type_code))
-				continue;
+			{
+				/*
+				 * Both sides must have the same device type: the kernel hashes the stored bytes
+				 * (int2: 2 bytes, int4: 4, int8: 8), so a cross-type key (int2 = int4, int8 = int4)
+				 * would not meet its partner in the hash table (found by the fuzzer: no rows).
+				 */
+				devtype_info *dtype2 = pgstrom_devtype_lookup(exprType(arg2));
+
+				if (!dtype2 || !dtype2->type_hashfunc ||
+					!scan_vm_groupkey_type_supported(dtype2->type_code) ||
+					dtype2->type_code != dtype->type_code)
+					continue;
+			}
 			if (bms_is_subset(relids1, outer_rel->relids) &&
 				bms_is_subset(relids2, inner_rel->relids))
 			{
@@ -1906,6 +1915,26 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 }
 
 /*
+ * innerPreloadWait - wait until another worker changes the preload state
+ *
+ * Called with preload_mutex locked, returns with it locked. On macOS a process-shared condition
+ * variable cannot be waited on from processes that map the segment at different addresses
+ * (pthread_cond_wait fails with EINVAL, which killed the parallel worker and restarted the server),
+ * so there the state is polled.
+ */
+static void
+innerPreloadWait(pgstromSharedState *ps_state)
+{
+#ifdef __APPLE__
+	pthreadMutexUnlock(&ps_state->preload_mutex);
+	pg_usleep(500);
+	pthreadMutexLock(&ps_state->preload_mutex);
+#else
+	pthreadCondWait(&ps_state->preload_cond, &ps_state->preload_mutex);
+#endif
+}
+
+/*
  * innerPreloadAllocHostBuffer
  *
  * NOTE: This function is called with preload_mutex locked
@@ -2276,8 +2305,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			while (ps_state->preload_phase == INNER_PHASE__SCAN_RELATIONS ||
 				   ps_state->preload_nr_scanning > 0)
 			{
-				pthreadCondWait(&ps_state->preload_cond,
-								&ps_state->preload_mutex);
+				innerPreloadWait(ps_state);
 			}
 
 			/*
@@ -2369,8 +2397,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				while (ps_state->preload_nr_scanning > 0 ||
 					   ps_state->preload_nr_setup > 0)
 				{
-					pthreadCondWait(&ps_state->preload_cond,
-									&ps_state->preload_mutex);
+					innerPreloadWait(ps_state);
 				}
             }
 			__attribute__((fallthrough));

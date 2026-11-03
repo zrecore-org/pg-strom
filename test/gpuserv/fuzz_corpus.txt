@@ -1,0 +1,6 @@
+# fail_service seed=2 index=85 GPU: f35d044082ff93c018a029d353bd9416|1 | CPU: f35d044082ff93c018a029d353bd9416|1
+join	select avg((t.w16 - t.w4)) as a0, avg(t.w13) as a1, max((t.w19 - t.w34)) as a2, count((t.w23 - t.w4)) filter (where (t.w4 > (0)::int4)) as a3, avg(t.w16) as a4, count(t.w22) as a5, max((t.w26 - t.w34)) filter (where (t.w13 > (0)::int4)) as a6, count(t.w39) as a7, max((t.w37 - t.w41)) as a8, max(t.w43) as a9, count(t.w9) as a10, max((t.w20 - t.w29)) as a11 from fz_w t left join fz_d d on (t.w2 = d.k4) where (t.w38 < t.w16) AND (t.w11 < t.w16) AND (t.w15 < t.w14) AND (t.w28 > t.w27) AND (t.w5 < t.w37) AND (t.w6 > t.w15) AND (t.w5 < t.w16) AND (t.w43 > t.w26) AND (t.w7 < t.w43) AND (t.w11 > t.w32) AND (t.w31 > t.w29) AND (t.w8 < t.w25)
+# fail_rows seed=2 index=239 GPU: d41d8cd98f00b204e9800998ecf8427e|0 | CPU: 225e2cf71f43caf3ba940321e86f5931|5414
+join	select (t.e4)::text as c0 from fz1 t inner join fz_d d on ((t.n4)::int2 = d.k4)
+# fail_rows seed=2 index=333 GPU: d41d8cd98f00b204e9800998ecf8427e|0 | CPU: fb6b4b5baeda83617047eb9874af2523|26042
+join+par	select t.bo as c0 from fz1 t where t.n2 IN (select d.k4 from fz_d d)
