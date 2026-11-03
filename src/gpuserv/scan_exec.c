@@ -2000,6 +2000,82 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
  * GpuJoin
  * ----------------------------------------------------------------
  */
+/*
+ * RIGHT/FULL joins: the backend emits the inner rows that found no partner when the scan is over; it
+ * reads a map of one byte per inner row in the shared buffer (right_outer, ojmap_offset). The kernel
+ * flags matched rows in a per-task word map, and the task merges it into the shared bytes (only ever
+ * 0 -> 1, so tasks of several workers may merge at the same time). Maps the writable part here.
+ */
+static int
+join_open_ojmap(join_inner *ji, const char *name, const kern_multirels *kmrels, off_t file_size,
+				char *err, size_t errlen)
+{
+	uint64_t	lo = UINT64_MAX, hi = 0;
+	size_t		pg = (size_t) sysconf(_SC_PAGESIZE), base, len;
+	int			fd;
+
+	for (int i = 0; i < ji->nrels; i++)
+	{
+		uint64_t	off, end;
+
+		if (!kmrels->chunks[i].right_outer)
+			continue;
+		off = kmrels->chunks[i].ojmap_offset;
+		end = off + ji->rels[i].kds->nitems;
+		if (off == 0 || end > (uint64_t) file_size)
+		{
+			snprintf(err, errlen, "the outer-join map of inner relation %d is outside the buffer", i + 1);
+			return -1;
+		}
+		if (off < lo)
+			lo = off;
+		if (end > hi)
+			hi = end;
+	}
+	if (hi == 0)
+		return 0;
+	fd = shm_open(name, O_RDWR, 0);
+	if (fd < 0)
+	{
+		snprintf(err, errlen, "cannot open the inner buffer '%s' for writing: %s", name, strerror(errno));
+		return -1;
+	}
+	base = (size_t) lo & ~(pg - 1);
+	len = (((size_t) hi - base) + pg - 1) & ~(pg - 1);
+	ji->ojmap = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t) base);
+	close(fd);
+	if (ji->ojmap == MAP_FAILED)
+	{
+		ji->ojmap = NULL;
+		snprintf(err, errlen, "cannot map the outer-join map: %s", strerror(errno));
+		return -1;
+	}
+	ji->ojmaplen = len;
+	for (int i = 0; i < ji->nrels; i++)
+		if (kmrels->chunks[i].right_outer)
+			ji->oj[i + 1] = (uint8_t *) ji->ojmap + (kmrels->chunks[i].ojmap_offset - base);
+	return 0;
+}
+
+/* merge the flags a task set (its output buffer's map) into the backend's map */
+static void
+join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out)
+{
+	for (int d = 1; d <= prog->ndepth; d++)
+	{
+		volatile uint8_t *dst = ji->oj[d];
+		const uint32_t *src;
+
+		if (prog->oj_off[d] == 0xffffffffU || !dst)
+			continue;
+		src = out + 4 + prog->oj_off[d];
+		for (uint32_t r = 0; r < prog->oj_nitems[d]; r++)
+			if (src[r])
+				dst[r] = 1;
+	}
+	__sync_synchronize();
+}
+
 int
 scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner *ji,
 					char *err, size_t errlen)
@@ -2067,10 +2143,10 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		const kern_data_store *kds = (const kern_data_store *)((const char *) map + kds_offset);
 
 		(void) dummy;
-		if (kmrels->chunks[i].is_nestloop || kmrels->chunks[i].right_outer ||
+		if (kmrels->chunks[i].is_nestloop ||
 			kmrels->chunks[i].pinned_buffer || kmrels->chunks[i].gist_offset != 0)
 		{
-			snprintf(err, errlen, "only plain inner, left, semi and anti hash joins are implemented by the Vulkan service");
+			snprintf(err, errlen, "only plain hash joins are implemented by the Vulkan service");
 			munmap(map, maplen);
 			return -1;
 		}
@@ -2089,6 +2165,12 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		ji->rels[i].left_outer = kmrels->chunks[i].left_outer ? 1 : 0;
 		ji->rels[i].semi = kmrels->chunks[i].is_semi ? 1 : 0;
 		ji->rels[i].anti = kmrels->chunks[i].is_anti ? 1 : 0;
+		ji->rels[i].right_outer = kmrels->chunks[i].right_outer ? 1 : 0;
+	}
+	if (join_open_ojmap(ji, name, kmrels, st.st_size, err, errlen) != 0)
+	{
+		munmap(map, maplen);
+		return -1;
 	}
 	if (maplen > vk->limits.maxStorageBufferRange ||
 		gpu_vk_buffer_import_host(vk, &ji->buf, map, maplen) != 0)
@@ -2097,6 +2179,8 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		if (gpu_vk_buffer_create(vk, &ji->buf, maplen, 0) != 0)
 		{
 			snprintf(err, errlen, "cannot allocate %zu bytes for the inner buffer: %s", maplen, vk->err);
+			if (ji->ojmap)
+				munmap(ji->ojmap, ji->ojmaplen);
 			munmap(map, maplen);
 			return -1;
 		}
@@ -2115,6 +2199,8 @@ join_inner_free(scan_engine *eng, join_inner *ji)
 	if (!ji->ready)
 		return;
 	gpu_vk_buffer_destroy(eng->vk, &ji->buf);
+	if (ji->ojmap)
+		munmap(ji->ojmap, ji->ojmaplen);
 	munmap(ji->map, ji->maplen);
 	memset(ji, 0, sizeof(*ji));
 }
@@ -2239,7 +2325,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
 		uint32_t	pc[5];
 
-		out_words = 4 + (size_t) cap * rec_words;
+		out_words = 4 + (size_t) prog->oj_words + (size_t) cap * rec_words;
 		if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 		{
 			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
@@ -2247,7 +2333,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		}
 		have_out = 1;
 		out = (const uint32_t *) bout.map;
-		memset(bout.map, 0, 16);
+		memset(bout.map, 0, 16 + (size_t) prog->oj_words * 4);
 		for (uint32_t base = 0; base < npages; base += SCAN_WG_MAX)
 		{
 			uint32_t	groups = npages - base;
@@ -2283,6 +2369,8 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		goto error;
 	}
 	t2 = now_ms();
+	if (prog->oj_words > 0)
+		join_merge_ojmap(prog, ji, out);
 
 	/* the result chunk, in one pass */
 	memset(&fc, 0, sizeof(fc));
@@ -2313,7 +2401,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		}
 		for (uint32_t r = 0; r < nmatch; r++)
 		{
-			const uint32_t *rec = &out[4 + (size_t) r * rec_words];
+			const uint32_t *rec = &out[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
 			uint32_t	page = rec[0], lp = rec[1], lpd;
 			const unsigned char *pg = PAGE_AT(&ps, page);
 			const unsigned char *inner[SCAN_JOIN_MAXDEPTH + 1];

@@ -275,6 +275,36 @@ JOINPAT="Custom Scan (GpuJoin)"
 ANYPLAN=0
 runjoin s1 "EXISTS, parallel workers" "select t.i, t.b from %T t where exists (select 1 from %D d where d.k = t.b)" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 runjoin s1 "NOT EXISTS, parallel workers" "select t.i, t.b from %T t where not exists (select 1 from %D d where d.k = t.b)" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+# RIGHT and FULL joins: the kernel flags the inner rows that found a partner, the backend emits the others at the end
+sql "create table sdnl as select case when grp % 4 = 0 then null else k end as k, grp, pay, txt from sd"; sql "analyze sdnl"
+JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_mergejoin=off; set enable_nestloop=off;"
+for t in s1 s2 s3; do
+	ANYPLAN=0
+	JOINPAT='GPU Right Outer Join Quals \[1\]'
+	runjoin $t "RIGHT JOIN: inner rows without partner (ON qual on both sides)" "select t.i, t.b, d.k, d.grp, d.pay from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000"
+	runjoin $t "RIGHT JOIN with duplicate inner keys, every inner row has a partner or not" "select t.i, d.k, d.grp, d.txt from %T t right join %D d on t.b = d.k"
+	runjoin $t "RIGHT JOIN with an ON qual on the inner side" "select t.i, d.k, d.grp from %T t right join %D d on t.b = d.k and d.grp < 3"
+	runjoin $t "RIGHT JOIN, nothing matches: all inner rows come out" "select t.i, t.a, d.k, d.txt from %T t right join %D d on t.b = d.k + 1000000"
+	runjoin $t "RIGHT JOIN with an extra join qual and a computed projection" "select t.i, coalesce(t.a, 0) + d.grp as x, d.pay * 2 as y from %T t right join %D d on t.b = d.k and t.a > d.grp"
+	runjoin $t "RIGHT JOIN, inner rows with NULL keys" "select t.i, d.k, d.grp from %T t right join sdnl d on t.b = d.k and t.a + d.grp > 9000"
+	runjoin $t "RIGHT JOIN, text columns of both sides" "select t.f, d.txt from %T t right join %D d on t.b = d.k and t.i + d.grp < 20000"
+	JOINPAT='GPU Full Outer Join Quals \[1\]'
+	runjoin $t "FULL JOIN: unmatched rows on both sides" "select t.i, t.b, d.k, d.grp from %T t full join %D d on t.b = d.k and t.a > 9000"
+	runjoin $t "FULL JOIN with duplicate inner keys" "select t.i, d.k, d.grp, d.pay from %T t full join %D d on t.b = d.k and t.i % 3 = 0"
+	runjoin $t "FULL JOIN, nothing matches" "select t.i, d.k, d.grp from %T t full join %D d on t.b = d.k + 1000000"
+	runjoin $t "FULL JOIN, inner rows with NULL keys" "select t.i, d.k, d.grp from %T t full join sdnl d on t.b = d.k and t.a > 9000"
+done
+for t in s1 s2 s3; do
+	ANYPLAN=0
+	JOINPAT='Join Quals \[2\]'
+	runjoin $t "inner join, then RIGHT join" "select t.i, e.g2, d.k, d.grp from %T t join sd2 e on t.a % 400 = e.k2 right join %D d on t.b = d.k and t.a + d.grp > 9000"
+	runjoin $t "RIGHT join, then LEFT join on the inner side's column" "select t.i, d.k, d.grp, e.g2 from %T t right join %D d on t.b = d.k and t.a > 9000 left join sd2 e on d.grp = e.k2"
+	runjoin $t "RIGHT join, then inner join on the inner side's column" "select t.i, d.k, d.grp, e.g2 from %T t right join %D d on t.b = d.k and t.a > 9000 join sd2 e on d.grp = e.k2"
+done
+ANYPLAN=1
+JOINPAT="Custom Scan (GpuJoin)"
+runjoin s1 "RIGHT JOIN with a WHERE qual on the nullable side stays on the CPU" "select t.i, d.k from %T t right join %D d on t.b = d.k and t.a > 9000 where t.i is null"
+runjoin s1 "RIGHT JOIN, parallel workers (not offloaded: the unmatched rows are reported once)" "select t.i, d.k, d.grp from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 JOINSET="$JOINSET_SAVE"
 
 echo "errors"

@@ -99,6 +99,10 @@ typedef struct join_inner
 	int			own_buf;			/* buf holds a copy (the import was not possible) */
 	int			nrels;					/* inner relations (1 ...) */
 	scan_join_rel rels[SCAN_JOIN_MAXDEPTH];
+	/* RIGHT/FULL joins: the backend's outer-join map of each relation (writable shared memory) */
+	void	   *ojmap;
+	size_t		ojmaplen;
+	uint8_t	   *oj[SCAN_JOIN_MAXDEPTH + 1];
 } join_inner;
 
 int		scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner *ji,

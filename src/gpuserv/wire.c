@@ -260,6 +260,27 @@ reply_success(wire_client *wc, int final_plan_task)
 		wc->closing = 1;
 }
 
+/*
+ * The reply to XpuTaskFinal of a GpuJoin: the tasks have merged what the RIGHT/FULL joins matched into
+ * the backend's outer-join map; the backend now emits the inner rows without a partner (it does
+ * nothing for a join without such a relation).
+ */
+static void
+reply_final_join(wire_client *wc)
+{
+	XpuCommand	resp;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Success;
+	resp.length = offsetof(XpuCommand, u.results.stats);
+	resp.u.results.scan_relidx = -1;
+	resp.u.results.final_plan_task = true;
+	resp.u.results.right_outer_join = true;
+	if (write_all(wc->fd, &resp, resp.length) != 0)
+		wc->closing = 1;
+}
+
 static void
 reply_task_stats(wire_client *wc, int32_t scan_relidx, uint32_t raw, uint32_t in, uint32_t vfs)
 {
@@ -402,6 +423,9 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 					wc->closing = 1;
 				free(resp);
 			}
+			else if (wc->session &&
+					 (wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+				reply_final_join(wc);
 			else
 				reply_success(wc, 1);
 			break;

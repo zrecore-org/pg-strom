@@ -516,10 +516,10 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 
 	/*
 	 * The Vulkan service returns an outer row without a match with NULL inner columns, but cannot
-	 * apply a WHERE-derived qual to the null-extended row (other_quals) yet. The same holds for an
-	 * anti join (IS_OUTER_JOIN covers it): such a qual would apply to the surviving outer row.
+	 * apply a WHERE-derived qual to the null-extended row (other_quals) yet. The same holds for the
+	 * other outer joins (IS_OUTER_JOIN, the only case that fills other_quals).
 	 */
-	if ((join_type == JOIN_LEFT || join_type == JOIN_ANTI) && other_quals != NIL)
+	if (other_quals != NIL)
 		return NULL;
 
 	/*
@@ -953,12 +953,19 @@ GpuJoinAddCustomPath(PlannerInfo *root,
 		 * joins; JOIN_UNIQUE_INNER/OUTER and the right variants are not GpuJoin's)
 		 */
 		if (join_type != JOIN_INNER && join_type != JOIN_LEFT &&
-			join_type != JOIN_SEMI && join_type != JOIN_ANTI)
+			join_type != JOIN_SEMI && join_type != JOIN_ANTI &&
+			join_type != JOIN_RIGHT && join_type != JOIN_FULL)
 			return;
 		for (int try_parallel=0; try_parallel < 2; try_parallel++)
 		{
 			Path   *inner_path = NULL;
 
+			/*
+			 * A RIGHT/FULL join reports the inner rows without a partner once, when every
+			 * outer row has been seen: not with parallel workers sharing the outer scan.
+			 */
+			if (try_parallel > 0 && (join_type == JOIN_RIGHT || join_type == JOIN_FULL))
+				break;
 			/* pickup the cheapest inner path */
 			foreach (lc, inner_pathlist)
 			{

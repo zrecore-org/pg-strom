@@ -11,20 +11,23 @@
 // Program header (words): [0] outer column table, [2] instructions, [3] outer columns, [5] end of the
 // scan quals, [6] end of the program, [7] scan qual register, [8] computed values, [9] their
 // registers, [14] number of inner relations, [15] depth table, [16] first projection instruction.
-// The depth table has 12 words per relation: [0] hash begin, [1] hash end = join qual begin,
+// The depth table has 14 words per relation: [0] hash begin, [1] hash end = join qual begin,
 // [2] join qual end, [3] hash register, [4] join qual register, [5] its column table, [6] its
 // columns, [7] byte offset of the end of its KDS in innerb, [8] word offset of its hash slots,
-// [9] number of hash slots, [10] LEFT OUTER, [11] 1: SEMI, 2: ANTI.
+// [9] number of hash slots, [10] LEFT OUTER, [11] 1: SEMI, 2: ANTI, [12] RIGHT/FULL: first word of
+// this relation's outer-join map (one word per inner row, in outb after the header; 0xffffffff:
+// none), [13] its number of rows.
 //
 // Output (outb): [0] number of matches (may exceed the capacity: the host retries), [1] first
-// error, [2],[3] page and line pointer; from word 4, per match { page, lp, byte offset of the inner
+// error, [2],[3] page and line pointer; from word 4 the outer-join map (header word [17] words, set
+// by a join qual match of a RIGHT/FULL join), then per match { page, lp, byte offset of the inner
 // item in innerb for each relation (0xffffffff: none, LEFT OUTER), (isnull, lo, hi) * computed
 // values }.
 #define WITH_INNER 1
 #include "scan_common.slang"
 
 #define JOIN_MAXD 4
-#define JDT_WORDS 12
+#define JDT_WORDS 14
 static const uint NO_ITEM = 0xffffffffu;
 
 // the first item of the chain a hash value selects in relation d (dt: its depth table row)
@@ -68,6 +71,7 @@ void join_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint proj_begin = prog[16];
     uint cap      = kparam.total_lps;               // capacity of the match records
     uint rec_words = 2 + nd + 3 * ncomp;
+    uint ojw      = prog[17];                       // the outer-join map precedes the records
 
     uint pte      = ptab[2 * page];
     uint outer_src = (pte & 0x80000000u) != 0 ? 1u : 0u;
@@ -149,6 +153,14 @@ void join_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     {
                         mflag |= (1u << d);
                         cur[d] = it;
+                        if (prog[dt + 12] != 0xffffffffu)
+                        {
+                            // RIGHT/FULL: this inner row has a partner (the row id ends the item)
+                            g_src = 2;
+                            uint rid = ld32(it + 8 + ld32(it + 8) - 4);
+                            if (rid < prog[dt + 13])
+                                InterlockedOr(outb[4 + prog[dt + 12] + rid], 1u);
+                        }
                         if (prog[dt + 11] != 0)
                         {
                             // semi and anti joins: the first match decides, stop walking the chain
@@ -218,7 +230,7 @@ void join_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     uint idx = pos + excl;
                     if (idx < cap)
                     {
-                        uint rb = 4 + idx * rec_words;
+                        uint rb = 4 + ojw + idx * rec_words;
                         outb[rb + 0] = page;
                         outb[rb + 1] = lp;
                         for (uint k = 0; k < nd; k++)

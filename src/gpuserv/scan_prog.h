@@ -41,6 +41,10 @@ typedef struct scan_prog
 	int				join_mode;
 	int				ndepth;				/* inner relations */
 	int				max_inner_resno[SCAN_JOIN_MAXDEPTH + 1];	/* highest column of inner relation d copied as is */
+	/* the outer-join map of RIGHT/FULL joins: one word per inner row at the head of the output buffer */
+	uint32_t		oj_words;			/* total words (0: no right/full join) */
+	uint32_t		oj_off[SCAN_JOIN_MAXDEPTH + 1];		/* first word of relation d, or 0xffffffff */
+	uint32_t		oj_nitems[SCAN_JOIN_MAXDEPTH + 1];	/* its rows */
 	/* aggregation (GpuPreAgg without GROUP BY) */
 	int				agg_mode;
 	int				nagg;			/* number of aggregates (not counting key columns) */
@@ -71,6 +75,7 @@ typedef struct scan_join_rel
 	int			left_outer;			/* unmatched outer rows are kept (NULL inner columns) */
 	int			semi;				/* semi join: the first match keeps the outer row, no inner columns */
 	int			anti;				/* anti join: only an outer row without a match is kept */
+	int			right_outer;		/* RIGHT or FULL: the kernel flags the inner rows that matched */
 } scan_join_rel;
 
 int		scan_prog_build_join(const struct kern_session_info *session,

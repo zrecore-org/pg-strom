@@ -944,9 +944,9 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
  * value and its join quals, then the projection. Header: [0] outer column table, [2] instructions,
  * [3] outer columns, [5] end of the scan quals, [6] end of the program, [7] scan qual register,
  * [8] computed values, [9] their registers, [14] number of inner relations, [15] depth table,
- * [16] first projection instruction.
+ * [16] first projection instruction, [17] words of the outer-join map (RIGHT/FULL joins).
  */
-#define JDT_WORDS			12
+#define JDT_WORDS			14
 
 int
 scan_prog_build_join(const kern_session_info *session, const kern_data_store *kds_src,
@@ -1229,6 +1229,17 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			dt[9] = rels[depth - 1].nslots;
 			dt[10] = rels[depth - 1].left_outer ? 1 : 0;
 			dt[11] = rels[depth - 1].semi ? 1 : rels[depth - 1].anti ? 2 : 0;
+			dt[12] = 0xffffffffU;
+			dt[13] = 0;
+			prog->oj_off[depth] = 0xffffffffU;
+			if (rels[depth - 1].right_outer)
+			{
+				dt[12] = prog->oj_words;
+				dt[13] = rels[depth - 1].kds->nitems;
+				prog->oj_off[depth] = prog->oj_words;
+				prog->oj_nitems[depth] = rels[depth - 1].kds->nitems;
+				prog->oj_words += rels[depth - 1].kds->nitems;
+			}
 			ibase += incols[depth];
 		}
 		for (int side = 0; side <= nrels; side++)
@@ -1259,6 +1270,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 				w[base + c] = alen | ((uint32_t) cm->attalign << 8) | (vt << 12) | (slot << 16);
 			}
 		}
+		w[17] = prog->oj_words;
 		memcpy(w + insnoff, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 		memcpy(w + insnoff + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 	}
