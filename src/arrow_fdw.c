@@ -3240,6 +3240,85 @@ baseRelIsArrowFdw(RelOptInfo *baserel)
 }
 
 /*
+ * arrowFdwGpuScanSupported
+ *
+ * The Vulkan service reads Arrow record batches itself (arrow_exec.c) and forms the result tuples
+ * from the columnar buffers. It supports the Arrow types of the columns that are referenced by the
+ * query, if they are: Int (1-8 bytes), FloatingPoint, Bool, Utf8/LargeUtf8, Binary/LargeBinary,
+ * Date[day], Time, Timestamp, FixedSizeBinary mapped to bpchar, and virtual columns. Parquet files,
+ * numeric (Decimal), interval, list, struct and the rest stay on the CPU path.
+ */
+static bool
+__arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
+{
+	const ArrowTypeOptions *attopts = &field->attopts;
+
+	switch (attopts->tag)
+	{
+		case ArrowType__Int:
+			return (attopts->unitsz == 1 || attopts->unitsz == 2 ||
+					attopts->unitsz == 4 || attopts->unitsz == 8);
+		case ArrowType__FloatingPoint:
+			return (attopts->unitsz == 2 || attopts->unitsz == 4 || attopts->unitsz == 8);
+		case ArrowType__Bool:
+		case ArrowType__Utf8:
+		case ArrowType__LargeUtf8:
+		case ArrowType__Binary:
+		case ArrowType__LargeBinary:
+		case ArrowType__Time:
+		case ArrowType__Timestamp:
+			return true;
+		case ArrowType__Date:
+			return (attopts->date.unit == ArrowDateUnit__Day);
+		case ArrowType__FixedSizeBinary:
+			return (field->atttypid == BPCHAROID);
+		default:
+			return false;
+	}
+}
+
+bool
+arrowFdwGpuScanSupported(RelOptInfo *baserel)
+{
+	List	   *af_states;
+	Bitmapset  *referenced;
+	bool		whole_row;
+	ListCell   *lc;
+
+	if (!baseRelIsArrowFdw(baserel) ||
+		list_length(baserel->fdw_private) != 2)
+		return false;
+	af_states = linitial(baserel->fdw_private);
+	referenced = lsecond(baserel->fdw_private);
+	whole_row = bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced);
+	foreach (lc, af_states)
+	{
+		ArrowFileState *af_state = lfirst(lc);
+		RecordBatchState *rb_state;
+
+		if (ArrowMetadataVersionIsParquet(af_state->version))
+			return false;
+		if (af_state->rb_list == NIL)
+			continue;
+		rb_state = linitial(af_state->rb_list);
+		for (int j=0; j < af_state->ncols; j++)
+		{
+			int		k = j + 1 - FirstLowInvalidHeapAttributeNumber;
+			int		field_index = af_state->attrs[j].field_index;
+
+			if (!whole_row && !bms_is_member(k, referenced))
+				continue;
+			if (field_index < 0)
+				continue;		/* virtual column */
+			if (field_index >= rb_state->nfields ||
+				!__arrowFieldGpuScanSupported(&rb_state->fields[field_index]))
+				return false;
+		}
+	}
+	return true;
+}
+
+/*
  * RelationIsArrowFdw
  */
 bool

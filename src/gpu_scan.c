@@ -19,6 +19,32 @@ static CustomExecMethods	gpuscan_exec_methods;
 static bool					enable_gpuscan = false;		/* GUC */
 
 /*
+ * pgstromPathScansArrowFdw - does the (GpuScan) path read an Arrow_Fdw table?
+ *
+ * The Vulkan service runs plain scans on Arrow record batches; a join or an aggregation that
+ * would be pushed into the same task (GpuJoin, GpuPreAgg) still needs heap pages.
+ */
+bool
+pgstromPathScansArrowFdw(PlannerInfo *root, const CustomPath *cpath)
+{
+	pgstromPlanInfo *pp_info = linitial(cpath->custom_private);
+	ListCell   *lc;
+
+	foreach (lc, pp_info->scan_rels_list)
+	{
+		pgstromPlanScanInfo *pp_scan = lfirst(lc);
+		RelOptInfo *rel;
+
+		if (pp_scan->scan_relid >= (Index)root->simple_rel_array_size)
+			continue;
+		rel = root->simple_rel_array[pp_scan->scan_relid];
+		if (rel && baseRelIsArrowFdw(rel))
+			return true;
+	}
+	return false;
+}
+
+/*
  * pgstrom_is_gpuscan_path
  */
 bool
@@ -566,7 +592,7 @@ extract_partitioned_scan_rels(PlannerInfo *root,
 					return false;
 				case RELKIND_FOREIGN_TABLE:
 					if (!rte->inh &&
-						baseRelIsArrowFdw(leaf_rel) &&
+						arrowFdwGpuScanSupported(leaf_rel) &&
 						check_compatible_relations(root, baserel, leaf_rel))
 					{
 						*p_results = lappend(*p_results, leaf_rel);
@@ -614,7 +640,7 @@ GpuScanAddScanPath(PlannerInfo *root,
 				break;
 			case RELKIND_FOREIGN_TABLE:
 				if (!rte->inh &&
-					baseRelIsArrowFdw(baserel))
+					arrowFdwGpuScanSupported(baserel))
 					scan_rels = list_make1(baserel);
 				break;
 			case RELKIND_PARTITIONED_TABLE:

@@ -38,9 +38,19 @@ typedef struct scan_engine
 	int				join_pipe_ready[3];
 	gpu_vk_pipeline	gagg_pipe[2][3];		/* GROUP BY: [registers 16/32][aggregates 4/8/12] */
 	int				gagg_pipe_ready[2][3];
+	gpu_vk_pipeline	arrow_pipe[3];			/* the Arrow scan kernel: registers 8/16/32 */
+	int				arrow_pipe_ready[3];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 } scan_engine;
+
+scan_map_entry *scan_map_window(scan_engine *eng, const char *pathname, int64_t lo, int64_t hi);
+void	describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen);
+
+/* Arrow_Fdw scans (arrow_exec.c) */
+XpuCommand *scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+								 const XpuCommand *task, size_t *p_len, char *err, size_t errlen);
+void	arrow_engine_fini(scan_engine *eng);
 
 void	scan_engine_init(scan_engine *eng, gpu_vk_ctx *vk);
 void	scan_engine_fini(scan_engine *eng);
