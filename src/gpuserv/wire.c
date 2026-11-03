@@ -457,6 +457,7 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 					reply_error(wc, "XpuTaskFinal", "%s", msg);
 					break;
 				}
+				wlog(ws, 0, "final: reply of %zu bytes", len);
 				if (write_all(wc->fd, resp, len) != 0)
 					wc->closing = 1;
 				free(resp);
