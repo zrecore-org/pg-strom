@@ -18,6 +18,9 @@
 // of line pointers before the page): 2 if the row needs a string the kernel cannot read (compressed or
 // stored out of line), which the service hands to the backend; 0 otherwise.
 #include "scan_common.slang"
+#ifdef ARROW_SRC
+#include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
+#endif
 
 #ifndef AGG_MAX
 #define AGG_MAX 12
@@ -67,11 +70,16 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
     for (uint page = first_page; page < last_page; page++)
     {
+#ifdef ARROW_SRC
+        uint nlp      = arrow_page_rows(page, ncols);
+        uint row0     = arrow_page_row0(page, ncols);
+#else
         uint pte      = ptab[2 * page];
         g_src         = (pte & 0x80000000u) != 0 ? 1u : 0u;
         uint pbase    = pte & 0x7fffffffu;
         uint pd_lower = ld16(pbase + 12);
         uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);
+#endif
 
         for (uint base = 0; base < nlp; base += SCAN_WG)
         {
@@ -81,9 +89,13 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
             if (lp < nlp)
             {
+#ifdef ARROW_SRC
+                hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#else
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
                 if (g_recheck != 0)     // flag the row for the backend (kparam.total_lps: base of the flags)
                     outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
+#endif
             }
             if (!hit)
                 continue;

@@ -3237,3 +3237,81 @@ done:
 		snprintf(err, errlen, "aggregation over a join failed");
 	return rv;
 }
+
+/* ----------------------------------------------------------------
+ * Exports for the aggregation and join tasks over Arrow record batches (arrow_exec.c), which share
+ * the merge of the kernels' results with the heap tasks above
+ * ----------------------------------------------------------------
+ */
+void
+scan_agg_state_prepare(agg_state *st, int nagg)
+{
+	if (st->nagg == 0)
+	{
+		st->nagg = nagg;
+		memset(st->n, 0, sizeof(st->n));
+		memset(st->sum, 0, sizeof(st->sum));
+		memset(st->val, 0, sizeof(st->val));
+	}
+}
+
+void
+scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total)
+{
+	agg_merge_workgroups(prog, st, out, ngroups_total);
+}
+
+void
+scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *ov_rec)
+{
+	*cap = ga_variant_cap[avariant];
+	*rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * ga_variant_na[avariant];
+	*ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * ga_variant_na[avariant];
+}
+
+int
+scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
+						uint32_t cap, uint32_t rec_words, uint32_t blk_words)
+{
+	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words);
+}
+
+/* the rows that found no slot in their workgroup's table: { null mask, keys, (ok, value) * aggregates } each */
+int
+scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
+						  uint32_t ov_rec)
+{
+	const uint32_t *w = prog->words;
+	uint32_t	aggoff = w[11];
+	uint32_t	nagg = prog->nagg;
+
+	for (uint32_t r = 0; r < count; r++)
+	{
+		const uint32_t *rec = recs + (size_t) r * ov_rec;
+		int64_t		key[SCAN_GROUP_KEYS];
+		group_entry *g;
+
+		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+			key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
+		g = group_lookup(&st->groups, key, rec[0]);
+		if (!g)
+			return -1;
+		for (uint32_t a = 0; a < nagg; a++)
+		{
+			const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS + 3 * a;
+
+			if (!av[0])
+				continue;
+			acc_add_value(&g->acc[a], w[aggoff + 4 * a],
+						  (int64_t)((uint64_t) av[1] | ((uint64_t) av[2] << 32)));
+		}
+	}
+	return 0;
+}
+
+/* merge the outer-join map a join kernel filled (RIGHT/FULL joins) into the backend's */
+void
+scan_join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out)
+{
+	join_merge_ojmap(prog, ji, out);
+}
