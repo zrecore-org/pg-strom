@@ -956,6 +956,8 @@ extern XpuCommand *pgstromScanChunkGpuCache(pgstromTaskState *pts,
 											pgstromTaskScanState *ptss,
                                             struct iovec *xcmd_iov,
                                             int *xcmd_iovcnt);
+extern bool		pgstromGpuCacheProgramOk(pgstromTaskState *pts,
+										 const XpuCommand *session);
 extern void		pgstromGpuCacheExecReset(pgstromTaskScanState *ptss);
 extern void		pgstromGpuCacheInitDSM(pgstromTaskScanState *ptss,
 									   pgstromSharedScanState *psss);

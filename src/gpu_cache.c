@@ -35,6 +35,7 @@
 #include "storage/spin.h"
 #include "gpuserv/gpuserv_proto.h"
 #include "gpuserv/gcache_proto.h"
+#include "gpuserv/scan_prog.h"
 #include <poll.h>
 
 /* ----------------------------------------------------------------
@@ -1864,11 +1865,70 @@ pgstromGpuCacheExecInit(pgstromTaskScanState *ptss)
 			if (gpuCacheEnsureReady(gc_desc, ptss->scan_rel, false))
 			{
 				ptss->gpucache_desc = gc_desc;
-				ptss->optimal_gpus = 1UL;
 			}
 		}
 	}
 	return (ptss->gpucache_desc != NULL);
+}
+
+/* the header of the KDS the cache task carries: the columns of the table */
+static const kern_data_store *
+__gpuCacheKdsHead(pgstromTaskState *pts, pgstromTaskScanState *ptss)
+{
+	if (!ptss->kds_head)
+	{
+		EState	   *estate = pts->css.ss.ps.state;
+		TupleDesc	tupdesc = RelationGetDescr(ptss->scan_rel);
+		size_t		head_sz = estimate_kern_data_store(tupdesc);
+		kern_data_store *head = MemoryContextAllocZero(estate->es_query_cxt, head_sz);
+
+		setup_kern_data_store(head, tupdesc, 0, KDS_FORMAT_COLUMN);
+		head->table_oid = RelationGetRelid(ptss->scan_rel);
+		ptss->kds_head = head;
+	}
+	return ptss->kds_head;
+}
+
+/*
+ * Can the cache serve this session? A column whose value the program reads must be one the GPU can load
+ * from the cache; a numeric (and any other type the cache only passes through) cannot. A join program
+ * never reads such values (the planner does not offer them), so only scans and aggregations are checked.
+ */
+bool
+pgstromGpuCacheProgramOk(pgstromTaskState *pts, const XpuCommand *session_cmd)
+{
+	const kern_session_info *session = &session_cmd->u.session;
+	scan_prog	prog;
+	char		err[256];
+	bool		retval = true;
+
+	if ((session->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN || session->join_inner_handle != 0)
+		return true;
+	for (int k=0; k < pts->num_scan_rels; k++)
+	{
+		pgstromTaskScanState *ptss = &pts->scan_rels[k];
+
+		if (!ptss->gpucache_desc)
+			continue;
+		memset(&prog, 0, sizeof(prog));
+		if (scan_prog_build(session, __gpuCacheKdsHead(pts, ptss), &prog, err, sizeof(err)) == 0)
+		{
+			uint32_t	coloff = prog.words[0];
+			uint32_t	ncols = prog.words[3];
+
+			for (uint32_t c = 0; c < ncols; c++)
+			{
+				uint32_t	desc = prog.words[coloff + c];
+
+				if (((desc >> 16) & 0xff) != 0xff && ((desc >> 12) & 0xf) == SOP_VT_NUM)
+					retval = false;
+			}
+			scan_prog_free(&prog);
+		}
+		/* a program the service cannot build fails the same way for a table: let it report */
+		break;			/* every scan relation runs the same program */
+	}
+	return retval;
 }
 
 XpuCommand *
@@ -1889,17 +1949,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 		kern_data_store *kds;
 		size_t		sz;
 
-		if (!ptss->kds_head)
-		{
-			EState	   *estate = pts->css.ss.ps.state;
-			TupleDesc	tupdesc = RelationGetDescr(ptss->scan_rel);
-			size_t		head_sz = estimate_kern_data_store(tupdesc);
-			kern_data_store *head = MemoryContextAllocZero(estate->es_query_cxt, head_sz);
-
-			setup_kern_data_store(head, tupdesc, 0, KDS_FORMAT_COLUMN);
-			head->table_oid = RelationGetRelid(ptss->scan_rel);
-			ptss->kds_head = head;
-		}
+		__gpuCacheKdsHead(pts, ptss);
 		sz = offsetof(XpuCommand, u.gc_task.data) + MAXALIGN(offsetof(kern_data_store, colmeta[ptss->kds_head->nr_colmeta]));
 		resetStringInfo(&pts->xcmd_buf);
 		enlargeStringInfo(&pts->xcmd_buf, sz);

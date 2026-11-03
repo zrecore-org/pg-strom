@@ -205,12 +205,19 @@ devcaps.o kernels_spv.o: kernels_spv.h
 gpuserv_main.o: gpuserv_main.c gpuserv_probe.h gpuserv_proto.h vm_selftest.h gpu_vk.h wire.h scan_exec.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
+# self-check of the GPU-Cache store without a GPU (not part of "all")
+gcache_check.o: gcache_check.c gcache.h gcache_proto.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+gcache_check: gcache_check.o gcache.o scan_caps.o
+	$(CC) $(CFLAGS) -o $@ gcache_check.o gcache.o scan_caps.o
+
 check: gpuserv-probe proto_check
 	./gpuserv-probe > build/probe.out
 	./proto_check build/probe.out
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check kernels_spv.c kernels_spv.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check kernels_spv.c kernels_spv.h
 
 .PHONY: all check clean
