@@ -23,7 +23,7 @@ spec_restart() { # restart the service with the environment the caller exported;
 spec_log_count() { # extended regex -> number of matching lines in the service log
 	c=$(grep -cE "$1" "$ROOT/log" 2>/dev/null); echo "${c:-0}"
 }
-spec_wait_idle() { sleep 1; }
+spec_have() { [ -n "$(sql "select to_regclass('$1')")" ]; }
 
 # the shapes: scan qualifiers and computed projections, aggregates, GROUP BY (with overflow), joins, join aggregates,
 # numeric, text and date/time columns; every kernel kind (scan, agg, group, join, join agg, join group) is in it
@@ -56,14 +56,17 @@ spec_join_shapes() {
 	runjagg $t "join agg: both sides, NULLs, duplicate keys" "select count(*), sum(t.a), max(d.grp), count(d.pay), sum(d.pay), min(d.pay), avg(t.b) from %T t join %D d on t.b = d.k"
 	runjagg $t "join agg: FILTER, expressions mixing sides" "select count(*) filter (where d.grp < 8), sum(t.a + d.grp), max(t.b * 2 - d.k) from %T t join %D d on t.b = d.k where t.a > 0"
 	runjagg $t "join group: key from the inner side" "select d.grp, count(*), sum(t.a), max(t.c) from %T t join %D d on t.b = d.k group by 1 order by 1"
-	runjagg $t "join group: two keys, sum beyond 64 bits" "select d.grp, t.a % 3 as k2, sum(t.c + 9000000000000000000), count(d.pay) from %T t join %D d on t.b = d.k group by 1, 2 order by 1, 2"
-	runjagg $t "join group: more groups than a table (overflow list)" "select t.b as k, count(*), sum(d.grp) from %T t join %D d on t.b = d.k group by 1 order by 1" "$BIGGROUPS"
+	runjagg $t "join group: sum beyond 64 bits per group, count of a nullable column" "select d.grp, sum(t.c + 9000000000000000000), count(d.pay), min(d.k) from %T t join %D d on t.b = d.k group by 1 order by 1"
 	JAGGPAT='Left Outer Join Quals \[1\]'
 	runjagg $t "join agg: LEFT JOIN, null-extended group" "select d.grp, count(*), count(d.grp), sum(t.a) from %T t left join %D d on t.b = d.k + 20000 group by 1 order by 1"
+	spec_have jt || { sql "create table jt as select i, a, b, c, (i % 7)::int4 as g7, (i % 97)::int4 as g97, (i % 1500)::int4 as g1500 from s1"; sql "vacuum analyze jt"; }
+	JAGGPAT='GPU Join Quals \[1\]'
+	runjagg jt "join group: two keys, one from each side" "select t.g7, d.grp, count(*), sum(t.c), min(d.k) from %T t join %D d on t.b = d.k group by 1, 2 order by 1, 2"
+	runjagg jt "join group: more groups than a workgroup's table (overflow list)" "select t.g1500, count(*), sum(d.grp), min(t.b), max(d.pay) from %T t join %D d on t.b = d.k group by 1 order by 1"
+	runjagg $t "join group: min and max beyond 32 bits (overflow list)" "select d.grp as k, min(t.c + 5000000000), max(t.c + 5000000000), count(*), sum(t.c + 5000000000) from %T t join %D d on t.b = d.k group by 1 order by 1"
 	JAGGPAT='Join Quals \[2\]'
 	runjagg $t "join agg: two inner relations" "select count(*), sum(t.a + d.grp + e.g2), max(e.p2), min(d.pay) from %T t join %D d on t.b = d.k join sd2 e on t.a % 400 = e.k2"
 }
-spec_have() { [ -n "$(sql "select to_regclass('$1')")" ]; }
 spec_misc_shapes() {
 	spec_have nm1 || return 0
 	run nm1 "numeric: compare and arithmetic" "select i, n1 * n2 from nm1 where n1 > 3 and n1 < 20.5000 and n2 <> 1.5"

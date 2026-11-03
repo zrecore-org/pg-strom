@@ -13,8 +13,12 @@ result; at worst it is not faster. Every GPU result is compared with the CPU's i
 
 How the GPU work is done: a **scan VM** (one opcode-switch interpreter written in Slang) evaluates
 the planner's expression trees; there are kernels for scanning, aggregation, GROUP BY, join and Arrow
-columns (`src/gpuserv/kernels_vm/`). Specialized kernels generated per query (plan item A6) are not
-done, which is why a trivial qual costs more than it would in generated code.
+columns (`src/gpuserv/kernels_vm/`). For a query that runs more than one task the service also
+**generates a kernel from the program** (registers as constants, the instructions as straight-line code that
+calls the interpreter's own helpers, so the results are identical), compiles it with `slangc` in a
+background thread while the interpreter serves the first tasks, keeps it in a disk cache and switches to
+it when it is ready (plan item A6; `pg_strom.gpu_specialize`, `PGSTROM_GPUSERV_SPECIALIZE`). Without
+`slangc` and without a cached kernel everything runs on the interpreter, as before.
 
 ## Summary
 
@@ -122,7 +126,8 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 |---|---|
 | GPU-Sort of scan / join results, window functions other than the rank filter | Not implemented (plan A7 status); GPU-Sort of GpuPreAgg groups works, see the table above |
 | GPU-Cache | A stub (plan A7); the SQL functions exist so that older upgrade scripts load |
-| Specialized kernels, fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
+| Fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
+| Specialized kernels for opcodes the generator does not list (new ones until reviewed), for jsonb | They run on the interpreter (plan A6 "kernel specialization") |
 | jsonb | Not started (plan A8) |
 | GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
 | fp64, 64-bit-atomic kernels for devices that have them | Not implemented (plan A3b); `float8` stays on the CPU on every device |
