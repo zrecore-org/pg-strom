@@ -15,6 +15,8 @@
 #
 #   SPECS="off force off"   service variants to run one after the other (the cluster is restarted for each); the
 #                           value is PGSTROM_GPUSERV_SPECIALIZE ("default": leave it unset). Default: "default".
+#                           "force:PGSTROM_GPUSERV_SPEC_GA_C=16,PGSTROM_GPUSERV_GROUP_PPW=8" sets more variables for that variant.
+#   LABEL_RE='group'        run only the queries whose label matches the extended regular expression
 #   ONLY='<sql>'            benchmark just that query
 #   NOCPU=1                 skip the PostgreSQL measurement
 #   ROWS=<n>                table size (default 16800000; changes need FRESH=1)
@@ -48,9 +50,17 @@ echo "pg_strom.gpuserv_path = '$GPUSERV_BIN'" >> "$ROOT/data/postgresql.conf"
 trap stop EXIT INT TERM
 export PGSTROM_GPUSERV_TRACE=1
 
-start_cluster() { # specialize-mode
+start_cluster() { # specialize-mode[:NAME=value,NAME=value ...]
 	stop
-	if [ "$1" = default ]; then unset PGSTROM_GPUSERV_SPECIALIZE; else export PGSTROM_GPUSERV_SPECIALIZE=$1; fi
+	mode=${1%%:*}
+	for v in $EXPERIMENT_VARS; do unset $v; done
+	EXPERIMENT_VARS=""
+	if [ "$mode" = default ]; then unset PGSTROM_GPUSERV_SPECIALIZE; else export PGSTROM_GPUSERV_SPECIALIZE=$mode; fi
+	case "$1" in *:*)
+		for kv in $(echo "${1#*:}" | tr ',' ' '); do
+			export "$kv"; EXPERIMENT_VARS="$EXPERIMENT_VARS ${kv%%=*}"
+		done;;
+	esac
 	: > "$ROOT/log"
 	$PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; cat "$ROOT/log"; exit 1; }
 	n=0; while [ $n -lt 40 ]; do
@@ -68,6 +78,7 @@ GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_pa
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 bench() { # label query
 	label=$1; qry=$2
+	[ -n "$LABEL_RE" ] && ! echo "$label" | grep -Eq "$LABEL_RE" && return
 	plan=$($PSQL -d bench -c "$GPUSET explain $qry" | head -3 | tr '\n' '|' | cut -c1-110)
 	before=$(wc -l < "$ROOT/log")
 	gt=""

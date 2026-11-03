@@ -25,6 +25,23 @@
 #define SCAN_WG_MAX		65535U
 #define AGG_PAGES_PER_WG	32U		/* pages one aggregation workgroup runs over */
 
+/* PGSTROM_GPUSERV_GROUP_PPW overrides the pages per workgroup of the GROUP BY kernels (tuning experiments) */
+static uint32_t
+group_ppw(uint32_t dflt)
+{
+	static int	init = 0;
+	static uint32_t v = 0;
+
+	if (!init)
+	{
+		const char *s = getenv("PGSTROM_GPUSERV_GROUP_PPW");
+
+		v = (s && atoi(s) > 0) ? (uint32_t) atoi(s) : 0;
+		init = 1;
+	}
+	return v ? v : dflt;
+}
+
 typedef strom_io_chunk	io_chunk;
 typedef strom_io_vector	io_vector;
 
@@ -2042,7 +2059,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		((uint32_t *) btab.map)[2 * i + 1] = lp_base[i];
 	}
 	st->nitems_raw += total_lps;
-	ngroups_total = (npages + AGG_PAGES_PER_WG - 1) / AGG_PAGES_PER_WG;
+	ngroups_total = (npages + group_ppw(AGG_PAGES_PER_WG) - 1) / group_ppw(AGG_PAGES_PER_WG);
 	out_words = 4 + (size_t) ngroups_total * blk_words + total_lps;
 	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 	{
@@ -2072,7 +2089,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 				groups = SCAN_WG_MAX;
 			pc[0] = npages;
 			pc[1] = base;
-			pc[2] = AGG_PAGES_PER_WG;
+			pc[2] = group_ppw(AGG_PAGES_PER_WG);
 			pc[3] = flags_base;
 			if (kdispatch(eng, prog, SPEC_GAGG, sh.agg_max, sh.ga_c, &eng->gagg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
 			{
@@ -3198,7 +3215,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			total_lps += (pd_lower - 24) / 4;
 	}
 	st->nitems_raw += total_lps;
-	ppw = (grouped ? JGAGG_PAGES_PER_WG : JAGG_PAGES_PER_WG);
+	ppw = (grouped ? group_ppw(JGAGG_PAGES_PER_WG) : JAGG_PAGES_PER_WG);
 	ngroups_total = (npages + ppw - 1) / ppw;
 	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
 	{
