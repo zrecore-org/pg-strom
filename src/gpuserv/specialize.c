@@ -579,6 +579,33 @@ gen_join(gen_ctx *g, sbuf *o)
 	sb_printf(o, "}\n\n");
 }
 
+/*
+ * The register file the generated code needs: the planner's count, or more if an instruction names a higher
+ * register (dst always, ra and rb unless the operand is an immediate or a jump target). The vm_step() calls
+ * index the array with these constants, so it must be large enough.
+ */
+static uint32_t
+instruction_registers(const uint32_t *w, size_t nw, uint32_t nregs)
+{
+	uint32_t	insnoff = w[2], nins = w[6], m = nregs;
+
+	if ((size_t) insnoff + (size_t) 6 * nins > nw)
+		return nregs;
+	for (uint32_t i = 0; i < nins; i++)
+	{
+		const uint32_t *in = w + insnoff + 6 * i;
+		uint32_t	op = in[0];
+
+		if (in[1] + 1 > m)
+			m = in[1] + 1;
+		if (op != SOP_CONST && op != SOP_NUMCONST && in[2] + 1 > m)
+			m = in[2] + 1;
+		if (op != SOP_NUMCONST && op != SOP_AND && op != SOP_OR && in[3] + 1 > m)
+			m = in[3] + 1;
+	}
+	return m;
+}
+
 int
 spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, char **p_body,
 			  char *err, size_t errlen)
@@ -601,6 +628,12 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 	if (!w || prog->nwords < 24 || w[3] > prog->nwords)
 	{
 		gen_fail(&g, "no program");
+		return -1;
+	}
+	g.nregs = instruction_registers(w, prog->nwords, g.nregs);
+	if (g.nregs > SCAN_MAX_REGS)
+	{
+		gen_fail(&g, "the program names %u registers", g.nregs);
 		return -1;
 	}
 	nq = w[5];
