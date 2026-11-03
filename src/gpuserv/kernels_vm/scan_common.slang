@@ -248,6 +248,9 @@ bool num_up(inout int64_t v, uint d)
     return true;
 }
 
+// 16 bits at any byte offset (the payload of a 1-byte-header varlena is at an odd offset; ld16 needs 2-byte alignment)
+uint ld16u(uint o) { return ld8(o) | (ld8(o + 1) << 8); }
+
 // Decode the numeric varlena payload (plen bytes at byte offset o of the current source): false if it is
 // NaN / Infinity or does not fit in { int64, scale }. Layout: see numeric.c (short and long header).
 bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
@@ -256,7 +259,7 @@ bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
     sc = 0;
     if (plen < 2)
         return false;
-    uint hdr = ld16(o);
+    uint hdr = ld16u(o);
     bool neg;
     int  weight;
     uint dscale, doff, ndig;
@@ -276,7 +279,7 @@ bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
             return false;
         neg = (hdr & 0x4000u) != 0;
         dscale = hdr & 0x3fffu;
-        weight = int(ld16(o + 2) ^ 0x8000u) - 32768;
+        weight = int(ld16u(o + 2) ^ 0x8000u) - 32768;
         doff = o + 4;
         ndig = (plen - 4) / 2;
     }
@@ -285,7 +288,7 @@ bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
     int64_t acc = 0;
     for (uint i = 0; i < ndig; i++)
     {
-        int64_t d = int64_t(ld16(doff + 2u * i));
+        int64_t d = int64_t(ld16u(doff + 2u * i));
         if (acc > (NUM_MAX - d) / 10000)
             return false;
         acc = acc * 10000 + d;
