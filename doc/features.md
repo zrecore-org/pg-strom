@@ -22,7 +22,7 @@ done, which is why a trivial qual costs more than it would in generated code.
 |---|---|---|
 | Sources | Heap tables (page by page); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, and as the inner side of a GpuJoin) | GPU-Cache (a stub); GpuJoin / GpuPreAgg with an Arrow outer source. BRIN-index assisted scans: not tested on this branch |
 | Scan (`GpuScan`) | Quals and computed projections over the types below; pass-through columns of any type; UPDATE and DELETE scans; query parameters | See "types" |
-| Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float, numeric and text aggregates; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
+| Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float and text aggregates, `min`/`max` of numeric, `sum`/`avg` of numerics whose scale is not fixed by the plan; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
 | Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
 | Other | | GPU-Sort and window functions, GPU-Cache, jsonb, PostGIS (dropped), SELECT INTO direct (dropped) |
 
@@ -36,7 +36,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 | `bool`, `int1`/`int2`/`int4`/`int8` | Comparison, arithmetic with PostgreSQL's overflow, divide-by-zero and modulo rules, casts between integer widths, three-valued AND/OR/NOT, `IS [NOT] NULL` | |
 | `float4` | Comparison and arithmetic with PostgreSQL's NaN rules (no modulo), casts to and from the integers (round half to even), `IS [NOT] NULL` | |
 | `float8` (double precision) | pass-through only | every operator and aggregate; the base tier has no fp64 and the code never emulates it |
-| `numeric` | pass-through only | everything (no device numeric yet) |
+| `numeric` | Values that fit `{ unscaled int64, scale <= 255 }` (about 18 digits; the rest, NaN and Infinity are re-checked per row on the CPU): comparison, `+ - *`, `/` (PostgreSQL's `select_div_scale` result scale and rounding), `%`/`mod`, `div`, unary `-`/`+`, `abs`, `round`/`trunc` (also with a negative scale), `ceil`/`floor`/`sign`, `numeric(p,s)` coercion (a field overflow is raised by the CPU), casts to and from the integers, `sum`/`avg` of numerics of a statically known scale (`numeric(p,s)` columns and expressions of them), GROUP BY keys of a known scale | `min`/`max`, `sum`/`avg` of unconstrained numeric or of a quotient (scale depends on the row), float casts, numeric inside a GpuJoin program, numeric join keys |
 | `date`, `time`, `timestamp`, `timestamptz` | Comparison within a type, `date` against `timestamp`, `date + int4`, `date - int4`, `date - date`, `date <-> timestamp` casts, `min`/`max`, GROUP BY and join keys | `timestamptz` compared with `date`/`timestamp` (session time zone), `interval` anything, `timetz`, `extract`, `date_trunc`, `timestamptz::date`, `overlaps` |
 | `text`, `varchar`, `bpchar` | `=` and `<>` (bytewise; deterministic collations only), `<`, `<=`, `>`, `>=` in the C collation only, `LIKE`/`NOT LIKE` with a constant pattern of the shape `abc`, `abc%`, `%abc`, `%abc%` (UTF-8 or single-byte databases), `length()` in UTF-8, `IS NULL`, `count(col)` | `_` and inner `%` in `LIKE`, `ILIKE`, regular expressions, `upper`, `substr`, concatenation, `IN` lists, text GROUP BY keys and join keys, **any string expression inside a GpuJoin program (including the scan quals of the join's outer relation)** |
 | Compressed or TOAST-ed text | Evaluated by the backend: the kernel flags the row and the backend re-runs the whole row on the CPU | (`client_min_messages = debug1` shows "CPU re-evaluation of N tuples") |
@@ -117,7 +117,7 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 |---|---|
 | GPU-Sort, window functions on the GPU | Not implemented (plan A7); `pg_strom.enable_gpusort` defaults to `off` and does nothing |
 | GPU-Cache | A stub (plan A7); the SQL functions exist so that older upgrade scripts load |
-| `numeric` on the GPU, specialized kernels, fuzzer | Not done (plan A6 "known gaps") |
+| Specialized kernels, fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
 | jsonb | Not started (plan A8) |
 | GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
 | fp64, 64-bit-atomic kernels for devices that have them | Not implemented (plan A3b); `float8` stays on the CPU on every device |

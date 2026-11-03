@@ -795,6 +795,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					kin->u.v.var_slot_id < b.nslots && b.slot_resno[kin->u.v.var_slot_id] > 0)
 				{
 					b.slot_used[kin->u.v.var_slot_id] = 1;
+					b.slot_valread[kin->u.v.var_slot_id] = 1;
+					b.slot_strval[kin->u.v.var_slot_id] = 1;		/* a numeric key is read, not only its NULL-ness */
 					r = (int) kin->u.v.var_slot_id;
 				}
 				else
@@ -847,6 +849,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					goto error;
 				}
 				b.slot_used[kin->u.v.var_slot_id] = 1;
+				b.slot_valread[kin->u.v.var_slot_id] = 1;
+				b.slot_strval[kin->u.v.var_slot_id] = 1;
 				slot_reg[slot] = (int) kin->u.v.var_slot_id;
 			}
 			else
@@ -965,6 +969,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 						goto error;
 					}
 					b.slot_used[sl] = 1;
+					b.slot_valread[sl] = 1;
+					b.slot_strval[sl] = 1;
 					regs_of[k] = sl;
 				}
 				else

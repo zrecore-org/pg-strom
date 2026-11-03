@@ -1671,7 +1671,8 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 				 */
 				int		dscale = pgstrom_numeric_static_dscale((Node *) expr);
 
-				if (dscale < 0 || dscale > 255)
+				/* (numerics are not on the GPU inside a join program yet) */
+				if (con->inner_target_list != NIL || dscale < 0 || dscale > 255)
 				{
 					elog(DEBUG2, "the scale of the numeric aggregate argument is not known: %s",
 						 nodeToString(expr));
@@ -1986,6 +1987,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer, bool or numeric (of a known scale) columns */
 			if ((!scan_vm_groupkey_type_supported(dtype->type_code) &&
 				 !(dtype->type_code == TypeOpCode__numeric &&
+				   con->inner_target_list == NIL &&
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
 				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
 				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)

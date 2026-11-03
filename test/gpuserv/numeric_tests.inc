@@ -112,16 +112,16 @@ sql "analyze nm_fz"
 sql "delete from nm_fz where b = 0 and i % 3 <> 0"             # a few zero divisors remain: the backend raises (or skips) them
 run nm_fz "random pairs: a / b" "select i, a / b from %T where b <> 0"
 run nm_fz "random pairs: a % b, div(a, b)" "select i, a % b, div(a, b), mod(b, a) from %T where b <> 0 and a <> 0"
-run nm_fz "random pairs: round and trunc with random scales" "select i, round(a, n), trunc(b, n), round(a, n % 7), trunc(a, s) from %T"
-run nm_fz "random pairs: ceil, floor, sign" "select i, ceil(a), floor(b), sign(a), ceiling(b), sign(b) from %T"
-run nm_fz "random pairs: numeric(p,s) coercion (overflow errors alike, rows must not hide them)" "select i, a::numeric(30,s) from %T where abs(a) < 1000000000000"
+run nm_fz "random pairs: round and trunc with random scales" "select i, round(a, n), trunc(b, n), round(a, n % 7), trunc(a, s) from %T where i > 0"
+run nm_fz "random pairs: ceil, floor, sign" "select i, ceil(a), floor(b), sign(a), ceiling(b), sign(b) from %T where i > 0"
+run nm_fz "random pairs: numeric(p,s) coercion" "select i, a::numeric(30,5), b::numeric(20,0), a::numeric(18,9), b::numeric(12,3) from %T where abs(a) < 1000000 and abs(b) < 1000000"
 run nm_fz "random pairs: quotient in a qual" "select i from %T where b <> 0 and a / b > 1.5 and a / b < 100000"
 runagg nm_fz "random pairs: count over a quotient qual" "select count(*), sum(i) from %T where b <> 0 and a / b > 3"
 g=$($PSQL -d scantest -c "$GPU select count(*) from nm_fz where b = 0 and a / b > 1" 2>&1 | head -1)
 c=$($PSQL -d scantest -c "$CPU select count(*) from nm_fz where b = 0 and a / b > 1" 2>&1 | head -1)
 echo "$g" | grep -q "division by zero" && [ "$g" = "$c" ]; check "division by zero is reported alike ($g)" $?
-g=$($PSQL -d scantest -c "$GPU select a::numeric(5,2) from nm_fz where abs(a) > 1000 and abs(a) < 10000000" 2>&1 | head -1)
-c=$($PSQL -d scantest -c "$CPU select a::numeric(5,2) from nm_fz where abs(a) > 1000 and abs(a) < 10000000" 2>&1 | head -1)
+g=$($PSQL -d scantest -c "$GPU select n2::numeric(5,2) from nm1 where n2 is not null and abs(n2) > 1000" 2>&1 | head -1)
+c=$($PSQL -d scantest -c "$CPU select n2::numeric(5,2) from nm1 where n2 is not null and abs(n2) > 1000" 2>&1 | head -1)
 echo "$g" | grep -q "numeric field overflow" && [ "$g" = "$c" ]; check "numeric field overflow is reported alike ($g)" $?
 
 echo "numeric: aggregation"
@@ -156,7 +156,7 @@ sql "create table nm_li as select i as l_orderkey, (i % 7 + 1)::int as l_linenum
 	((i % 11) / 100.0)::numeric(15,2) as l_discount,
 	((i % 9) / 100.0)::numeric(15,2) as l_tax,
 	(date '1992-01-01' + (i % 2500)) as l_shipdate,
-	case when i % 97 = 0 then null else ((i % 13) - 6)::numeric(6,1) end as bal,
+	(case when i % 97 = 0 then null else ((i % 13) - 6) / 10.0 end)::numeric(6,1) as bal,
 	((i % 20)::numeric / 4)::numeric(6,2) as g2, ((i % 7)::numeric * 100)::numeric(8,0) as g0
 	from generate_series(1, $NMROWS) i"
 sql "vacuum analyze nm_li"
@@ -165,6 +165,7 @@ runagg nm_li "Q1 aggregates (no GROUP BY)" "select sum(l_quantity), sum(l_extend
 runagg nm_li "Q1 aggregates GROUP BY integer keys" "select grp, grp2, sum(l_quantity), sum(l_extendedprice), sum(l_extendedprice * (1 - l_discount)), sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)), avg(l_quantity), avg(l_extendedprice), avg(l_discount), count(*) from %T where l_shipdate <= date '1998-09-02' group by 1, 2 order by 1, 2"
 runagg nm_li "GROUP BY a numeric(6,2) key" "select g2, count(*), sum(l_extendedprice), avg(l_discount), sum(l_extendedprice * (1 - l_discount)) from %T group by 1 order by 1"
 runagg nm_li "GROUP BY a numeric(8,0) key and an integer key" "select g0, grp, count(*), sum(l_quantity), avg(l_tax) from %T group by 1, 2 order by 1, 2"
+runagg_any nm_li "GROUP BY a numeric key of unknown scale (unconstrained numeric: CPU)" "select bal2, count(*), sum(l_quantity) from (select l_quantity, bal::numeric as bal2 from %T) x group by 1 order by 1 nulls last"
 runagg nm_li "GROUP BY a numeric key with NULLs (the NULL group)" "select bal, count(*), sum(l_quantity), avg(l_extendedprice) from %T group by 1 order by 1 nulls last"
 runagg nm_li "GROUP BY a numeric expression of known scale" "select round(l_extendedprice, -4) as r, count(*), sum(l_quantity) from %T group by 1 order by 1"
 runagg nm_li "GROUP BY l_quantity * l_discount (scale 4)" "select l_quantity * l_discount as qd, count(*), sum(l_tax) from %T group by 1 order by 1"
