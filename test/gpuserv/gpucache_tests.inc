@@ -340,4 +340,3 @@ gcrun gcbig "after bulk UPDATE and DELETE" "select id, b, f from %T where b < 10
 ms_gpu=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; explain analyze select count(*), sum(b), max(c) from gcbig where a > 0" | grep "Execution Time")
 ms_cpu=$($PSQL -d scantest -c "$CPU explain analyze select count(*), sum(b), max(c) from gcbig where a > 0" | grep "Execution Time")
 echo "  info  aggregate over $NROWS cached rows: GPU $ms_gpu; PostgreSQL $ms_cpu"
-[ -z "$KEEP" ] && true

@@ -794,6 +794,25 @@ getGpuCacheSharedState(Oid database_oid, Oid table_oid, uint32_t table_sig, cons
 			goto found;
 		}
 	}
+	/* a table has one cache: the states of its older signatures are obsolete (the service replaces their data) */
+	for (int i = 0; i < GPUCACHE_STATE_HASH_NSLOTS; i++)
+	{
+		dlist_mutable_iter miter;
+
+		dlist_foreach_modify(miter, &gpucache_shared_head->hash_slots[i])
+		{
+			GpuCacheSharedState *old = dlist_container(GpuCacheSharedState, chain, miter.cur);
+
+			if (old->database_oid == database_oid && old->table_oid == table_oid &&
+				old->table_sig != table_sig)
+			{
+				dlist_delete(&old->chain);
+				old->table_sig = 0;
+				old->table_oid = InvalidOid;
+				dlist_push_tail(&gpucache_shared_head->free_list, &old->chain);
+			}
+		}
+	}
 	if (!dlist_is_empty(&gpucache_shared_head->free_list))
 	{
 		dlist_node *dnode = dlist_pop_head_node(&gpucache_shared_head->free_list);
