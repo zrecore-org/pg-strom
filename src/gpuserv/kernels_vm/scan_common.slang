@@ -964,7 +964,13 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 float f = asfloat(uint(x.v));
                 if (isnan(f) || isinf(f) || f >= 9.2233720368547758e18 || f < -9.2233720368547758e18)
                     return k1 | (SOP_ERR_INTRANGE << 16);
-                int64_t r = int64_t(round(f));      // round to nearest even, as rint()
+                // round to nearest, ties to even (PostgreSQL's rint()). Not round(): Metal's round() is half away
+                // from zero (2.5 -> 3), which the SPIR-V translation keeps.
+                float fl = floor(f);
+                float fd = f - fl;
+                int64_t r = int64_t(fl);
+                if (fd > 0.5 || (fd == 0.5 && (r & 1) != 0))
+                    r += 1;
                 if (out_of_range(r, k0))
                     return k1 | (SOP_ERR_INTRANGE << 16);
                 regs[dst].v = r;

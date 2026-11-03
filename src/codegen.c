@@ -4722,6 +4722,73 @@ pgstrom_vulkan_expr_limits(Expr *expr)
 }
 
 /*
+ * pgstrom_vulkan_expr_cannot_fail
+ *
+ * An aggregate argument is evaluated by the device for every row that passes the scan quals, before the
+ * aggregate's FILTER is applied, while PostgreSQL does not evaluate the argument of a row the filter
+ * rejects. So with a FILTER the argument must be an expression that cannot raise an error: columns,
+ * constants, comparisons, boolean operators, NULL tests and widening integer casts.
+ */
+bool
+pgstrom_vulkan_expr_cannot_fail(Node *node)
+{
+	ListCell   *lc;
+
+	if (node == NULL)
+		return true;
+	check_stack_depth();
+	switch (nodeTag(node))
+	{
+		case T_Var:
+		case T_Const:
+		case T_Param:
+			return true;
+		case T_RelabelType:
+			return pgstrom_vulkan_expr_cannot_fail((Node *)((RelabelType *) node)->arg);
+		case T_NullTest:
+			return pgstrom_vulkan_expr_cannot_fail((Node *)((NullTest *) node)->arg);
+		case T_BoolExpr:
+			foreach (lc, ((BoolExpr *) node)->args)
+				if (!pgstrom_vulkan_expr_cannot_fail(lfirst(lc)))
+					return false;
+			return true;
+		case T_FuncExpr:
+			{
+				FuncExpr   *f = (FuncExpr *) node;
+				Oid			src, dst = f->funcresulttype;
+
+				if ((f->funcformat != COERCE_IMPLICIT_CAST && f->funcformat != COERCE_EXPLICIT_CAST) ||
+					list_length(f->args) != 1)
+					return false;
+				src = exprType((Node *) linitial(f->args));
+				if (!((src == INT2OID && (dst == INT4OID || dst == INT8OID)) ||
+					  (src == INT4OID && dst == INT8OID)))
+					return false;
+				return pgstrom_vulkan_expr_cannot_fail((Node *) linitial(f->args));
+			}
+		case T_OpExpr:
+			{
+				OpExpr	   *op = (OpExpr *) node;
+				char	   *name = get_opname(op->opno);
+				bool		cmp;
+
+				cmp = (name != NULL &&
+					   (strcmp(name, "=") == 0 || strcmp(name, "<>") == 0 || strcmp(name, "<") == 0 ||
+						strcmp(name, "<=") == 0 || strcmp(name, ">") == 0 || strcmp(name, ">=") == 0));
+				if (!cmp || op->opresulttype != BOOLOID)
+					return false;
+				foreach (lc, op->args)
+					if (!pgstrom_vulkan_expr_cannot_fail(lfirst(lc)))
+						return false;
+				return true;
+			}
+		default:
+			break;
+	}
+	return false;
+}
+
+/*
  * pgstrom_xpu_expression
  *
  * checks whether the expression is executable on GPU devices

@@ -1664,6 +1664,17 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	/* last argument for filtering */
 	if (aggref->aggfilter)
 	{
+		/* the device evaluates the arguments of rows the FILTER rejects: they must not be able to raise an error */
+		foreach (lc, partfn_args)
+		{
+			if (!pgstrom_vulkan_expr_cannot_fail((Node *) lfirst(lc)))
+			{
+				elog(DEBUG2, "Aggregate argument with a FILTER-clause may raise an error: %s",
+					 nodeToString(lfirst(lc)));
+				ReleaseSysCache(htup);
+				return NULL;
+			}
+		}
 		if (!pgstrom_xpu_expression(aggref->aggfilter,
 									pp_info->xpu_task_flags,
 									pp_info->base_relid,
@@ -2552,6 +2563,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		 * argument or filter of a partial aggregate (a plain column argument uses its column's slot)
 		 */
 		int			nslots = bms_num_members(pp_input->outer_refs);
+		int			nexprs = 0;		/* computed arguments/filters/keys: a slot each, and a register that stays */
 		ListCell   *lc3;
 
 		foreach (lc, inner_target_list)
@@ -2566,11 +2578,15 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 
 				foreach (lc4, ((FuncExpr *) e)->args)
 					if (!IsA(lfirst(lc4), Var))
-						nslots++;
+						nexprs++;
 			}
 			else if (!IsA(e, Var))
-				nslots++;
+				nexprs++;
 		}
+		/* registers: the slots, one more per computed value (scan_prog.c keeps them above the slots), temporaries */
+		nslots += nexprs;
+		if (nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
+			nslots = SCAN_MAX_REGS + 1;
 		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
 			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
 			nslots > SCAN_VM_SLOT_BUDGET)

@@ -10,3 +10,9 @@ join+par	select d.ps as c0 from fz2 t inner join fz_d d on (t.n4 = d.k4) AND ((t
 agg	select count(*) filter (where (c NOT LIKE 'abc')) as a0 from fz1 t
 # fail_rows seed=3 index=598 GPU: ab99ee52b2f4c56008ebcee63ec19e00|7196 | CPU: 6cb9ffe85175aea116e94f8eb67ea3f1|7195
 agg	select nm as k0, min(i) as a0 from fz3 t where (nf >= ef) group by 1
+# fail_asym seed=4 index=35 GPU: ERROR:  gpuserv:0  integer out of range (in int42mul, block index 32, line pointer 36) | CPU: acf71035d59d68dd7433847d276fe3c4|7
+agg	select tm as k0, count((e4 * n2)) filter (where (d <> d)) as a0 from fz1 t group by 1
+# fail_rows seed=4 index=617 GPU: 3d8b8f648507e312856433f2a7d9d5fa|252 | CPU: 39028868ca8052a84822757ff239c16b|252
+agg	select (nf)::int2 as k0, sum(e8) as a0 from fz2 t where (nw IS NOT NULL) group by 1
+# fail_service seed=4 index=972 GPU: ERROR:  gpuserv:0  the expression needs more than 32 registers | CPU: c12684998b7caa01bc19a4b137611577|100
+agg	select (w22 % 5) as k0, (w1 % 5) as k1, sum(w5) as a0, max((w32 + w4)) as a1, count((w15 + w35)) as a2, min((w14 + w29)) as a3, max((w16 + w21)) as a4, sum((w28 + w13)) as a5 from fz_w t group by 1, 2

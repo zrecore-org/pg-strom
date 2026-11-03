@@ -426,6 +426,7 @@ class Q:
         self.join = None         # dict: jt, on (list of N), keys
         self.settings = ""       # settings group name
         self.order_limit = None
+        self.distinct = False
         self.strict = False
 
     def clone(self):
@@ -458,7 +459,7 @@ class Q:
             w = " where " + " AND ".join(x.sql() for x in wh)
         if self.kind in ("scan", "semi", "join"):
             sel = ", ".join(p.sql() + " as c%d" % i for i, p in enumerate(self.projs)) or "t.i"
-            return "select " + sel + " from " + frm + w
+            return "select " + ("distinct " if self.distinct else "") + sel + " from " + frm + w
         parts = []
         for i, k in enumerate(self.keys):
             parts.append(k.sql() + " as k%d" % i)
@@ -715,6 +716,9 @@ def gen_query(seed, index):
                 q.keys.append(kx)
         if kind == "group" and not q.keys:
             q.keys.append(g.expr(r.choice(["i2", "i4", "bool", "date"]), 1))
+    if kind in ("scan", "join") and r.random() < 0.08 and all(
+            x.typ in ("i2", "i4", "i8", "date", "bool", "text", "time", "ts", "bpchar") for x in q.projs):
+        q.distinct = True       # (float and numeric values that compare equal print differently: 0 and 0.00, -0)
     # settings
     par = r.random() < 0.4
     sg = "scan" if kind == "scan" else ("agg" if kind in ("agg", "group") else "join")

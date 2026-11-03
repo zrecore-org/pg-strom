@@ -64,3 +64,10 @@ for t in s1 s2 s3; do
 	run $t "float4 qual on a denormal quotient" "select i from %T where d / 1e38::float4 > 0::float4 and d / 1e38::float4 < 1e-37::float4 and i < 5000 and d < 1000::float4"
 	run_any $t "float4 sum with a denormal operand" "select i, d + 1e-40::float4 from %T where i < 3000 and d < 1000::float4"
 done
+for t in s1 s2 s3; do
+	# float4 -> integer casts round ties to even (Metal's round() is half away from zero)
+	run $t "float4 to int2/int4/int8 casts at .5 ties" "select i, (d / 4::float4)::int4 as a, (d / 2::float4)::int2 as b, ((d - 70::float4) / 4::float4)::int8 as c from %T where d < 3000::float4"
+	runagg_any $t "GROUP BY a float4 -> int2 cast" "select (d / 2::float4)::int2 as k, count(*), sum(c) from %T where d < 200::float4 group by 1 order by 1"
+	# an aggregate argument that can fail is not evaluated for rows its FILTER rejects
+	runagg_any $t "FILTER that rejects everything over an overflowing argument" "select count(a * 100000000 * b::int8::int4) filter (where a <> a), count(*) from %T"
+done

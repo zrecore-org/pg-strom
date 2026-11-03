@@ -478,6 +478,7 @@ __build_session_kvars_defs(pgstromTaskState *pts,
 									 pp_info->kvars_deflist);
 	session->kcxt_kvars_nrooms = nrooms;
 	session->kcxt_kvars_nslots = nitems;
+	elog(DEBUG1, "DBGSLOTS %u kernel variables", nitems);
 	session->kcxt_kvars_defs = __appendBinaryStringInfo(buf, kvars_defs, sz);
 }
 

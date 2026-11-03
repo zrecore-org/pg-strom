@@ -410,6 +410,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	 */
 	{
 		int		nslots = bms_num_members(pp_prev->outer_refs);
+		int		nexprs = 0;
 
 		foreach (lc, inner_target_list)
 			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
@@ -418,9 +419,10 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			TargetEntry *tle = lfirst(lc);
 
 			if (!IsA(tle->expr, Var) && !IsA(tle->expr, Const) && !IsA(tle->expr, Param))
-				nslots++;
+				nexprs++;
 		}
-		if (nslots > SCAN_VM_SLOT_BUDGET)
+		/* a computed value has a slot and a register of its own above the slots (scan_prog.c), plus temporaries */
+		if (nslots + 2 * nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
 		{
 			elog(DEBUG2, "GpuJoin: %d kernel variables exceed the Vulkan service's registers", nslots);
 			return NULL;
