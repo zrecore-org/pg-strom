@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "gpusort.h"
 
 static uint64_t rng = 88172645463325252ULL;
@@ -240,6 +241,56 @@ main(int argc, char **argv)
 		run_case(&eng, 2, w2, a2, f2, n, 4, KSORT_WINDOW_FUNC__DENSE_RANK, 0);
 		run_case(&eng, 3, w3, a3, f3, n, 3, KSORT_WINDOW_FUNC__RANK, 0);
 		printf("n=%u done\n", n);
+	}
+	if (getenv("GPUSORT_BENCH"))
+	{
+		/* two keys (a 64-bit and a 128-bit sum): 8 key words per row; whole gpusort_run() time in ms,
+		 * including the key upload and the read back for the device */
+		static const uint32_t bn[] = {1024, 4096, 16384, 65536, 262144, 1048576, 4194304};
+		int			bw[2] = {0, 1}, ba[2] = {1, 0}, bf[2] = {0, 0};
+
+		printf("%9s %10s %10s\n", "rows", "gpu ms", "cpu ms");
+		for (size_t bi = 0; bi < sizeof(bn) / sizeof(bn[0]); bi++)
+		{
+			gpusort_spec spec;
+			uint32_t   *keys, *o1 = NULL, *o2 = NULL, n1, n2;
+			uint32_t	n = bn[bi];
+			int			ug;
+			char		err[256];
+			double		t0, t1, t2;
+			struct timespec ts;
+
+			memset(&spec, 0, sizeof(spec));
+			spec.nkeys = 2;
+			for (int k = 0; k < 2; k++)
+			{
+				spec.key[k].asc = ba[k];
+				spec.key[k].wide = bw[k];
+				spec.key[k].nulls_first = bf[k];
+			}
+			gpusort_spec_layout(&spec);
+			keys = malloc(sizeof(uint32_t) * spec.nwords * n);
+			for (uint32_t r = 0; r < n; r++)
+			{
+				gpusort_encode(&spec, 0, keys + (size_t) r * spec.nwords, 0, (int64_t)(rnd() % 100000));
+				gpusort_encode(&spec, 1, keys + (size_t) r * spec.nwords, rnd() % 50 == 0, (int64_t) rnd() >> 8);
+			}
+			setenv("PGSTROM_GPUSERV_SORT", "gpu", 1);
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			t0 = ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+			gpusort_run(&eng, &spec, keys, n, &o1, &n1, &ug, err, sizeof(err));
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			t1 = ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+			setenv("PGSTROM_GPUSERV_SORT", "cpu", 1);
+			gpusort_run(&eng, &spec, keys, n, &o2, &n2, &ug, err, sizeof(err));
+			clock_gettime(CLOCK_MONOTONIC, &ts);
+			t2 = ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+			printf("%9u %10.2f %10.2f%s\n", n, t1 - t0, t2 - t1,
+				   (n1 == n2 && memcmp(o1, o2, sizeof(uint32_t) * n1) == 0) ? "" : "  MISMATCH");
+			free(keys);
+			free(o1);
+			free(o2);
+		}
 	}
 	scan_engine_fini(&eng);
 	gpu_vk_close(&vk);

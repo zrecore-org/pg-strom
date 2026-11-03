@@ -675,7 +675,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			 session->xpu_task_flags);
 		goto error;
 	}
-	if (session->xpucode_gpusort_keydesc || session->xpucode_join_quals_packed)
+	/* GPU-Sort is applied to the groups of a GpuPreAgg by the service itself (gpusort.c), not by the scan */
+	if ((session->xpucode_gpusort_keydesc && !agg_mode) || session->xpucode_join_quals_packed)
 	{
 		fail(&b, "join and sort are not implemented by the Vulkan service yet");
 		goto error;
@@ -1409,7 +1410,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		fail(&b, "not a GpuJoin session");
 		goto error;
 	}
-	if (session->xpucode_gpusort_keydesc || (agg_mode != (session->xpucode_groupby_actions != 0)))
+	if ((session->xpucode_gpusort_keydesc && !agg_mode) || (agg_mode != (session->xpucode_groupby_actions != 0)))
 	{
 		fail(&b, "sort on top of a join, or a join session with aggregate actions, is not implemented by the Vulkan service");
 		goto error;

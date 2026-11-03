@@ -35,7 +35,14 @@ NO_ORACLE=" pgstrom_guc "
 strip_plans() {
 	# EXPLAIN result blocks ("QUERY PLAN" .. "(N rows)") are plan text, not rows; the SET/RESET pg_strom.enabled
 	# statements are echoed with the value the oracle run replaced
-	awk '/^(SET|RESET)[ ]+pg_strom\.enabled/ { next }
+	# In tuples-only mode (\t on) an EXPLAIN has no QUERY PLAN header: the plan is the output after the
+	# echoed statement (which ends with a ';') up to the next blank line (gpu_sort).
+	awk '/^\\t on/ { tonly = 1 }
+	     /^\\t off/ { tonly = 0 }
+	     tonly && ex == 0 && /^EXPLAIN/ { ex = 1 }
+	     ex == 1 { print; if ($0 ~ /;[ ]*$/) ex = 2; next }
+	     ex == 2 { if ($0 ~ /^$/) { ex = 0; print "<plan>"; print "" }; next }
+	     /^(SET|RESET)[ ]+pg_strom\.enabled/ { next }
 	     /^ +QUERY PLAN *$/ { skip = 1; print "<plan>"; next }
 	     skip && /^\([0-9]+ rows?\)$/ { skip = 0; next }
 	     skip { next }

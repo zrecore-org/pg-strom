@@ -32,6 +32,7 @@ pg_strom.gpuserv_path = '$GPUSERV_BIN'
 pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
+export PGSTROM_GPUSERV_SORT=gpu		# GPU-Sort tests: the service sorts on the device whatever the row count
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
@@ -375,6 +376,7 @@ echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported
 
 . "${0%/*}/types_tests.inc"
 . "${0%/*}/numeric_tests.inc"
+. "${0%/*}/gpusort_tests.inc"
 
 echo "errors"
 for t in s1; do
