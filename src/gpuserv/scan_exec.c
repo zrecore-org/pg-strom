@@ -20,6 +20,7 @@
 #include "scan_caps.h"
 #include "cpu_vm.h"
 #include "gpusort.h"
+#include "specialize.h"
 
 #define SCAN_WG_MAX		65535U
 #define AGG_PAGES_PER_WG	32U		/* pages one aggregation workgroup runs over */
@@ -42,6 +43,26 @@ scan_engine_init(scan_engine *eng, gpu_vk_ctx *vk)
 	memset(eng, 0, sizeof(*eng));
 	eng->vk = vk;
 	eng->no_map = (getenv("PGSTROM_GPUSERV_NO_MAP") != NULL);
+	{
+		const char *tr = getenv("PGSTROM_GPUSERV_TRACE");
+
+		eng->spec = spec_mgr_create(vk, tr && tr[0] && strcmp(tr, "0") != 0);
+	}
+}
+
+
+/*
+ * Dispatch of a kernel: the specialized pipeline sp when the program has one ready (sp != vm), else the
+ * VM kernel. In check mode (PGSTROM_GPUSERV_SPECIALIZE=check) both run on the same input and the outputs
+ * must agree (spec_check.c).
+ */
+static int
+kdispatch(scan_engine *eng, scan_prog *prog, int kind, gpu_vk_pipeline *vm, gpu_vk_pipeline *sp,
+		  gpu_vk_buffer *const *bufs, const void *pc, uint32_t groups)
+{
+	(void) prog;
+	(void) kind;
+	return gpu_vk_dispatch(eng->vk, sp ? sp : vm, bufs, pc, groups, 1, 1, NULL);
 }
 
 /* ---------------------------------------------------------------- */
@@ -479,6 +500,8 @@ scan_engine_fini(scan_engine *eng)
 		map_entry_drop(eng, &eng->maps[i]);
 	arrow_engine_fini(eng);
 	gpusort_engine_fini(eng);
+	spec_mgr_destroy(eng->spec);
+	eng->spec = NULL;
 	for (int i = 0; i < 3; i++)
 	{
 		if (eng->pipe_ready[i])
@@ -931,6 +954,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	/* 3. run */
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
+		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_SCAN, 0, 0, &eng->pipe[variant]);
 
 		for (uint32_t base = 0; base < npages; base += SCAN_WG_MAX)
 		{
@@ -943,7 +967,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 			pc[1] = base;
 			pc[2] = BLCKSZ;
 			pc[3] = total_lps;
-			if (gpu_vk_dispatch(vk, &eng->pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+			if (kdispatch(eng, prog, SPEC_SCAN, &eng->pipe[variant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto error;
@@ -1308,6 +1332,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	t2 = now_ms();
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
+		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, &eng->agg_pipe[variant][avariant]);
 
 		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
 		{
@@ -1320,7 +1345,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 			pc[1] = base;				/* first workgroup of this dispatch */
 			pc[2] = AGG_PAGES_PER_WG;
 			pc[3] = flags_base;
-			if (gpu_vk_dispatch(vk, &eng->agg_pipe[variant][avariant], bufs, pc, groups, 1, 1, NULL) != 0)
+			if (kdispatch(eng, prog, SPEC_AGG, &eng->agg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;
@@ -1980,6 +2005,8 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	{
 		gpu_vk_buffer *bufs[5] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL};
 		uint32_t	flags_base = 4 + ngroups_total * blk_words;
+		gpu_vk_pipeline *sp = spec_pipe(eng, prog, SPEC_GAGG, 4 * (avariant + 1), (avariant == 0 ? 128 : 64),
+										&eng->gagg_pipe[variant][avariant]);
 
 		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
 		{
@@ -1992,7 +2019,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 			pc[1] = base;
 			pc[2] = AGG_PAGES_PER_WG;
 			pc[3] = flags_base;
-			if (gpu_vk_dispatch(vk, &eng->gagg_pipe[variant][avariant], bufs, pc, groups, 1, 1, NULL) != 0)
+			if (kdispatch(eng, prog, SPEC_GAGG, &eng->gagg_pipe[variant][avariant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;
@@ -2684,6 +2711,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	gpu_vk_buffer bout, bprog, btab;
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant;
+	gpu_vk_pipeline *sp = NULL;
 	uint32_t	npages, nloaded, total_lps = 0, ncomp, rec_words, cap, nmatch = 0;
 	size_t		out_words;
 	const uint32_t *out = NULL;
@@ -2785,6 +2813,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 
 	/* run; if there are more matches than the output holds, run again with room for all */
 	cap = (total_lps > 4096 ? total_lps : 4096);
+	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, &eng->join_pipe[variant]);
 	for (int attempt = 0; attempt < 2; attempt++)
 	{
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
@@ -2810,7 +2839,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 			pc[2] = BLCKSZ;
 			pc[3] = cap;
 			pc[4] = 0;
-			if (gpu_vk_dispatch(vk, &eng->join_pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+			if (kdispatch(eng, prog, SPEC_JOIN, &eng->join_pipe[variant], sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto error;
@@ -3125,6 +3154,8 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	{
 		gpu_vk_pipeline *pipe = (grouped ? &eng->jgagg_pipe[variant][avariant]
 										 : &eng->jagg_pipe[variant][avariant]);
+		gpu_vk_pipeline *sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, 4 * (avariant + 1),
+										(avariant == 0 ? 128 : 64), pipe);
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
 
 		if (grouped)
@@ -3157,7 +3188,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			pc[2] = ppw;
 			pc[3] = (uint32_t) ovf_base;
 			pc[4] = ovf_cap;
-			if (gpu_vk_dispatch(vk, pipe, bufs, pc, groups, 1, 1, NULL) != 0)
+			if (kdispatch(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, pipe, sp, bufs, pc, groups) != 0)
 			{
 				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 				goto done;

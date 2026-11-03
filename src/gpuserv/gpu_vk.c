@@ -907,8 +907,8 @@ gpu_vk_buffer_destroy(gpu_vk_ctx *ctx, gpu_vk_buffer *b)
 /* pipeline / dispatch                                                       */
 /* ------------------------------------------------------------------------ */
 int
-gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
-					   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size)
+gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+					   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size, char *err, size_t errlen)
 {
 	VkShaderModuleCreateInfo smi;
 	VkDescriptorSetLayoutBinding *binds = NULL;
@@ -923,17 +923,17 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 	p->pc_size = pc_size;
 	if (ctx->lost)
 	{
-		CTX_ERR(ctx, "device is lost");
+		set_err(err, errlen, "device is lost");
 		return -1;
 	}
 	if (spirv_bytes == 0 || (spirv_bytes % 4) != 0 || ((uintptr_t) spirv % 4) != 0)
 	{
-		CTX_ERR(ctx, "invalid SPIR-V blob (size %zu)", spirv_bytes);
+		set_err(err, errlen, "invalid SPIR-V blob (size %zu)", spirv_bytes);
 		return -1;
 	}
 	if (pc_size > ctx->limits.maxPushConstantsSize)
 	{
-		CTX_ERR(ctx, "push constant range %u exceeds the device limit %u",
+		set_err(err, errlen, "push constant range %u exceeds the device limit %u",
 				pc_size, ctx->limits.maxPushConstantsSize);
 		return -1;
 	}
@@ -944,7 +944,7 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 	rc = vkCreateShaderModule(ctx->dev, &smi, NULL, &p->module);
 	if (rc != VK_SUCCESS)
 	{
-		CTX_ERR(ctx, "vkCreateShaderModule failed: %s", vkr_str(rc));
+		set_err(err, errlen, "vkCreateShaderModule failed: %s", vkr_str(rc));
 		p->module = VK_NULL_HANDLE;
 		return -1;
 	}
@@ -953,7 +953,7 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 		binds = calloc(nbind, sizeof(*binds));
 		if (!binds)
 		{
-			CTX_ERR(ctx, "out of memory");
+			set_err(err, errlen, "out of memory");
 			gpu_vk_pipeline_destroy(ctx, p);
 			return -1;
 		}
@@ -973,7 +973,7 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 	free(binds);
 	if (rc != VK_SUCCESS)
 	{
-		CTX_ERR(ctx, "vkCreateDescriptorSetLayout failed: %s", vkr_str(rc));
+		set_err(err, errlen, "vkCreateDescriptorSetLayout failed: %s", vkr_str(rc));
 		p->dsl = VK_NULL_HANDLE;
 		gpu_vk_pipeline_destroy(ctx, p);
 		return -1;
@@ -993,7 +993,7 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 	rc = vkCreatePipelineLayout(ctx->dev, &pli, NULL, &p->layout);
 	if (rc != VK_SUCCESS)
 	{
-		CTX_ERR(ctx, "vkCreatePipelineLayout failed: %s", vkr_str(rc));
+		set_err(err, errlen, "vkCreatePipelineLayout failed: %s", vkr_str(rc));
 		p->layout = VK_NULL_HANDLE;
 		gpu_vk_pipeline_destroy(ctx, p);
 		return -1;
@@ -1008,7 +1008,7 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 	rc = vkCreateComputePipelines(ctx->dev, VK_NULL_HANDLE, 1, &cpi, NULL, &p->pipeline);
 	if (rc != VK_SUCCESS)
 	{
-		CTX_ERR(ctx, "vkCreateComputePipelines failed (shader compiler rejected the "
+		set_err(err, errlen, "vkCreateComputePipelines failed (shader compiler rejected the "
 				"module?): %s", vkr_str(rc));
 		p->pipeline = VK_NULL_HANDLE;
 		if (rc == VK_ERROR_DEVICE_LOST)
@@ -1032,7 +1032,7 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 		rc = vkCreateDescriptorPool(ctx->dev, &dpi, NULL, &p->dpool);
 		if (rc != VK_SUCCESS)
 		{
-			CTX_ERR(ctx, "vkCreateDescriptorPool failed: %s", vkr_str(rc));
+			set_err(err, errlen, "vkCreateDescriptorPool failed: %s", vkr_str(rc));
 			p->dpool = VK_NULL_HANDLE;
 			gpu_vk_pipeline_destroy(ctx, p);
 			return -1;
@@ -1045,13 +1045,20 @@ gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 		rc = vkAllocateDescriptorSets(ctx->dev, &dai, &p->dset);
 		if (rc != VK_SUCCESS)
 		{
-			CTX_ERR(ctx, "vkAllocateDescriptorSets failed: %s", vkr_str(rc));
+			set_err(err, errlen, "vkAllocateDescriptorSets failed: %s", vkr_str(rc));
 			p->dset = VK_NULL_HANDLE;
 			gpu_vk_pipeline_destroy(ctx, p);
 			return -1;
 		}
 	}
 	return 0;
+}
+
+int
+gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+					   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size)
+{
+	return gpu_vk_pipeline_create_ex(ctx, p, spirv, spirv_bytes, nbind, pc_size, ctx->err, sizeof(ctx->err));
 }
 
 void

@@ -47,6 +47,9 @@
 #ifdef ARROW_SRC
         if (lp < nlp)
             hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
+#elif defined(SPEC_PROG)
+        if (lp < nlp)
+            hit = spec_eval_row(pbase, page, lp, true, regs);
 #else
         if (lp < nlp)
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
@@ -54,12 +57,18 @@
         if (hit)
         {
             uint dt = dtab;
+#ifdef SPEC_PROG
+            uint err = spec_hash(1, regs, hv[1]);
+#else
             uint err = vm_run(insnoff, prog[dt], prog[dt + 1], regs);
+#endif
             if (err != 0)
                 report_error(page, lp, err);
             else
             {
+#ifndef SPEC_PROG
                 hv[1] = uint(regs[prog[dt + 3]].v);
+#endif
                 nxt[1] = chain_first(dt, hv[1]);
                 d = 1;
             }
@@ -108,6 +117,14 @@
                     g_src = 2;
                     if (ld32(it + 12) == hv[d])                 // the stored hash value
                     {
+#ifdef SPEC_PROG
+                        if (spec_inner(d, it, page, lp, regs))
+                        {
+                            bool jok;
+                            uint err = spec_jqual(d, regs, jok);
+                            if (err == 0)
+                                ok = jok;
+#else
                         null_slots(prog[dt + 5], prog[dt + 6], regs);
                         if (deform_tuple(it, page, lp, prog[dt + 5], prog[dt + 6], regs))
                         {
@@ -117,6 +134,7 @@
                                 uint jq = prog[dt + 4];
                                 ok = (jq == 0xffffffffu) || (regs[jq].isnull == 0 && regs[jq].v != 0);
                             }
+#endif
                             else
                             {
                                 report_error(page, lp, err);
@@ -150,7 +168,11 @@
                     // LEFT OUTER or ANTI: the chain is done and nothing matched: NULL inner columns
                     mflag |= (1u << d);
                     cur[d] = NO_ITEM;
+#ifdef SPEC_PROG
+                    spec_nulls(d, regs);
+#else
                     null_slots(prog[dt + 5], prog[dt + 6], regs);
+#endif
                     ok = true;
                 }
                 else
@@ -163,7 +185,11 @@
                         emit = true;
                         if (nins > proj_begin)
                         {
+#ifdef SPEC_PROG
+                            uint err = spec_proj(regs);
+#else
                             uint err = vm_run(insnoff, proj_begin, nins, regs);
+#endif
                             if (err != 0)
                             {
                                 report_error(page, lp, err);
@@ -177,7 +203,11 @@
                         d = d + 1;
                         mflag &= ~(1u << d);
                         uint dt2 = dtab + JDT_WORDS * (d - 1);
+#ifdef SPEC_PROG
+                        uint err = spec_hash(d, regs, hv[d]);
+#else
                         uint err = vm_run(insnoff, prog[dt2], prog[dt2 + 1], regs);
+#endif
                         if (err != 0)
                         {
                             report_error(page, lp, err);
@@ -185,7 +215,9 @@
                         }
                         else
                         {
+#ifndef SPEC_PROG
                             hv[d] = uint(regs[prog[dt2 + 3]].v);
+#endif
                             nxt[d] = chain_first(dt2, hv[d]);
                         }
                     }
@@ -212,6 +244,9 @@
                         outb[rb + 1] = lp;
                         for (uint k = 0; k < nd; k++)
                             outb[rb + 2 + k] = cur[k + 1];
+#ifdef SPEC_PROG
+                        spec_store_comp_j(regs, rb + 2 + nd);
+#else
                         for (uint k = 0; k < ncomp; k++)
                         {
                             Reg r = regs[prog[compoff + k]];
@@ -219,6 +254,7 @@
                             outb[rb + 2 + nd + 3 * k + 1] = uint(uint64_t(r.v) & 0xffffffffu);
                             outb[rb + 2 + nd + 3 * k + 2] = uint(uint64_t(r.v) >> 32);
                         }
+#endif
                     }
                 }
             }
@@ -226,6 +262,9 @@
             if (emit)
             {
                 hits += 1;
+#ifdef SPEC_PROG
+                spec_acc(regs, an, aa, ab);
+#else
                 for (uint k = 0; k < naggs; k++)
                 {
                     uint cls = prog[aggoff + 4 * k];
@@ -261,12 +300,16 @@
                         }
                     }
                 }
+#endif
             }
 #else
             // A: stage the row (the key and the aggregate arguments)
             st_slot[tid] = NO_SLOT;
             if (emit)
             {
+#ifdef SPEC_PROG
+                spec_stage(regs, tid);
+#else
                 int64_t k0 = 0, k1 = 0;
                 uint kn = 0;
                 if (nkeys > 0)
@@ -296,6 +339,7 @@
                     st_ok[tid * GA_NA + k] = ok ? 1u : 0u;
                     st_val[tid * GA_NA + k] = (cls == AC_COUNT_ANY || cls == AC_COUNT_COND) ? 0 : regs[ra].v;
                 }
+#endif
                 uint prev;
                 InterlockedAdd(sh_hits, 1, prev);
             }

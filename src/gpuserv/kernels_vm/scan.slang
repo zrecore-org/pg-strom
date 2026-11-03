@@ -2,6 +2,9 @@
 // evaluation is in scan_common.slang; this kernel records which line pointers qualify and
 // the computed projection values.
 #include "scan_common.slang"
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
 
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]
@@ -34,14 +37,22 @@ void scan_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool hit = false;
         Reg  regs[VM_MAX_REGS];
 
+#ifdef SPEC_PROG
+        if (lp < nlp)
+            hit = spec_eval_row(pbase, page, lp, false, regs);
+#else
         if (lp < nlp)
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#endif
         if (lp < nlp)
         {
             outb[4 + lp_base + lp] = hit ? 1u : (g_recheck != 0 ? 2u : 0u);   // 2: the backend must evaluate the row
             if (hit)
             {
                 uint vb = val_base + (lp_base + lp) * (3 * ncomp);
+#ifdef SPEC_PROG
+                spec_store_comp(regs, vb);
+#else
                 for (uint k = 0; k < ncomp; k++)
                 {
                     Reg r = regs[prog[compoff + k]];
@@ -49,6 +60,7 @@ void scan_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     outb[vb + 3 * k + 1] = uint(uint64_t(r.v) & 0xffffffffu);
                     outb[vb + 3 * k + 2] = uint(uint64_t(r.v) >> 32);
                 }
+#endif
             }
         }
     }

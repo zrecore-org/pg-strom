@@ -56,6 +56,11 @@ LIB_OBJS   += arrow_exec.o
 # GPU-Sort (A7): the bitonic sort kernel and the host side
 SPV_FILES  += build/gsort.spv
 LIB_OBJS   += gpusort.o gpu_vk_seq.o
+# A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
+# kernel sources are embedded for the compiler
+KSRC_FILES := $(sort $(wildcard kernels_vm/*.slang kernels_vm/*.inc))
+LIB_OBJS   += specialize.o spec_mgr.o kernels_src.o
+SLANGC_ABS := $(if $(SLANGC),$(realpath $(SLANGC)))
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
 
@@ -64,11 +69,11 @@ libgpuserv.a: $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
 
 gpuserv-probe: probe_main.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ probe_main.o libgpuserv.a $(VK_LIBS)
+	$(CC) $(CFLAGS) -o $@ probe_main.o libgpuserv.a $(VK_LIBS) -lpthread
 
 # the service program: --probe and --serve (see gpuserv_main.c)
 pgstrom-gpuserv: gpuserv_main.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ gpuserv_main.o libgpuserv.a $(VK_LIBS)
+	$(CC) $(CFLAGS) -o $@ gpuserv_main.o libgpuserv.a $(VK_LIBS) -lpthread
 
 proto_check: proto_check.o gpuserv_proto.o
 	$(CC) $(CFLAGS) -o $@ proto_check.o gpuserv_proto.o
@@ -142,12 +147,20 @@ build/gsort.spv: kernels_vm/gsort.slang | build
 gpusort.o: gpusort.c gpusort.h scan_exec.h kernels_spv.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
+# offline check of the kernel generator: spec_check <dir> writes the sources of every kernel kind
+# (test/gpuserv/spec_compile_check.sh compiles them with slangc)
+spec_check.o: spec_check.c specialize.h scan_prog.h scan_caps.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+spec_check: spec_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ spec_check.o libgpuserv.a $(VK_LIBS) -lpthread
+
 # self-check of GPU-Sort against the CPU sort and naive window-rank (not part of "all")
 gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 gpusort_check: gpusort_check.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS)
+	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS) -lpthread
 
 ARROW_INCS := kernels_vm/arrow_load.inc
 build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
@@ -172,6 +185,17 @@ build/ajgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_v
 
 arrow_exec.o: arrow_exec.c scan_exec.h scan_prog.h scan_caps.h kernels_spv.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+# the kernel sources, embedded (one generator run produces both files)
+kernels_src.c: kernels_src.h
+kernels_src.h: $(KSRC_FILES) gen_ksrc.sh
+	sh ./gen_ksrc.sh kernels_src.c kernels_src.h $(KSRC_FILES)
+
+specialize.o: specialize.c specialize.h scan_prog.h scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+spec_mgr.o: spec_mgr.c specialize.h scan_exec.h scan_prog.h scan_caps.h kernels_src.h gpu_vk.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 $(if $(SLANGC_ABS),-DSPEC_SLANGC_PATH='"$(SLANGC_ABS)"') -I .. -c -o $@ $<
 
 scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
@@ -206,6 +230,6 @@ check: gpuserv-probe proto_check
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check kernels_spv.c kernels_spv.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check spec_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
 
 .PHONY: all check clean

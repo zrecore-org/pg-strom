@@ -37,6 +37,10 @@ groupshared uint    sh_n[AGG_MAX * SCAN_WG];
 groupshared int64_t sh_a[AGG_MAX * SCAN_WG];
 groupshared int64_t sh_b[AGG_MAX * SCAN_WG];
 
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
+
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]
 void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -91,6 +95,10 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             {
 #ifdef ARROW_SRC
                 hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#elif defined(SPEC_PROG)
+                hit = spec_eval_row(pbase, page, lp, false, regs);
+                if (g_recheck != 0)
+                    outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
 #else
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
                 if (g_recheck != 0)     // flag the row for the backend (kparam.total_lps: base of the flags)
@@ -99,13 +107,20 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             if (!hit)
                 continue;
+#ifdef SPEC_PROG
+            if (!spec_scales_ok(regs))
+#else
             if (!agg_scales_ok(aggoff, naggs, 0, 0, regs))
+#endif
             {
                 // a numeric of another scale than the plan's: the backend evaluates the row
                 outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
                 continue;
             }
             hits += 1;
+#ifdef SPEC_PROG
+            spec_acc(regs, an, aa, ab);
+#else
             for (uint k = 0; k < naggs; k++)
             {
                 uint cls = prog[aggoff + 4 * k];
@@ -141,6 +156,7 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     }
                 }
             }
+#endif
         }
     }
 

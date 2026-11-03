@@ -54,6 +54,7 @@ typedef struct scan_engine
 	int				ajoin_ready[2];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
+	struct spec_mgr *spec;			/* A6: specialized kernels (specialize.h) */
 } scan_engine;
 
 void	describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen);

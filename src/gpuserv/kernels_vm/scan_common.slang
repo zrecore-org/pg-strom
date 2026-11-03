@@ -956,20 +956,16 @@ bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg r
     return true;
 }
 
-// Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
-uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
+// Executes one instruction { op, dst, ra, rb, k0, k1 }; AND / OR set ip to their jump target. Returns the
+// FuncOpCode of a failing function, 0 on success. vm_run() below interprets a program with it; the
+// specialized kernels (specialize.c) call it with constant operands, so the generated code runs
+// exactly the semantics of the VM. (The loop is only there to keep the body's nesting unchanged.)
+uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint ip,
+             inout Reg regs[VM_MAX_REGS])
 {
-    while (ip < end)
+    [loop]
+    while (true)
     {
-        uint ib  = insnoff + ip * INSN_WORDS;
-        uint op  = prog[ib + 0];
-        uint dst = prog[ib + 1];
-        uint ra  = prog[ib + 2];
-        uint rb  = prog[ib + 3];
-        uint k0  = prog[ib + 4];
-        uint k1  = prog[ib + 5];
-
-        ip++;
         switch (op)
         {
         case SOP_CONST:
@@ -1253,6 +1249,27 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             break;
         }
         }
+        return 0;
+    }
+}
+
+// Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
+uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
+{
+    while (ip < end)
+    {
+        uint ib  = insnoff + ip * INSN_WORDS;
+        uint op  = prog[ib + 0];
+        uint dst = prog[ib + 1];
+        uint ra  = prog[ib + 2];
+        uint rb  = prog[ib + 3];
+        uint k0  = prog[ib + 4];
+        uint k1  = prog[ib + 5];
+
+        ip++;
+        uint e = vm_step(op, dst, ra, rb, k0, k1, ip, regs);
+        if (e != 0)
+            return e;
     }
     return 0;
 }
@@ -1268,22 +1285,14 @@ void report_error(uint page, uint lp, uint err)
     }
 }
 
-// Deform the columns a program needs from the heap-format tuple at byte offset tbase of the
-// current source (g_src) into the registers named by the column descriptors at coloff. A join
-// inner tuple (kern_hashitem) has the layout of a heap tuple whose first 8 bytes are the chain
-// pointer, so the same code reads it. Returns false after report_error().
-bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
-                  inout Reg regs[VM_MAX_REGS])
+// Deform column c (descriptor desc) of the heap-format tuple at byte offset tbase of the current source
+// (g_src) into its register; off is the running byte offset in the tuple. Returns false after
+// report_error(). deform_tuple() calls it for every column of a table; the specialized kernels call it
+// with constant c and desc (the body keeps the nesting it had inside the column loop).
+bool deform_col(uint c, uint desc, uint tbase, uint natts, bool hasnull, uint page, uint lp,
+                inout uint off, inout Reg regs[VM_MAX_REGS])
 {
-    uint infomask2 = ld16(tbase + 18);
-    uint infomask  = ld16(tbase + 20);
-    uint natts     = infomask2 & 0x7ffu;
-    bool hasnull   = (infomask & 1u) != 0;
-    uint off       = ld8(tbase + 22);       // t_hoff
-
-    for (uint c = 0; c < ncols; c++)
     {
-        uint desc  = prog[coloff + c];
         uint alen  = desc & 0xffu;
         uint align = (desc >> 8) & 0xfu;
         uint vt    = (desc >> 12) & 0xfu;
@@ -1291,7 +1300,7 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
         bool isnull = (c >= natts) ||
                       (hasnull && (((ld8(tbase + 23 + (c >> 3)) >> (c & 7u)) & 1u) == 0));
         if (isnull)
-            continue;       // register stays NULL, no space is used
+            return true;    // register stays NULL, no space is used
 
         if (alen == 0xffu)
         {
@@ -1395,6 +1404,27 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
             }
             off += alen;
         }
+    }
+    return true;
+}
+
+// Deform the columns a program needs from the heap-format tuple at byte offset tbase of the
+// current source (g_src) into the registers named by the column descriptors at coloff. A join
+// inner tuple (kern_hashitem) has the layout of a heap tuple whose first 8 bytes are the chain
+// pointer, so the same code reads it. Returns false after report_error().
+bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
+                  inout Reg regs[VM_MAX_REGS])
+{
+    uint infomask2 = ld16(tbase + 18);
+    uint infomask  = ld16(tbase + 20);
+    uint natts     = infomask2 & 0x7ffu;
+    bool hasnull   = (infomask & 1u) != 0;
+    uint off       = ld8(tbase + 22);       // t_hoff
+
+    for (uint c = 0; c < ncols; c++)
+    {
+        if (!deform_col(c, prog[coloff + c], tbase, natts, hasnull, page, lp, off, regs))
+            return false;
     }
     return true;
 }

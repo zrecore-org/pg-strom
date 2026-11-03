@@ -80,6 +80,10 @@ uint hash_keys(int64_t k0, int64_t k1, uint kn)
     return h;
 }
 
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
+
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]
 void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
@@ -151,18 +155,28 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #ifdef ARROW_SRC
             if (lp < nlp)
                 hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#elif defined(SPEC_PROG)
+            if (lp < nlp)
+                hit = spec_eval_row(pbase, page, lp, false, regs);
 #else
             if (lp < nlp)
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
 #endif
             st_slot[tid] = NO_SLOT;
+#ifdef SPEC_PROG
+            if (hit && !spec_scales_ok(regs))
+#else
             if (hit && !agg_scales_ok(aggoff, naggs, keyoff, nkeys, regs))
+#endif
             {
                 hit = false;                        // a numeric of another scale than the plan's:
                 g_recheck = 1;                      // the backend evaluates the row
             }
             if (hit)
             {
+#ifdef SPEC_PROG
+                spec_stage(regs, tid);
+#else
                 int64_t k0 = 0, k1 = 0;
                 uint kn = 0;
                 if (nkeys > 0)
@@ -192,6 +206,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     st_ok[tid * GA_NA + k] = ok ? 1u : 0u;
                     st_val[tid * GA_NA + k] = (cls == AC_COUNT_ANY || cls == AC_COUNT_COND) ? 0 : regs[ra].v;
                 }
+#endif
                 uint prev;
                 InterlockedAdd(sh_hits, 1, prev);
             }

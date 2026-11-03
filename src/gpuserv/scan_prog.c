@@ -18,6 +18,7 @@
 #include "xpu_common.h"
 #include "scan_prog.h"
 #include "scan_caps.h"
+#include "specialize.h"
 
 
 #define PROG_HDR_WORDS		24
@@ -634,6 +635,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 void
 scan_prog_free(scan_prog *prog)
 {
+	spec_release(prog);
 	free(prog->words);
 	free(prog->attrs);
 	memset(prog, 0, sizeof(*prog));
