@@ -53,6 +53,8 @@ AJAGG_SPV  := $(foreach r,16 32,$(foreach a,4 8 12,build/ajagg$(r)_$(a).spv))
 AJGAGG_SPV := $(foreach r,16 32,$(foreach a,4 8 12,build/ajgagg$(r)_$(a).spv))
 SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 LIB_OBJS   += arrow_exec.o
+# GPU-Cache (A7 part 2)
+LIB_OBJS   += gcache.o
 # GPU-Sort (A7): the bitonic sort kernel and the host side
 SPV_FILES  += build/gsort.spv
 LIB_OBJS   += gpusort.o gpu_vk_seq.o
@@ -170,7 +172,10 @@ build/ajgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_v
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/jgagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(SCAN_SLANGFLAGS) -target spirv -entry jgagg_main -stage compute -o $@
 
-arrow_exec.o: arrow_exec.c scan_exec.h scan_prog.h scan_caps.h kernels_spv.h ../xpu_common.h
+arrow_exec.o: arrow_exec.c scan_exec.h scan_prog.h scan_caps.h kernels_spv.h gcache.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+gcache.o: gcache.c gcache.h gcache_proto.h scan_prog.h scan_caps.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
@@ -183,7 +188,7 @@ vm_selftest.o: vm_selftest.c vm_selftest.h kernels_spv.h gen/opcodes.inc
 	$(CC) $(CFLAGS) -I gen -I .. -c -o $@ $<
 
 # the wire server reads the real backend protocol structs from ../xpu_common.h
-wire.o: wire.c wire.h scan_exec.h scan_prog.h gpu_vk.h gpuserv_proto.h ../xpu_common.h ../xpu_opcodes.h
+wire.o: wire.c wire.h scan_exec.h scan_prog.h gpu_vk.h gpuserv_proto.h gcache.h ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 # one generator run produces both files

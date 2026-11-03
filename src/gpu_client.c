@@ -13,6 +13,7 @@
  */
 #include "pg_strom.h"
 #include "gpuserv/gpuserv_proto.h"
+#include <fcntl.h>
 
 static int		pgstrom_max_async_tasks_guc;		/* GUC */
 int				pgstrom_debug_level = 0;			/* GUC */
@@ -56,6 +57,39 @@ gpuClientOpenSession(pgstromTaskState *pts, const XpuCommand *session)
 		elog(ERROR, "failed on connect('%s'): %m", ctl->socket_path);
 	}
 	__xpuClientOpenSession(pts, session, sockfd);
+}
+
+/*
+ * gpuClientConnectControl - a non-blocking connection to the service for requests that need no
+ * session (GPU-Cache maintenance), or -1 (no error is reported)
+ */
+int
+gpuClientConnectControl(uint32_t *p_generation)
+{
+	const gpuserv_control *ctl = pgstrom_gpuserv_control();
+	struct sockaddr_un addr;
+	int			sockfd;
+	int			flags;
+
+	if (!ctl || __atomic_load_n(&ctl->state, __ATOMIC_SEQ_CST) != GPUSERV_STATE_READY)
+		return -1;
+	*p_generation = __atomic_load_n(&ctl->generation, __ATOMIC_SEQ_CST);
+	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		return -1;
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", ctl->socket_path);
+	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+	{
+		close(sockfd);
+		return -1;
+	}
+	(void) fcntl(sockfd, F_SETFD, FD_CLOEXEC);
+	flags = fcntl(sockfd, F_GETFL, 0);
+	if (flags >= 0)
+		(void) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+	return sockfd;
 }
 
 void

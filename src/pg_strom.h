@@ -812,6 +812,7 @@ extern int		pgstrom_debug_level;		/* GUC pg_strom.debug_level */
 
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
+extern int		gpuClientConnectControl(uint32_t *p_generation);
 extern void		pgstrom_init_gpu_client(void);
 
 /*
