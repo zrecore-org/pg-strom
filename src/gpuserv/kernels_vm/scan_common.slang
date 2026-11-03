@@ -47,6 +47,9 @@ struct PC
     uint page_base;
     uint blcksz;        // (unused: pages are located through ptab)
     uint total_lps;     // line pointers of all pages (start of the value area is 4 + total_lps)
+#ifdef WITH_INNER
+    uint extra;         // join kernels: a fifth parameter (jgagg.slang: capacity of the overflow list)
+#endif
 };
 [[vk::push_constant]] ConstantBuffer<PC> kparam;
 

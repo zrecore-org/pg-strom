@@ -2174,6 +2174,17 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	pp_info->startup_cost = (pp_info->startup_cost +
 							 pp_info->inner_cost +
 							 pp_info->run_cost);
+	/*
+	 * The run cost of a GpuJoin contains the DMA receive of the joined rows (gpu_tuple_cost per
+	 * row); with the aggregation on the device they never leave it.
+	 */
+	if (pp_info->num_inner_rels > 0)
+	{
+		pp_info->startup_cost -= (pgstrom_gpu_tuple_cost * input_nrows /
+								  pp_info->parallel_divisor);
+		if (pp_info->startup_cost < 0.0)
+			pp_info->startup_cost = 0.0;
+	}
 	/* Cost estimation for grouping */
 	num_group_keys = list_length(parse->groupClause);
 	pp_info->startup_cost += (pgstrom_gpu_operator_cost *
@@ -2443,9 +2454,28 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	CustomPath *cpath;
 	double		num_groups = 1.0;
 
-	/* GpuPreAgg runs on top of a GpuScan only so far, not of a GpuJoin */
+	/*
+	 * GpuPreAgg on top of a GpuJoin: the join kernel aggregates the joined rows on the device
+	 * (jagg.slang / jgagg.slang). The service cannot do that for RIGHT and FULL joins, whose
+	 * unmatched inner rows are emitted by the backend after the scan, so those stay on
+	 * Aggregate (CPU) -> GpuJoin.
+	 */
 	if (input_path->custom_paths != NIL)
-		return;
+	{
+		for (int i=0; i < pp_input->num_inner_rels; i++)
+		{
+			JoinType	jtype = pp_input->inners[i].join_type;
+
+			if (jtype == JOIN_RIGHT || jtype == JOIN_FULL)
+			{
+				elog(DEBUG2, "GpuPreAgg: aggregation over a RIGHT/FULL join stays on the CPU");
+				return;
+			}
+		}
+	}
+	elog(DEBUG2, "GpuPreAgg: trying on top of %s (%d inner relations, parallel=%d)",
+		 pp_input->num_inner_rels > 0 ? "GpuJoin" : "GpuScan",
+		 pp_input->num_inner_rels, (int) be_parallel);
 	/* estimate number of groups */
 	if (parse->groupClause)
 	{
@@ -2505,6 +2535,8 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		return;
 	/* build GpuPreAgg path */
 	cpath = __buildXpuPreAggCustomPath(&con);
+	elog(DEBUG2, "GpuPreAgg: path built, startup %.2f total %.2f rows %.0f",
+		 cpath->path.startup_cost, cpath->path.total_cost, cpath->path.rows);
 
 	/* Agg(CPU) [+ Gather] + GpuPreAgg,
 	 * If CPU fallback may happen, because a part of results are kept in
