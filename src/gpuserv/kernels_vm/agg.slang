@@ -14,6 +14,9 @@
 //                         values, B = sum of the high 32 bits (sign-extended): the sum is
 //                         B * 2^32 + A, exact in 128 bits
 //   min, max: n = 1 if any value, A = the value
+// After the records, at word kparam.total_lps, one word per line pointer (ptab[2 * page + 1] is the number
+// of line pointers before the page): 2 if the row needs a string the kernel cannot read (compressed or
+// stored out of line), which the service hands to the backend; 0 otherwise.
 #include "scan_common.slang"
 
 #ifndef AGG_MAX
@@ -77,7 +80,11 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             bool hit = false;
 
             if (lp < nlp)
+            {
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+                if (g_recheck != 0)     // flag the row for the backend (kparam.total_lps: base of the flags)
+                    outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
+            }
             if (!hit)
                 continue;
             hits += 1;

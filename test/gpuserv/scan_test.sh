@@ -370,6 +370,8 @@ c=$(q "$CPU" "select a, c, f from a1 where b < 1000")
 g=$($PSQL -d scantest -c "$GPU select c / a from a1 where b < 0" 2>&1 | head -1)
 echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported on the GPU" $?
 
+. "${0%/*}/types_tests.inc"
+
 echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)

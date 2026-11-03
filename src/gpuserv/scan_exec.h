@@ -69,9 +69,21 @@ XpuCommand *scan_exec_task(scan_engine *eng,
  * Aggregation without GROUP BY: the session's running partial aggregates. Tasks add to it;
  * the reply to XpuTaskFinal is the one row of partial states.
  */
+/*
+ * Rows the GPU could not evaluate (a compressed or external string was needed): raw heap tuples
+ * the backend evaluates on the CPU. Returned as a KDS_FORMAT_RECHECK chunk.
+ */
+typedef struct recheck_buf
+{
+	unsigned char *buf;
+	size_t		len, cap;
+	uint32_t	nitems;
+} recheck_buf;
+
 struct group_table;
 typedef struct agg_state
 {
+	recheck_buf	rck;				/* rows for the backend, sent with the final reply */
 	struct group_table *groups;		/* GROUP BY: the groups of the session (NULL otherwise) */
 	int			nagg;
 	uint64_t	n[SCAN_AGG_MAX];		/* count, number of values, or "has a value" (min/max) */

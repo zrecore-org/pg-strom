@@ -25,6 +25,8 @@ typedef struct
 
 scan_func_class scan_vm_classify_func(uint32_t opcode);
 const char *scan_vm_opcode_name(uint32_t opcode);
+/* A6: see scan_caps.c. Returns SOP_LIKE_*, or -1 if the VM cannot match the pattern */
+int		scan_vm_like_shape(const unsigned char *pat, int plen, unsigned char *lit, int *p_litlen);
 /* true if the VM implements this function opcode */
 bool	scan_vm_func_supported(uint32_t opcode);
 

@@ -6,7 +6,9 @@
  *
  * Supported: bool, int1/2/4/8 and float4 values; comparison, +, -, *, /, % on them (with
  * PostgreSQL's overflow and zero-divide errors), casts between the integer types, unary
- * plus/minus, AND/OR/NOT with three-valued logic and IS [NOT] NULL. Anything else makes
+ * plus/minus, AND/OR/NOT with three-valued logic and IS [NOT] NULL; (A6) date, time, timestamp and
+ * timestamptz as integers with date arithmetic, and text/varchar/bpchar as string registers (equality,
+ * C-collation ordering, LIKE of a literal with % around it, length). Anything else makes
  * scan_prog_build() fail, and the query then reports that the service cannot run it.
  */
 #include <ctype.h>
@@ -44,6 +46,11 @@ typedef struct
 	int			slot_used[SCAN_MAX_REGS];
 	int			slot_vtype[SCAN_MAX_REGS];
 	int			slot_bytes[SCAN_MAX_REGS];
+	int			slot_strval[SCAN_MAX_REGS];	/* a string slot whose value (not only its NULL-ness) is read */
+	unsigned char *pool;			/* constant pool: string literals (header word 20 = its word offset) */
+	uint32_t	pool_len;
+	uint32_t	pool_cap;
+	int			no_strings;			/* a join program: strings are not supported */
 	char	   *err;
 	size_t		errlen;
 } builder;
@@ -104,10 +111,93 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		case TypeOpCode__int4:   *p_bytes = 4; return SOP_VT_INT;
 		case TypeOpCode__int8:   *p_bytes = 8; return SOP_VT_INT;
 		case TypeOpCode__float4: *p_bytes = 4; return SOP_VT_FLOAT4;
+		/* A6: dates and times are integers (days, microseconds) */
+		case TypeOpCode__date:        *p_bytes = 4; return SOP_VT_INT;
+		case TypeOpCode__time:
+		case TypeOpCode__timestamp:
+		case TypeOpCode__timestamptz: *p_bytes = 8; return SOP_VT_INT;
+		/* A6: strings are registers that point into a buffer */
+		case TypeOpCode__text:
+		case TypeOpCode__bpchar:      *p_bytes = 0; return SOP_VT_STR;
 		default:
 			break;
 	}
 	return 0;
+}
+
+/* where the payload of a plain (not compressed, not external) varlena is; 0 on failure */
+static int
+varlena_payload(const unsigned char *p, const unsigned char **p_data, uint32_t *p_len)
+{
+	if (p[0] & 1)
+	{
+		if (p[0] == 1)
+			return 0;			/* external */
+		*p_len = ((p[0] >> 1) & 0x7f) - 1;
+		*p_data = p + 1;
+		return 1;
+	}
+	if ((p[0] & 3) == 2)
+		return 0;				/* compressed */
+	{
+		uint32_t	h;
+
+		memcpy(&h, p, 4);
+		*p_len = ((h >> 2) & 0x3fffffffU) - 4;
+		*p_data = p + 4;
+		return 1;
+	}
+}
+
+/* add bytes to the constant pool; returns their offset, or -1 */
+static int64_t
+pool_add(builder *b, const unsigned char *data, uint32_t len)
+{
+	uint32_t	off = b->pool_len;
+
+	if (off + len + 4 > b->pool_cap)
+	{
+		uint32_t	ncap = (b->pool_cap ? b->pool_cap * 2 : 256);
+		unsigned char *np;
+
+		while (ncap < off + len + 4)
+			ncap *= 2;
+		np = realloc(b->pool, ncap);
+		if (!np)
+			return fail(b, "out of memory");
+		b->pool = np;
+		b->pool_cap = ncap;
+	}
+	memcpy(b->pool + off, data, len);
+	b->pool_len = (off + len + 3) & ~3U;		/* words */
+	memset(b->pool + off + len, 0, b->pool_len - off - len);
+	return off;
+}
+
+/* a string constant (a text datum) as a register */
+static int
+emit_conststr(builder *b, const unsigned char *datum, int isnull, int *next)
+{
+	int			dst;
+	const unsigned char *data = NULL;
+	uint32_t	len = 0;
+	int64_t		off = 0;
+
+	if (b->no_strings)
+		return fail(b, "strings are not supported in a join");
+	if (!isnull)
+	{
+		if (!varlena_payload(datum, &data, &len))
+			return fail(b, "a compressed or external string constant");
+		if ((off = pool_add(b, data, len)) < 0)
+			return -1;
+	}
+	dst = new_reg(b, next);
+	if (dst < 0)
+		return -1;
+	if (isnull)
+		return emit(b, SOP_CONST, dst, 1, 0, 0, 0) < 0 ? -1 : dst;
+	return emit(b, SOP_CONSTSTR, dst, 0, 0, (uint32_t) off, len) < 0 ? -1 : dst;
 }
 
 static int expr_to_reg(builder *b, const kern_expression *kexp, int *next);
@@ -121,6 +211,8 @@ emit_const(builder *b, const kern_expression *kexp, int *next)
 
 	if (!vt)
 		return fail(b, "constant of an unsupported type (opcode type %u)", kexp->exptype);
+	if (vt == SOP_VT_STR)
+		return emit_conststr(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (!kexp->u.c.const_isnull)
 	{
 		const unsigned char *p = (const unsigned char *) kexp->u.c.const_value;
@@ -176,6 +268,8 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 	if (id >= session->nparams)
 		return fail(b, "parameter %u does not exist", id);
 	off = session->poffset[id];
+	if (vt == SOP_VT_STR)
+		return emit_conststr(b, (const unsigned char *) session + off, off == 0, next);
 	if (off != 0)
 	{
 		const unsigned char *p = (const unsigned char *) session + off;
@@ -278,6 +372,12 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return fail(b, "variable slot %u is out of range", slot);
 			if (!reg_vtype(kexp->exptype, &bytes))
 				return fail(b, "variable of an unsupported type (opcode type %u)", kexp->exptype);
+			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR)
+			{
+				if (b->no_strings)
+					return fail(b, "strings are not supported in a join");
+				b->slot_strval[slot] = 1;
+			}
 			if (b->slot_resno[slot] > 0)
 				b->slot_used[slot] = 1;
 			else if (b->slot_iresno[slot] > 0)
@@ -307,7 +407,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 			kin = KEXP_FIRST_ARG(kexp);
 			if (op != SOP_NOT && kin->opcode == FuncOpCode__VarExpr &&
-				!reg_vtype(kin->exptype, &bytes))
+				(!reg_vtype(kin->exptype, &bytes) || reg_vtype(kin->exptype, &bytes) == SOP_VT_STR))
 			{
 				/* IS [NOT] NULL of a column of any type needs only its NULL-ness */
 				uint32_t	slot = kin->u.v.var_slot_id;
@@ -343,7 +443,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		return fail(b, "%s is not supported by the Vulkan GpuScan yet", scan_vm_opcode_name(kexp->opcode));
 
 	if (fc.cls == SOP_CAST || fc.cls == SOP_MOV || fc.cls == SOP_I2F || fc.cls == SOP_F2I ||
-		fc.cls == -SOP_ARITH)
+		fc.cls == -SOP_ARITH || fc.cls == SOP_D2TS || fc.cls == SOP_TS2D || fc.cls == SOP_STRLEN)
 	{
 		if (kexp->nr_args != 1)
 			return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
@@ -380,15 +480,89 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 	ra = expr_to_reg(b, karg, next);
 	if (ra < 0)
 		return -1;
+	if (fc.cls == SOP_STRLIKE)
+	{
+		/* the pattern is a literal with % around it: its literal goes to the constant pool */
+		const kern_expression *kpat = KEXP_NEXT_ARG(karg);
+		const unsigned char *pdatum;
+		const unsigned char *pdata;
+		uint32_t	plen;
+		unsigned char *lit;
+		int			litlen = 0, shape;
+
+		if (kpat->opcode == FuncOpCode__ConstExpr && !kpat->u.c.const_isnull)
+			pdatum = (const unsigned char *) kpat->u.c.const_value;
+		else if (kpat->opcode == FuncOpCode__ParamExpr && kpat->u.p.param_id < b->session->nparams &&
+				 b->session->poffset[kpat->u.p.param_id] != 0)
+			pdatum = (const unsigned char *) b->session + b->session->poffset[kpat->u.p.param_id];
+		else
+			return fail(b, "the pattern of LIKE is not a constant");
+		if (!varlena_payload(pdatum, &pdata, &plen))
+			return fail(b, "a compressed or external LIKE pattern");
+		lit = malloc(plen + 1);
+		if (!lit)
+			return fail(b, "out of memory");
+		shape = scan_vm_like_shape(pdata, (int) plen, lit, &litlen);
+		if (shape < 0)
+		{
+			free(lit);
+			return fail(b, "the LIKE pattern has a wildcard the Vulkan service cannot match");
+		}
+		{
+			int64_t		off = pool_add(b, lit, (uint32_t) litlen);
+
+			free(lit);
+			if (off < 0)
+				return -1;
+			rb = new_reg(b, next);
+			if (rb < 0 || emit(b, SOP_CONSTSTR, rb, 0, 0, (uint32_t) off, (uint32_t) litlen) < 0)
+				return -1;
+		}
+		*next = mark;
+		dst = new_reg(b, next);
+		if (dst < 0 ||
+			emit(b, SOP_STRLIKE, dst, ra, rb,
+				 shape | (fc.kind ? 0x100 : 0) | (fc.width ? 0x200 : 0), kexp->opcode) < 0)
+			return -1;
+		return dst;
+	}
 	rb = expr_to_reg(b, KEXP_NEXT_ARG(karg), next);
 	if (rb < 0)
 		return -1;
+	if (fc.cls == SOP_CMPI && fc.width != 0)
+	{
+		/* date <op> timestamp: compare as timestamps; the date side is converted */
+		int			t = new_reg(b, next);
+		int			ds = (fc.width == 1 ? ra : rb);
+
+		if (t < 0 || emit(b, SOP_D2TS, t, ds, 0, 0, kexp->opcode) < 0)
+			return -1;
+		if (fc.width == 1)
+			ra = t;
+		else
+			rb = t;
+	}
+	if (fc.cls == SOP_DATEOP && fc.width == 1)
+	{
+		int			t = ra;			/* integer_pl_date(int4, date): date first */
+
+		ra = rb;
+		rb = t;
+	}
 	*next = mark;
 	dst = new_reg(b, next);
 	if (dst < 0)
 		return -1;
 	switch (fc.cls)
 	{
+		case SOP_DATEOP:
+			if (emit(b, SOP_DATEOP, dst, ra, rb, fc.kind, kexp->opcode) < 0)
+				return -1;
+			break;
+		case SOP_STRCMP:
+			if (emit(b, SOP_STRCMP, dst, ra, rb, fc.kind, fc.width) < 0)
+				return -1;
+			break;
 		case SOP_CMPI:
 		case SOP_CMPF:
 			if (emit(b, fc.cls, dst, ra, rb, fc.kind, 0) < 0)
@@ -796,7 +970,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					int		bytes, r;
 					int		nx = perm;
 
-					if (!reg_vtype(ksave->exptype, &bytes))
+					if (!reg_vtype(ksave->exptype, &bytes) || reg_vtype(ksave->exptype, &bytes) == SOP_VT_STR)
 					{
 						fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
 						goto error;
@@ -833,7 +1007,17 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
 			b.slot_bytes[s] = bytes;
-			if (!b.slot_vtype[s] && b.slot_nullonly[s])
+			if (b.slot_vtype[s] == SOP_VT_STR && !b.slot_strval[s])
+				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* only IS [NOT] NULL reads it */
+			else if (b.slot_vtype[s] == SOP_VT_STR)
+			{
+				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
+				{
+					fail(&b, "column %d does not have the type the expression expects", b.slot_resno[s]);
+					goto error;
+				}
+			}
+			else if (!b.slot_vtype[s] && b.slot_nullonly[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_vtype[s] || kds_src->colmeta[b.slot_resno[s] - 1].attlen != bytes ||
 				!kds_src->colmeta[b.slot_resno[s] - 1].attbyval)
@@ -846,7 +1030,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		}
 	}
 
-	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;
+	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys + b.pool_len / 4;
 	w = calloc(nwords, sizeof(uint32_t));
 	if (!w)
 	{
@@ -867,6 +1051,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	w[11] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp;	/* aggoff */
 	w[12] = nkeys;
 	w[13] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;	/* keyoff */
+	w[20] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;	/* constant pool (strings) */
 	for (int c = 0; c < ncols; c++)
 	{
 		const kern_colmeta *cm = &kds_src->colmeta[c];
@@ -885,6 +1070,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp, agg_tab, sizeof(uint32_t) * 4 * nagg);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg, key_reg_tab, sizeof(uint32_t) * nkeys);
+	if (b.pool_len > 0)
+		memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + nkeys, b.pool, b.pool_len);
 
 	prog->words = w;
 	prog->nwords = nwords;
@@ -892,11 +1079,13 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
 	prog->max_src_resno = max_src;
 	free(b.insn);
+	free(b.pool);
 	free(comp_regs);
 	return 0;
 
 error:
 	free(b.insn);
+	free(b.pool);
 	free(comp_regs);
 	scan_prog_free(prog);
 	if (err[0] == '\0')
@@ -973,6 +1162,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	b.err = err;
 	b.errlen = errlen;
 	b.nslots = session->kcxt_kvars_nslots;
+	b.no_strings = 1;
 
 	if ((session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__JOIN)
 	{
@@ -1154,7 +1344,9 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		if (b.slot_used[s])
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (!b.slot_vtype[s] && b.slot_nullonly[s])
+			if (b.slot_vtype[s] == SOP_VT_STR)		/* join programs read the NULL-ness of strings only */
+				b.slot_vtype[s] = SOP_VT_NULLONLY;
+			else if (!b.slot_vtype[s] && b.slot_nullonly[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_vtype[s] || kds_src->colmeta[b.slot_resno[s] - 1].attlen != bytes ||
 					 !kds_src->colmeta[b.slot_resno[s] - 1].attbyval)
@@ -1170,7 +1362,9 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
 
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (!b.slot_ivtype[s] && b.slot_nullonly[s])
+			if (b.slot_ivtype[s] == SOP_VT_STR)
+				b.slot_ivtype[s] = SOP_VT_NULLONLY;
+			else if (!b.slot_ivtype[s] && b.slot_nullonly[s])
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_ivtype[s] || kds_in->colmeta[b.slot_iresno[s] - 1].attlen != bytes ||
 					 !kds_in->colmeta[b.slot_iresno[s] - 1].attbyval)

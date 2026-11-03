@@ -970,6 +970,7 @@ extern void		pgstrom_init_gpu_cache(void);
  * fallback.c
  */
 extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
+extern void		execCpuRecheckOneChunk(pgstromTaskState *pts);
 extern void		execCpuFallbackBaseTuple(pgstromTaskState *pts,
 										 HeapTuple base_tuple);
 extern void		execCpuFallbackOneChunk(pgstromTaskState *pts);

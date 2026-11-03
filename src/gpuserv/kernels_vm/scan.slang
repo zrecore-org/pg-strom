@@ -38,7 +38,7 @@ void scan_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
         if (lp < nlp)
         {
-            outb[4 + lp_base + lp] = hit ? 1u : 0u;
+            outb[4 + lp_base + lp] = hit ? 1u : (g_recheck != 0 ? 2u : 0u);   // 2: the backend must evaluate the row
             if (hit)
             {
                 uint vb = val_base + (lp_base + lp) * (3 * ncomp);

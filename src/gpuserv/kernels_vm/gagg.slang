@@ -239,7 +239,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             st_slot[tid] = slot;
             if (lp < nlp)
-                outb[flags_base + lp_base + lp] = (hit && slot == NO_SLOT) ? 1u : 0u;
+                outb[flags_base + lp_base + lp] = (hit && slot == NO_SLOT) ? 1u : (g_recheck != 0 ? 2u : 0u);   // 2: the backend evaluates the row
             GroupMemoryBarrierWithGroupSync();
 
             // C: this row's values into its slot, and fresh slots turn committed

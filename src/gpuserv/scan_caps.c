@@ -76,6 +76,166 @@ arith_kind_of(const char *s)
 	return -1;
 }
 
+/* ----------------------------------------------------------------
+ * A6: temporal types and strings
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * date_eq, time_lt, timestamp_ge, timestamptz_ne: plain integer comparison of the stored values
+ * (days / microseconds; infinity is INT_MAX/INT_MIN, so the order is the integers' order).
+ * date_lt_timestamp and timestamp_lt_date compare after converting the date to a timestamp (width 1:
+ * the left side is the date, 2: the right side), which is exact; the comparisons that involve a
+ * timestamptz and a date or a timestamp depend on the session time zone and are not implemented.
+ * date_pli, date_mii, integer_pl_date, date_mi: date arithmetic. date_to_timestamp, timestamp_date.
+ */
+static scan_func_class
+classify_temporal(const char *name)
+{
+	scan_func_class fc = {0, 0, 0};
+	static const char *const tnames[] = {"timestamptz", "timestamp", "date", "time"};
+	int			k;
+
+	if (!strcmp(name, "date_pli"))
+		{ fc.cls = SOP_DATEOP; fc.kind = SOP_DATEOP_PLI; return fc; }
+	if (!strcmp(name, "date_mii"))
+		{ fc.cls = SOP_DATEOP; fc.kind = SOP_DATEOP_MII; return fc; }
+	if (!strcmp(name, "date_mi"))
+		{ fc.cls = SOP_DATEOP; fc.kind = SOP_DATEOP_MI; return fc; }
+	if (!strcmp(name, "integer_pl_date"))
+		{ fc.cls = SOP_DATEOP; fc.kind = SOP_DATEOP_PLI; fc.width = 1; return fc; }	/* arguments swapped */
+	if (!strcmp(name, "date_to_timestamp"))
+		{ fc.cls = SOP_D2TS; fc.width = 1; return fc; }		/* the cast: out of range is an error */
+	if (!strcmp(name, "timestamp_date"))
+		{ fc.cls = SOP_TS2D; return fc; }
+	for (size_t i = 0; i < sizeof(tnames) / sizeof(tnames[0]); i++)
+	{
+		size_t		n = strlen(tnames[i]);
+		const char *rest;
+
+		if (strncmp(name, tnames[i], n) != 0 || name[n] != '_')
+			continue;
+		rest = name + n + 1;
+		if ((k = cmp_kind_of(rest)) >= 0)
+		{
+			fc.cls = SOP_CMPI;
+			fc.kind = k;
+			return fc;
+		}
+		/* date <op> timestamp, timestamp <op> date */
+		if (!strcmp(tnames[i], "date") || !strcmp(tnames[i], "timestamp"))
+		{
+			int			left_is_date = !strcmp(tnames[i], "date");
+			const char *other = (left_is_date ? "timestamp" : "date");
+			char		op[3];
+
+			if (strlen(rest) > 3 && rest[2] == '_' && strcmp(rest + 3, other) == 0)
+			{
+				memcpy(op, rest, 2);
+				op[2] = '\0';
+				if ((k = cmp_kind_of(op)) >= 0)
+				{
+					fc.cls = SOP_CMPI;
+					fc.kind = k;
+					fc.width = (left_is_date ? 1 : 2);		/* which side is the date */
+					return fc;
+				}
+			}
+		}
+		break;
+	}
+	return fc;
+}
+
+/* text_eq, bpcharne, text_lt (C collation only: the planner checks), textlen, textlike ... */
+static scan_func_class
+classify_string(const char *name)
+{
+	scan_func_class fc = {0, 0, 0};
+	int			k;
+
+	if (!strncmp(name, "bpchar", 6))
+	{
+		const char *rest = name + 6;
+
+		if ((k = cmp_kind_of(rest)) >= 0)
+		{
+			fc.cls = SOP_STRCMP; fc.kind = k; fc.width = 1;
+		}
+		else if (!strcmp(rest, "like") || !strcmp(rest, "nlike"))
+		{
+			fc.cls = SOP_STRLIKE; fc.kind = (rest[0] == 'n'); fc.width = 1;
+		}
+		return fc;
+	}
+	if (!strncmp(name, "text_", 5) && (k = cmp_kind_of(name + 5)) >= 0)
+	{
+		fc.cls = SOP_STRCMP; fc.kind = k;
+	}
+	else if (!strcmp(name, "like") || !strcmp(name, "textlike"))
+	{
+		fc.cls = SOP_STRLIKE; fc.kind = 0;
+	}
+	else if (!strcmp(name, "notlike") || !strcmp(name, "textnlike"))
+	{
+		fc.cls = SOP_STRLIKE; fc.kind = 1;
+	}
+	else if (!strcmp(name, "textlen"))
+	{
+		fc.cls = SOP_STRLEN;
+		fc.width = 1;				/* characters of a UTF-8 string (the planner allows it for UTF8 only) */
+	}
+	return fc;
+}
+
+/*
+ * The shape of a LIKE pattern the VM can match bytewise: a literal, optionally with % before and
+ * after it (the backslash escapes a character). The unescaped literal is stored in lit (at least
+ * plen bytes). Returns SOP_LIKE_*, or -1 if the pattern has '_' or an inner '%'.
+ */
+int
+scan_vm_like_shape(const unsigned char *pat, int plen, unsigned char *lit, int *p_litlen)
+{
+	int			i = 0, n = 0, lead = 0, trail = 0;
+
+	while (i < plen && pat[i] == '%')
+	{
+		lead = 1;
+		i++;
+	}
+	while (i < plen)
+	{
+		unsigned char c = pat[i];
+
+		if (c == '\\')
+		{
+			if (++i >= plen)
+				return -1;			/* PostgreSQL raises an error */
+			lit[n++] = pat[i++];
+		}
+		else if (c == '%')
+			break;
+		else if (c == '_')
+			return -1;
+		else
+		{
+			lit[n++] = c;
+			i++;
+		}
+	}
+	while (i < plen && pat[i] == '%')
+	{
+		trail = 1;
+		i++;
+	}
+	if (i < plen)
+		return -1;					/* a % between literals */
+	*p_litlen = n;
+	if (!lead)
+		return trail ? SOP_LIKE_PREFIX : SOP_LIKE_EXACT;
+	return trail ? SOP_LIKE_CONTAINS : SOP_LIKE_SUFFIX;
+}
+
 /* "int4lt", "int48pl", "float4mul", "int4_to_int8", "booleq", "int4um" ... */
 scan_func_class
 scan_vm_classify_func(uint32_t opcode)
@@ -85,6 +245,10 @@ scan_vm_classify_func(uint32_t opcode)
 	int			w1, w2, k;
 
 	if (!name)
+		return fc;
+	if ((fc = classify_temporal(name)).cls != 0)
+		return fc;
+	if ((fc = classify_string(name)).cls != 0)
 		return fc;
 	if (!strcmp(name, "booleq")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_EQ; return fc; }
 	if (!strcmp(name, "boolne")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_NE; return fc; }
@@ -206,6 +370,11 @@ scan_vm_groupkey_type_supported(int type_code)
 		case TypeOpCode__int2:
 		case TypeOpCode__int4:
 		case TypeOpCode__int8:
+		/* A6: dates and times are integers; their device hash and equality are those of int4 / int8 */
+		case TypeOpCode__date:
+		case TypeOpCode__time:
+		case TypeOpCode__timestamp:
+		case TypeOpCode__timestamptz:
 			return true;
 		default:
 			break;

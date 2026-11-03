@@ -744,6 +744,10 @@ typedef struct kern_colmeta		kern_colmeta;
 #define KDS_FORMAT_ARROW		'a'		/* apache arrow format */
 #define KDS_FORMAT_PARQUET		'p'		/* apache parquet format */
 #define KDS_FORMAT_FALLBACK		'f'		/* CPU-fallback buffer */
+#define KDS_FORMAT_RECHECK		'k'		/* Vulkan service: raw base tuples the GPU could not evaluate
+										 * (compressed or external strings); the backend evaluates them
+										 * on the CPU (execCpuFallbackBaseTuple). Items: kern_recheckitem
+										 * from the end of the header, each MAXALIGN'ed. */
 
 struct kern_data_store {
 	uint64_t		length;		/* length of this data-store */
@@ -1311,6 +1315,21 @@ struct kern_fallbackitem
 	kern_tupitem	t	__MAXALIGNED__;
 };
 typedef struct kern_fallbackitem	kern_fallbackitem;
+
+/*
+ * kern_recheckitem - individual items for KDS_FORMAT_RECHECK: a heap tuple of the base relation
+ * (HeapTupleHeaderData follows at t_data) and where it came from
+ */
+struct kern_recheckitem
+{
+	uint32_t		t_len;		/* length of the heap tuple */
+	uint32_t		blkno;		/* block number of the tuple */
+	uint16_t		offnum;		/* line pointer number (1 ...) */
+	uint16_t		__pad1;
+	uint32_t		__pad2;
+	char			t_data[1]	__MAXALIGNED__;
+};
+typedef struct kern_recheckitem		kern_recheckitem;
 
 /* Length of the header postion of kern_data_store */
 INLINE_FUNCTION(size_t)

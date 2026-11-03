@@ -1838,6 +1838,58 @@ codegen_var_expression(codegen_context *context,
 	return __codegen_kvdef_expression(context, buf, kvdef, curr_depth);
 }
 
+/*
+ * Vulkan service: when may a text function run on the GPU? Equality compares bytes, which is what
+ * the database does for every deterministic collation; the ordering operators are LOCALE_AWARE and
+ * need the C collation (checked by the function lookup). LIKE is limited to a constant pattern that is
+ * a literal with % around it (bytewise search is exact for UTF-8 and single-byte encodings), and
+ * length() to UTF-8. Join programs read no strings. A value that is compressed or stored out of
+ * line is handed back to the backend at run time (KDS_FORMAT_RECHECK).
+ */
+static bool
+vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
+						 List *func_args, Oid func_collid)
+{
+	scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
+
+	if (fc.cls != SOP_STRCMP && fc.cls != SOP_STRLIKE && fc.cls != SOP_STRLEN)
+		return true;
+	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+		return false;
+	if (!OidIsValid(func_collid) || !get_collation_isdeterministic(func_collid))
+		return false;
+	if (fc.cls == SOP_STRLEN)
+		return (GetDatabaseEncoding() == PG_UTF8);
+	if (fc.cls == SOP_STRLIKE)
+	{
+		Node	   *pat;
+		Const	   *con;
+		struct varlena *vl;
+		unsigned char *lit;
+		int			litlen, shape;
+
+		if (GetDatabaseEncoding() != PG_UTF8 && pg_database_encoding_max_length() != 1)
+			return false;
+		if (list_length(func_args) != 2)
+			return false;
+		pat = (Node *) lsecond(func_args);
+		if (!IsA(pat, Const))
+			return false;
+		con = (Const *) pat;
+		if (con->constisnull)
+			return false;
+		vl = (struct varlena *) DatumGetPointer(con->constvalue);
+		if (VARATT_IS_EXTERNAL(vl) || VARATT_IS_COMPRESSED(vl))
+			return false;
+		lit = palloc(VARSIZE_ANY_EXHDR(vl) + 1);
+		shape = scan_vm_like_shape((const unsigned char *) VARDATA_ANY(vl),
+								   (int) VARSIZE_ANY_EXHDR(vl), lit, &litlen);
+		pfree(lit);
+		return (shape >= 0);
+	}
+	return true;
+}
+
 static int
 __codegen_func_expression(codegen_context *context,
 						  StringInfo buf,
@@ -1860,7 +1912,8 @@ __codegen_func_expression(codegen_context *context,
 		__Ereport("function %s is not supported on the target device",
 				  format_procedure(func_oid));
 	/* only what the Vulkan service's VM implements (scan_caps.c) is pushed down */
-	if (!scan_vm_func_supported(dfunc->func_code))
+	if (!scan_vm_func_supported(dfunc->func_code) ||
+		!vulkan_text_func_allowed(context, dfunc, func_args, func_collid))
 		__Ereport("function %s is not supported by the Vulkan service",
 				  format_procedure(func_oid));
 	dtype = dfunc->func_rettype;

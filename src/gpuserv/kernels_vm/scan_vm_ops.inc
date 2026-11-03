@@ -19,6 +19,22 @@
  *   HASHFIN  dst ^= 0xffffffff   (the hash of a join key, bit-identical to PostgreSQL's hash_any)
  *   I2F      dst = (float4) a;  F2I  dst = rint(a) as an integer of k0 bits (range checked, error id k1)
  *
+ *   D2TS     dst = timestamp of the date a (k0 = 0: saturating, for comparisons; k0 = 1: the ::timestamp cast,
+ *            error id k1 when out of range)
+ *   TS2D     dst = date of the timestamp a (floor of the days; infinities map to the date infinities)
+ *   DATEOP   dst = date arithmetic of a and b; k0 = SCANVM_DATEOP_*, error id k1
+ *
+ * Strings (A6): a text/varchar/bpchar register holds { byte offset | length << 32 | source << 60 } of the
+ * varlena payload, the source being the buffer it lives in (0: heap pages of the file, 1: pages the backend
+ * loaded, 2: the join inner buffer, 3: the program's constant pool). A value that is compressed or stored
+ * out of line (TOAST) cannot be read: the row is marked for re-evaluation by the backend.
+ *
+ *   CONSTSTR dst = constant string; k0 = byte offset in the pool (words from header word 20), k1 = length
+ *   STRCMP   dst = cmp(a, b) as a string comparison (bytewise); k0 = SCANVM_CMP_*, k1 = 1: bpchar (trailing blanks
+ *            do not count)
+ *   STRLIKE  dst = a matches the literal b; k0 = SCANVM_LIKE_* | negate << 8 | bpchar << 9
+ *   STRLEN   dst = number of characters of a (UTF-8; k0 = 1) or bytes (k0 = 0)
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -38,11 +54,30 @@ SCANVM_OP(F2I,      14)
 SCANVM_OP(HASHINIT, 15)
 SCANVM_OP(HASHMERGE,16)
 SCANVM_OP(HASHFIN,  17)
+SCANVM_OP(D2TS,     40)
+SCANVM_OP(TS2D,     41)
+SCANVM_OP(DATEOP,   42)
+SCANVM_OP(CONSTSTR, 60)
+SCANVM_OP(STRCMP,   61)
+SCANVM_OP(STRLIKE,  62)
+SCANVM_OP(STRLEN,   63)
 /* reasons of an error */
 SCANVM_OP(ERR_ZERODIV,  1)
 SCANVM_OP(ERR_INTRANGE, 2)
 SCANVM_OP(ERR_FLTOVER,  3)
 SCANVM_OP(ERR_FLTUNDER, 4)
+SCANVM_OP(ERR_DATERANGE, 20)    /* date out of range */
+SCANVM_OP(ERR_TSRANGE,   21)    /* date out of range for timestamp */
+SCANVM_OP(ERR_INFSUB,    22)    /* cannot subtract infinite dates */
+/* date arithmetic kinds */
+SCANVM_OP(DATEOP_PLI, 0)        /* date + int4 */
+SCANVM_OP(DATEOP_MII, 1)        /* date - int4 */
+SCANVM_OP(DATEOP_MI,  2)        /* date - date -> int4 */
+/* LIKE shapes of a pattern that is a literal with optional leading/trailing % */
+SCANVM_OP(LIKE_EXACT,    0)
+SCANVM_OP(LIKE_PREFIX,   1)
+SCANVM_OP(LIKE_SUFFIX,   2)
+SCANVM_OP(LIKE_CONTAINS, 3)
 /* comparison kinds */
 SCANVM_OP(CMP_EQ,   0)
 SCANVM_OP(CMP_NE,   1)
@@ -61,3 +96,4 @@ SCANVM_OP(VT_BOOL,  1)
 SCANVM_OP(VT_INT,   2)
 SCANVM_OP(VT_FLOAT4,3)
 SCANVM_OP(VT_NULLONLY,4)   /* any type: only NULL-ness is loaded (IS [NOT] NULL) */
+SCANVM_OP(VT_STR,   5)     /* text/varchar/bpchar: a string register (see above) */
