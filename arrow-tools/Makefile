@@ -32,6 +32,10 @@ CFLAGS = -O2 -fPIC -g -Wall -I. -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 \
 ifeq ($(HAS_PG_CONFIG),yes)
 CFLAGS += -I $(shell $(PG_CONFIG) --includedir)
 endif
+# macOS: <endian.h>, loff_t and basename() come from compat/endian.h
+ifeq ($(shell uname -s),Darwin)
+CFLAGS += -I$(CURDIR)/compat
+endif
 ifeq ($(DEBUG),1)
 CFLAGS += -g -O0
 endif

@@ -4,6 +4,7 @@
 # shared, so checkouts working in parallel (worktrees) queue here.
 #
 #   sh test/gpuserv/locked_test.sh <tree> [scan_test.sh|service_test.sh]      (env of the test passes through)
+#   sh test/gpuserv/locked_test.sh <tree> test/vulkan_installcheck.sh          (a path relative to <tree> also works)
 #
 # <tree> is the repository (or worktree) root. The lock is the directory /tmp/pgstrom_test.lock; a lock
 # whose owner process is gone is taken over.
@@ -28,4 +29,5 @@ if ! make -C "$TREE/src" PG_CONFIG="$PG_CONFIG" -j8 install >"$BLOG" 2>&1; then
 fi
 rm -f /tmp/locked_test_build.$$.log
 PKGLIB=$("$PG_CONFIG" --pkglibdir)
-GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} sh "$TREE/test/gpuserv/$TEST"
+case "$TEST" in */*) SCRIPT=$TREE/$TEST;; *) SCRIPT=$TREE/test/gpuserv/$TEST;; esac
+GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} sh "$SCRIPT"

@@ -1,0 +1,30 @@
+# ----------
+# The tests that must pass on the Vulkan build (branch vulkan-gpu):
+#   make -C test PG_CONFIG=... vulkan-installcheck      (or: sh test/vulkan_installcheck.sh)
+#
+# This is parallel_schedule minus the tests in pending_schedule. Where the plan text differs from the CUDA
+# era expected output, <test>_9.out holds the output of this build; vulkan_regen_expected.sh writes them
+# only after checking the result rows against the same test run with pg_strom.enabled forced off.
+# ----------
+
+# dataset (loaded by "make vulkan-initdb" beforehand) and default GUC settings
+test: pgstrom_init
+test: pgstrom_guc
+
+# data types
+test: dtype_int dtype_float dtype_time dtype_text dtype_jsonb additional_dtype
+
+# functions / expressions
+test: dfunc_math dfunc_mbtext dexpr_scalar_array_op dexpr_misc dexpr_hashed_array_op
+
+# arrow_fdw (pg2arrow / arrow2csv from arrow-tools)
+test: arrow_cpu arrow_utils arrow_python_data arrow_index
+
+# fallback test (the Vulkan build has no CPU fallback; the results must still equal PostgreSQL's)
+test: fallback_pgsql
+
+# partition-wise
+test: partition
+
+# misc
+test: misc

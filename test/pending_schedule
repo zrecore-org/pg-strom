@@ -1,0 +1,28 @@
+# ----------
+# Tests that cannot pass on the Vulkan build yet. Not run by vulkan-installcheck;
+#   make -C test PG_CONFIG=... pending-installcheck
+# runs the active ones, to see what a milestone fixed (move a test to vulkan_schedule when it passes).
+# One line of reason each; details in vulkan_known_failures.txt.
+# ----------
+
+# GPU-Sort (A7): the plan has "GPU-Sort keys" / "Window-Rank Filter" under GpuPreAgg; the Vulkan build
+# sorts on the CPU, and the test's \t output (no QUERY PLAN header) cannot be compared by plan text alone.
+test: gpu_sort
+
+# dtype_numeric: numeric arithmetic on the GPU returns wrong values (x * z with a 10-digit and a 3-digit fraction:
+# 826563.6313334870 * 467842.677 gives 801302.3189363433294 instead of 386701741993.8996378246990); see
+# vulkan_known_failures.txt for the reproducer. Move it back (and run vulkan_regen_expected.sh) once fixed.
+test: dtype_numeric
+
+# conv_text_inet needs test/data/ip_mixed_with_masks_10k.tsv, which is not in the repository: every \copy fails and
+# the queries run on an empty table (a pass would mean nothing). Add the file, then move it to vulkan_schedule.
+test: conv_text_inet
+
+# Not scheduled in parallel_schedule, listed so that every test file has a status:
+#
+# gpu_cache      GPU-Cache (A7): the cache functions are stubs on this branch.
+# parquet_cache  Parquet cache (A5/A7): parquet_cache.c is a stub.
+# postgis        PostGIS GiST index on the GPU (A4/A8): not ported, and needs the postgis extension.
+# dtype_range    Range types: no expected file for any PostgreSQL version in this tree.
+# distinct       GpuPreAgg over DISTINCT (A3/A4); was commented out in parallel_schedule.
+# ssbm-11 .. ssbm-43   Star-schema queries (GpuJoin, A4); no expected files, were commented out upstream.

@@ -23,7 +23,7 @@ make -C src/gpuserv                                                          # t
 - `PGSTROM_DEBUG=1`: `-g -O0 -DPGSTROM_DEBUG_BUILD`. `PGSTROM_FLAGS_CUSTOM`: extra host flags.
 - `libarrow` and `libparquet` are required (`brew install apache-arrow pkgconf` on macOS); `libnuma` is optional. Host C++ uses C++20. GNU make 3.81 and the macOS `sh` are supported (no `echo -n`, `\#` inside `$(shell)`).
 - The extension must be loaded at postmaster start: `shared_preload_libraries = 'pg_strom'`. The postmaster probes the Vulkan devices by running `pgstrom-gpuserv --probe`, and a launcher background worker runs and restarts the service (`pg_strom.gpuserv_path`, `pg_strom.gpu_allow_cpu_device`, `pg_strom.gpu_visible_devices`).
-- `arrow-tools/` (`pg2arrow`, ...) does not build on macOS yet.
+- `arrow-tools/` (`pg2arrow`, `arrow2csv`) build on macOS (`make -C arrow-tools PG_CONFIG=... pg2arrow arrow2csv`, `compat/endian.h`); `tsv2arrow` / `vcf2arrow` were not tried.
 
 ## Tests
 
@@ -35,7 +35,16 @@ make -C test/port && test/port/port_test                                    # po
 
 `sh test/gpuserv/locked_test.sh <tree> [scan_test.sh|service_test.sh]` installs a checkout and runs a test while holding a global lock (the installed `$libdir/pg_strom` is shared, so parallel worktrees must queue). Both shell tests build a throwaway cluster and need the module and service installed (`make install` above). `ALLOW_CPU=on` runs them on lavapipe (Linux). `PGSTROM_GPUSERV_TRACE=1` in the postmaster's environment makes the service log each session's xpucode and per-task timings; `PGSTROM_GPUSERV_NO_MAP=1` disables the zero-copy file mapping.
 
-The upstream regression suite is PGXS `installcheck` from `test/` (`make -C test PG_CONFIG=... installcheck`; schedule `test/parallel_schedule`, expected output per PG major version in `test/<15..19>/expected/`, database `contrib_regression_pg_strom`, dataset revision in `test/Makefile`). **On this branch most of it does not pass yet**: the expected files assert CUDA-era plan shapes (for example float8 expressions on the GPU) and cover join, aggregate and sort. The result rows of the scan-only tests match; the `EXPLAIN` text does not. Run a single test by invoking `pg_regress` directly with the options of `test/Makefile` (`--use-existing`) and a schedule file.
+The upstream regression suite (PGXS `pg_regress` from `test/`, database `contrib_regression_pg_strom`, dataset revision in `test/Makefile`) has a Vulkan subset. `test/vulkan_schedule` (20 tests) must pass, `test/pending_schedule` holds what cannot yet (`gpu_sort`, `conv_text_inet`, `dtype_numeric` because GPU numeric multiply is wrong; every other test file is listed there with a reason), and `test/vulkan_known_failures.txt` explains each difference from upstream's expected output. Run it against a throwaway cluster that keeps its 2 GB dataset between runs (about 3 minutes, plus about 20 seconds for the first dataset load; needs the module installed, so under the shared test lock):
+
+```
+sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_installcheck.sh                        # vulkan_schedule: expect "All 20 tests passed"
+TARGET=pending-installcheck sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_installcheck.sh   # pending_schedule (fails by design)
+sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_regen_expected.sh                      # regenerate the PG17 alternate expected files
+make -C test PG_CONFIG=... vulkan-installcheck                                           # the same against a running server (PGHOST/PGPORT)
+```
+
+`pg_regress` accepts `<test>.out` and `<test>_0..9.out`: `<test>_9.out` is this branch's (plan text differs because float8, numeric, text, jsonb and joins are not on the GPU yet); `vulkan_regen_expected.sh` writes it only after the output without its `EXPLAIN` blocks equals the same test run with `pg_strom.enabled` forced off (`make vulkan-oracle`), and reports a `ROW DIFF` otherwise. Only PostgreSQL 17 has `_9` files: on a host with 15, 16, 18 or 19 run the regen script with `PGBIN` pointing at that server (until then `vulkan-installcheck` means something on 17 only). The order of parallel-append children in `partition` can flip with the random ANALYZE sample (it did once on the earlier tree): if so, keep the flipped output as `partition_8.out` too. `arrow-tools` (`pg2arrow`, `arrow2csv`) now build on macOS and the Arrow tests need them. Run a single test with `make -C test ... installcheck REGRESS=--schedule=<file>` (a schedule file with one `test:` line) or invoke `pg_regress` directly with the options of `test/Makefile` (`--use-existing`).
 
 ## Architecture
 

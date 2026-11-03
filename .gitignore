@@ -10,3 +10,7 @@ src/githash.c
 src/gpu_devattrs.h
 test/ssbm/dbgen-ssbm
 test/port/port_test
+arrow-tools/pg2arrow
+arrow-tools/arrow2csv
+arrow-tools/tsv2arrow
+arrow-tools/vcf2arrow
