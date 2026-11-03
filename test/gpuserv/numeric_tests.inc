@@ -59,7 +59,7 @@ for t in nm1 nm2; do
 	run $t "n4 compare" "select i, n4 from %T where n4 > 100 or n4 = 0 or n4 < -50"
 	run_any $t "n4 compare with NaN and Infinity constants (not representable: CPU)" "select i, n4 from %T where n4 = 'NaN' or n4 > 'Infinity' or n4 < '-Infinity' or n4 = 'Infinity'"
 	run $t "dscale 70 (long header format) and its product (dscale 140)" "select i, n4 * 2, n4 * n4, n4 + n4, -n4 from %T where i % 12 = 10"
-	run $t "trailing zeros and scale of zero" "select i, n4, n4 + 0.1, n4 * 1.00 from %T where i % 12 in (6, 8)"
+	run $t "trailing zeros and scale of zero" "select i, n4, n4 + 0.1, n4 * 1.00 from %T where i % 12 = 6 or i % 12 = 8"
 	run $t "result scale: max of the two for sums, sum for products" "select n1 + n3, n1 - n2, n1 * n3, n3 * n3 from %T where i % 31 = 0"
 	echo "  -- casts"
 	run $t "numeric -> int4, rounding half away from zero" "select i, n1, n1::int4, (-n1)::int4 from %T where n1 between -100 and 100 and i % 3 = 0"

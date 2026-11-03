@@ -223,10 +223,14 @@ int str_memcmp(uint sa, uint oa, uint sb, uint ob, uint n)
 // Everything that does not fit (NaN, Infinity, more than 18-19 digits, an overflowing intermediate
 // result) makes the instruction return SOP_RECHECK_CODE: the backend evaluates the row.
 // ---------------------------------------------------------------------------------------------
-static const int64_t NUM_P10[19] = {
-    1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
-    10000000000, 100000000000, 1000000000000, 10000000000000, 100000000000000,
-    1000000000000000, 10000000000000000, 100000000000000000, 1000000000000000000 };
+// 10^d for d <= 18 (a computed loop: a constant int64 array does not survive MoltenVK/Metal)
+int64_t num_p10(uint d)
+{
+    int64_t p = 1;
+    for (uint i = 0; i < d; i++)
+        p = p * 10;
+    return p;
+}
 static const int64_t NUM_MAX = 9223372036854775807;
 
 // v = v * 10^d; false on overflow
@@ -236,7 +240,7 @@ bool num_up(inout int64_t v, uint d)
         return true;
     if (d > 18u)
         return false;
-    int64_t p = NUM_P10[d];
+    int64_t p = num_p10(d);
     int64_t lim = NUM_MAX / p;
     if (v > lim || v < -lim)
         return false;
@@ -299,7 +303,7 @@ bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
             uint m = uint(-e);
             if (m > 18u)
                 return false;
-            int64_t p = NUM_P10[m];
+            int64_t p = num_p10(m);
             if (acc % p != 0)
                 return false;
             acc = acc / p;
@@ -434,7 +438,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 q = (m >= 5000000000000000000) ? 1 : 0;
             else
             {
-                int64_t p = NUM_P10[x.sc];
+                int64_t p = num_p10(x.sc);
                 q = m / p;
                 if (m - q * p >= p - (m - q * p))
                     q += 1;                         // round half away from zero
