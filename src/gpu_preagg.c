@@ -2564,6 +2564,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		 */
 		int			nslots = bms_num_members(pp_input->outer_refs);
 		int			nexprs = 0;		/* computed arguments/filters/keys: a slot each, and a register that stays */
+		List	   *seen = NIL;
 		ListCell   *lc3;
 
 		foreach (lc, inner_target_list)
@@ -2571,25 +2572,25 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		foreach (lc3, con.target_partial->exprs)
 		{
 			Node   *e = lfirst(lc3);
+			List   *cands = (IsA(e, FuncExpr) ? ((FuncExpr *) e)->args : list_make1(e));
+			ListCell *lc4;
 
-			if (IsA(e, FuncExpr))
+			/* equal expressions share one slot and one register (codegen reuses them) */
+			foreach (lc4, cands)
 			{
-				ListCell   *lc4;
+				Node   *a = lfirst(lc4);
 
-				foreach (lc4, ((FuncExpr *) e)->args)
-					if (!IsA(lfirst(lc4), Var))
-						nexprs++;
-			}
-			else if (!IsA(e, Var))
+				if (IsA(a, Var) || list_member(seen, a))
+					continue;
+				seen = lappend(seen, a);
 				nexprs++;
+			}
 		}
 		/* registers: the slots, one more per computed value (scan_prog.c keeps them above the slots), temporaries */
 		nslots += nexprs;
-		if (nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
-			nslots = SCAN_MAX_REGS + 1;
 		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
 			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
-			nslots > SCAN_VM_SLOT_BUDGET)
+			nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
 		{
 			elog(DEBUG2, "GpuPreAgg: too many columns for the Vulkan service (%d output columns, %d kernel variables)",
 				 list_length(con.target_partial->exprs), nslots);

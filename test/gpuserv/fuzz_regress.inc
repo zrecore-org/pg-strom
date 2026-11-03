@@ -11,7 +11,7 @@ for t in s1 s2 s3; do
 	# the hash of a join key is computed over its stored bytes: a key of another width never found its partner
 	runjoin $t "int2 key against an int4 key" "select t.i, d.grp from %T t join %D d on t.a = d.k where t.i < 20000"
 	runjoin $t "int8 key against an int4 key" "select t.i, d.grp from %T t join %D d on t.c % 20000 = d.k where t.i < 20000"
-	runjoin $t "int4 expression cast to int2 against an int4 key (semi join)" "select t.i from %T t where t.b::int2 in (select k from %D)"
+	runjoin $t "int4 expression cast to int2 against an int4 key (semi join)" "select t.i from %T t where (t.b % 1000)::int2 in (select k from %D)"
 done
 ANYPLAN=0
 for t in s1 s2 s3; do
