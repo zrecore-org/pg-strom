@@ -14,6 +14,9 @@
  *   CMPF     dst = cmp(a, b) on float4 (NaN sorts last, as in PostgreSQL)
  *   ARITH    dst = a op b on integers;  k0 = SCANVM_ARITH_* | width << 8; k1 = error id
  *   FARITH   dst = a op b on float4;    k0 = SCANVM_ARITH_*; k1 = error id
+
+ *   HASHINIT dst = 0xffffffff;  HASHMERGE dst = merge(dst, hash_any(a, k0 bytes)) unless a is NULL;
+ *   HASHFIN  dst ^= 0xffffffff   (the hash of a join key, bit-identical to PostgreSQL's hash_any)
  *   I2F      dst = (float4) a;  F2I  dst = rint(a) as an integer of k0 bits (range checked, error id k1)
  *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
@@ -32,6 +35,9 @@ SCANVM_OP(ARITH,    11)
 SCANVM_OP(FARITH,   12)
 SCANVM_OP(I2F,      13)
 SCANVM_OP(F2I,      14)
+SCANVM_OP(HASHINIT, 15)
+SCANVM_OP(HASHMERGE,16)
+SCANVM_OP(HASHFIN,  17)
 /* reasons of an error */
 SCANVM_OP(ERR_ZERODIV,  1)
 SCANVM_OP(ERR_INTRANGE, 2)

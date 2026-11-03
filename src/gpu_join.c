@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/scan_caps.h"
 #include "cuda_common.h"
 
 
@@ -390,6 +391,9 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	/* cross join is not welcome */
 	if (!restrict_clauses)
 		return NULL;
+	/* the Vulkan service joins one inner relation per GpuJoin so far */
+	if (list_length(inner_paths_list) != 1)
+		return NULL;
 
 	/* setup inner_target_list */
 	foreach (lc, inner_paths_list)
@@ -472,12 +476,14 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			Relids	relids2 = pull_varnos(root, arg2);
 			devtype_info *dtype;
 
-			/* hash-join key must support device hash function */
+			/* hash-join key must support device hash function (the Vulkan kernel hashes integers and bool) */
 			dtype = pgstrom_devtype_lookup(exprType(arg1));
-			if (!dtype || !dtype->type_hashfunc)
+			if (!dtype || !dtype->type_hashfunc ||
+				!scan_vm_groupkey_type_supported(dtype->type_code))
 				continue;
 			dtype = pgstrom_devtype_lookup(exprType(arg2));
-			if (!dtype || !dtype->type_hashfunc)
+			if (!dtype || !dtype->type_hashfunc ||
+				!scan_vm_groupkey_type_supported(dtype->type_code))
 				continue;
 			if (bms_is_subset(relids1, outer_rel->relids) &&
 				bms_is_subset(relids2, inner_rel->relids))
@@ -502,6 +508,9 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			 nodeToString(restrict_clauses));
 		return NULL;
 	}
+	/* hash join only: no GpuNestLoop, and no GiST-index join */
+	if (hash_outer_keys == NIL)
+		return NULL;
 
 	/*
 	 * Setup pgstromPlanInfo
@@ -929,11 +938,8 @@ GpuJoinAddCustomPath(PlannerInfo *root,
 		List	   *inner_pathlist = innerrel->pathlist;
 		ListCell   *lc;
 
-		/* quick bailout if unsupported join type */
-		if (join_type != JOIN_INNER &&
-			join_type != JOIN_FULL &&
-			join_type != JOIN_RIGHT &&
-			join_type != JOIN_LEFT)
+		/* quick bailout if unsupported join type (the Vulkan service runs inner joins only so far) */
+		if (join_type != JOIN_INNER)
 			return;
 		//TODO: JOIN_SEMI and JOIN_ANTI
 		for (int try_parallel=0; try_parallel < 2; try_parallel++)

@@ -22,7 +22,7 @@ void scan_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
     uint pte      = ptab[2 * page];
     uint lp_base  = ptab[2 * page + 1];
-    g_loaded      = (pte & 0x80000000u) != 0;
+    g_src         = (pte & 0x80000000u) != 0 ? 1u : 0u;
     uint pbase    = pte & 0x7fffffffu;
     uint pd_lower = ld16(pbase + 12);
     uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);

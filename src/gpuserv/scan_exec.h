@@ -34,6 +34,8 @@ typedef struct scan_engine
 	int				pipe_ready[3];
 	gpu_vk_pipeline	agg_pipe[3][3];		/* the aggregation kernel: [registers 8/16/32][aggregates 4/8/12] */
 	int				agg_pipe_ready[3][3];
+	gpu_vk_pipeline	join_pipe[3];			/* the join kernel: registers 8/16/32 */
+	int				join_pipe_ready[3];
 	gpu_vk_pipeline	gagg_pipe[2][3];		/* GROUP BY: [registers 16/32][aggregates 4/8/12] */
 	int				gagg_pipe_ready[2][3];
 	int				trace;
@@ -83,5 +85,29 @@ int		scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 XpuCommand *scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 								const agg_state *st, size_t *p_len, char *err, size_t errlen);
 void	agg_state_free(agg_state *st);
+
+/*
+ * GpuJoin: the inner relation's buffer (the backend's shared-memory hash table), mapped once per
+ * session and imported into Vulkan.
+ */
+typedef struct join_inner
+{
+	int			ready;
+	void	   *map;
+	size_t		maplen;
+	gpu_vk_buffer buf;
+	int			own_buf;			/* buf holds a copy (the import was not possible) */
+	const kern_data_store *kds_in;	/* the inner relation's hash store inside map */
+	uint32_t	kds_end;			/* byte offset of the end of the store in the buffer */
+	uint32_t	hslot_word;			/* word offset of its hash slots */
+	uint32_t	nslots;
+} join_inner;
+
+int		scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner *ji,
+							char *err, size_t errlen);
+void	join_inner_free(scan_engine *eng, join_inner *ji);
+XpuCommand *scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+								join_inner *ji, const XpuCommand *task,
+								size_t *p_len, char *err, size_t errlen);
 
 #endif	/* GPUSERV_SCAN_EXEC_H */

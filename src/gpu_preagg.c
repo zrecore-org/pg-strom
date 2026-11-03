@@ -2443,6 +2443,9 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	CustomPath *cpath;
 	double		num_groups = 1.0;
 
+	/* GpuPreAgg runs on top of a GpuScan only so far, not of a GpuJoin */
+	if (input_path->custom_paths != NIL)
+		return;
 	/* estimate number of groups */
 	if (parse->groupClause)
 	{

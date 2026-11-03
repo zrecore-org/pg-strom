@@ -37,6 +37,9 @@ static const uint INSN_WORDS = 6;
 [[vk::binding(2, 0)]] StructuredBuffer<uint>    prog;
 [[vk::binding(3, 0)]] StructuredBuffer<uint>    ptab;       // per page: { byte offset (bit 31: in pagel), line pointers before it }
 [[vk::binding(4, 0)]] StructuredBuffer<uint>    pagel;      // the pages the backend loaded
+#ifdef WITH_INNER
+[[vk::binding(5, 0)]] StructuredBuffer<uint>    innerb;     // the join inner buffer (hash table of the inner relation)
+#endif
 
 struct PC
 {
@@ -56,8 +59,15 @@ struct Reg
 // Loads from the page buffers. Tuples start on 8-byte boundaries and a column is aligned
 // as its type says, so almost every access is a single aligned word. The source of a page
 // is the same for the whole workgroup.
-static bool g_loaded;
-uint pw(uint wi) { return g_loaded ? pagel[wi] : pagef[wi]; }
+static uint g_src;          // 0: pagef, 1: pagel, 2: the join inner buffer
+uint pw(uint wi)
+{
+#ifdef WITH_INNER
+    if (g_src == 2)
+        return innerb[wi];
+#endif
+    return g_src == 1 ? pagel[wi] : pagef[wi];
+}
 uint ld8(uint o)  { return (pw(o >> 2) >> ((o & 3u) * 8u)) & 0xffu; }
 uint ld16(uint o)
 {
@@ -107,6 +117,35 @@ bool cmp_result(int c, uint kind)
     case SOP_CMP_GT: return c > 0;
     default:         return c >= 0;
     }
+}
+
+// Jenkins lookup3 hash_any() of the little-endian bytes of a value of len 1, 2, 4 or 8 bytes
+// (lo, hi: its low and high 32 bits): the hash PostgreSQL computes for hash joins.
+uint rot32(uint x, uint k) { return (x << k) | (x >> (32u - k)); }
+uint hash_any_value(uint lo, uint hi, uint len)
+{
+    uint a = 0x9e3779b9u + len + 3923095u;
+    uint b = a;
+    uint c = a;
+    if (len == 1)
+        a += lo & 0xffu;
+    else if (len == 2)
+        a += lo & 0xffffu;
+    else if (len == 4)
+        a += lo;
+    else
+    {
+        a += lo;
+        b += hi;
+    }
+    c ^= b; c -= rot32(b, 14);
+    a ^= c; a -= rot32(c, 11);
+    b ^= a; b -= rot32(a, 25);
+    c ^= b; c -= rot32(b, 16);
+    a ^= c; a -= rot32(c, 4);
+    b ^= a; b -= rot32(a, 14);
+    c ^= b; c -= rot32(b, 24);
+    return c;
 }
 
 // Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
@@ -331,6 +370,23 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             break;
         }
 
+        case SOP_HASHINIT:
+            regs[dst].v = int64_t(0xffffffffu);
+            regs[dst].isnull = 0;
+            break;
+        case SOP_HASHMERGE:
+            if (regs[ra].isnull == 0)
+            {
+                uint64_t uv = uint64_t(regs[ra].v);
+                uint h = hash_any_value(uint(uv & 0xffffffffu), uint(uv >> 32), k0);
+                uint acc = uint(regs[dst].v);
+                regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
+            }
+            break;
+        case SOP_HASHFIN:
+            regs[dst].v = int64_t(uint(regs[dst].v) ^ 0xffffffffu);
+            break;
+
         case SOP_I2F:
         {
             Reg x = regs[ra];
@@ -375,34 +431,19 @@ void report_error(uint page, uint lp, uint err)
     }
 }
 
-// Evaluate line pointer `lp` of the page at pbase: deform the columns the program needs, run
-// the qual part of the program and, for a qualifying tuple, the rest of it (projection or
-// aggregate arguments). Returns true if the tuple qualifies; the registers then hold the
-// computed values. A failure is recorded with report_error() and counts as "not qualifying".
-bool eval_row(uint pbase, uint page, uint lp,
-              uint coloff, uint ncols, uint insnoff, uint nq, uint nins, uint qreg,
-              inout Reg regs[VM_MAX_REGS])
+// Deform the columns a program needs from the heap-format tuple at byte offset tbase of the
+// current source (g_src) into the registers named by the column descriptors at coloff. A join
+// inner tuple (kern_hashitem) has the layout of a heap tuple whose first 8 bytes are the chain
+// pointer, so the same code reads it. Returns false after report_error().
+bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
+                  inout Reg regs[VM_MAX_REGS])
 {
-    uint lpd      = ld32(pbase + 24 + lp * 4);
-    uint lp_off   = lpd & 0x7fffu;
-    uint lp_flags = (lpd >> 15) & 3u;
-
-    if (lp_flags != 1)      // not LP_NORMAL
-        return false;
-
-    uint tbase     = pbase + lp_off;
     uint infomask2 = ld16(tbase + 18);
     uint infomask  = ld16(tbase + 20);
     uint natts     = infomask2 & 0x7ffu;
     bool hasnull   = (infomask & 1u) != 0;
     uint off       = ld8(tbase + 22);       // t_hoff
 
-    [unroll]
-    for (uint i = 0; i < VM_MAX_REGS; i++)
-    {
-        regs[i].v = 0;
-        regs[i].isnull = 1;
-    }
     for (uint c = 0; c < ncols; c++)
     {
         uint desc  = prog[coloff + c];
@@ -475,6 +516,46 @@ bool eval_row(uint pbase, uint page, uint lp,
             off += alen;
         }
     }
+    return true;
+}
+
+// Set the registers a column table loads to NULL (before deforming the next inner tuple).
+void null_slots(uint coloff, uint ncols, inout Reg regs[VM_MAX_REGS])
+{
+    for (uint c = 0; c < ncols; c++)
+    {
+        uint slot = (prog[coloff + c] >> 16) & 0xffu;
+        if (slot != 0xffu)
+        {
+            regs[slot].v = 0;
+            regs[slot].isnull = 1;
+        }
+    }
+}
+
+// Evaluate line pointer `lp` of the page at pbase: deform the columns the program needs, run
+// the qual part of the program and, for a qualifying tuple, the rest of it (projection or
+// aggregate arguments). Returns true if the tuple qualifies; the registers then hold the
+// computed values. A failure is recorded with report_error() and counts as "not qualifying".
+bool eval_row(uint pbase, uint page, uint lp,
+              uint coloff, uint ncols, uint insnoff, uint nq, uint nins, uint qreg,
+              inout Reg regs[VM_MAX_REGS])
+{
+    uint lpd      = ld32(pbase + 24 + lp * 4);
+    uint lp_off   = lpd & 0x7fffu;
+    uint lp_flags = (lpd >> 15) & 3u;
+
+    if (lp_flags != 1)      // not LP_NORMAL
+        return false;
+
+    [unroll]
+    for (uint i = 0; i < VM_MAX_REGS; i++)
+    {
+        regs[i].v = 0;
+        regs[i].isnull = 1;
+    }
+    if (!deform_tuple(pbase + lp_off, page, lp, coloff, ncols, regs))
+        return false;
 
     bool hit = true;
     uint err = 0;

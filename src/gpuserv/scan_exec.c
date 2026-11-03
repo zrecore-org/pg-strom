@@ -121,6 +121,8 @@ typedef struct
 	const kern_data_store *kds_src;
 	const scan_prog *prog;
 	int			maxres;
+	const kern_data_store *kds_in;		/* a join: the inner relation's store */
+	int			maxres_inner;
 } form_ctx;
 
 /*
@@ -128,8 +130,8 @@ typedef struct
  * results of this row: (isnull, lo, hi) per computed attribute. Returns t_len, or -1.
  */
 static int
-form_tuple(const form_ctx *fc, const unsigned char *htup, const uint32_t *comp,
-		   uint32_t blkno, uint32_t posid,
+form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *htup_in,
+		   const uint32_t *comp, uint32_t blkno, uint32_t posid,
 		   kern_tupitem *titem, uint32_t rowid, char *err, size_t errlen)
 {
 	const scan_prog *prog = fc->prog;
@@ -138,6 +140,10 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const uint32_t *comp,
 	uint8_t		isnull_src[nsrc];
 	const unsigned char *ptrs[nsrc];
 	uint32_t	lens[nsrc];
+	int			nin = (fc->kds_in ? fc->maxres_inner : 0) + 1;
+	uint8_t		isnull_in[nin];
+	const unsigned char *ptrs_in[nin];
+	uint32_t	lens_in[nin];
 	uint32_t	t_hoff;
 	uint16_t	infomask = 0;
 	int			hasnull = 0;
@@ -149,6 +155,8 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const uint32_t *comp,
 	}
 	if (fc->maxres > 0)
 		deform_src(fc->kds_src, htup, fc->maxres, isnull_src, ptrs, lens);
+	if (fc->kds_in && htup_in && fc->maxres_inner > 0)
+		deform_src(fc->kds_in, htup_in, fc->maxres_inner, isnull_in, ptrs_in, lens_in);
 
 	for (int j = 0; j < nattrs; j++)
 	{
@@ -156,7 +164,8 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const uint32_t *comp,
 
 		if (pa->kind == SCAN_PROJ_SYS)
 			continue;
-		if (pa->kind == SCAN_PROJ_SRC ? isnull_src[pa->resno - 1] : (comp[3 * pa->comp] != 0))
+		if (pa->kind == SCAN_PROJ_SRC ? isnull_src[pa->resno - 1] :
+			pa->kind == SCAN_PROJ_INNER ? isnull_in[pa->resno - 1] : (comp[3 * pa->comp] != 0))
 		{
 			hasnull = 1;
 			infomask |= 1;				/* HEAP_HASNULL */
@@ -202,6 +211,19 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const uint32_t *comp,
 			{
 				snprintf(err, errlen, "column %d: system column of %u bytes does not fit the result type (len %d)",
 						 j + 1, sz, cm->attlen);
+				return -1;
+			}
+		}
+		else if (pa->kind == SCAN_PROJ_INNER)
+		{
+			if (isnull_in[pa->resno - 1])
+				continue;
+			src = ptrs_in[pa->resno - 1];
+			sz = lens_in[pa->resno - 1];
+			if (cm->attlen != fc->kds_in->colmeta[pa->resno - 1].attlen)
+			{
+				snprintf(err, errlen, "column %d: result type length %d differs from the inner relation (%d)",
+						 j + 1, cm->attlen, fc->kds_in->colmeta[pa->resno - 1].attlen);
 				return -1;
 			}
 		}
@@ -365,6 +387,9 @@ scan_engine_fini(scan_engine *eng)
 		if (eng->pipe_ready[i])
 			gpu_vk_pipeline_destroy(eng->vk, &eng->pipe[i]);
 		eng->pipe_ready[i] = 0;
+		if (eng->join_pipe_ready[i])
+			gpu_vk_pipeline_destroy(eng->vk, &eng->join_pipe[i]);
+		eng->join_pipe_ready[i] = 0;
 		for (int j = 0; j < 3; j++)
 		{
 			if (eng->agg_pipe_ready[i][j])
@@ -827,6 +852,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 
 	/* 4. the result chunk, in heap order, in one pass; tuples are stored forward and the
 	 * row index is fixed up once the final length is known */
+	memset(&fc, 0, sizeof(fc));
 	fc.kds_dst_head = kds_dst_head;
 	fc.kds_src = kds_src;
 	fc.prog = prog;
@@ -882,7 +908,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 				}
 				tup_area = (char *) resp + resp_sz + head_sz + idx_sz;
 				dest = tup_area + usage;
-				sz = form_tuple(&fc, page + (lpd & 0x7fff), vals + (size_t) g * 3 * ncomp,
+				sz = form_tuple(&fc, page + (lpd & 0x7fff), NULL, vals + (size_t) g * 3 * ncomp,
 								blkno, lp + 1, (kern_tupitem *) dest, row, err, errlen);
 				if (sz < 0)
 					goto error;
@@ -1953,4 +1979,388 @@ scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *prog,
 		resp->length = resp_sz;
 	*p_len = resp->length;
 	return resp;
+}
+
+/* ----------------------------------------------------------------
+ * GpuJoin
+ * ----------------------------------------------------------------
+ */
+int
+scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner *ji,
+					char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const kern_session_info *session = &session_cmd->u.session;
+	char		name[64];
+	int			fd;
+	struct stat	st;
+	size_t		align, maplen;
+	void	   *map;
+	const kern_multirels *kmrels;
+	const kern_data_store *kds;
+	uint64_t	kds_offset;
+
+	memset(ji, 0, sizeof(*ji));
+	if (session->join_inner_handle == 0)
+	{
+		snprintf(err, errlen, "the join has no inner buffer");
+		return -1;
+	}
+#ifdef __APPLE__
+	snprintf(name, sizeof(name), "/pgsb.%u.%x", session->pgsql_port_number, session->join_inner_handle);
+#else
+	snprintf(name, sizeof(name), "/.pgstrom_shmbuf_%u_%d", session->pgsql_port_number,
+			 (int) session->join_inner_handle);
+#endif
+	fd = shm_open(name, O_RDONLY, 0);
+	if (fd < 0)
+	{
+		snprintf(err, errlen, "cannot open the inner buffer '%s': %s", name, strerror(errno));
+		return -1;
+	}
+	if (fstat(fd, &st) != 0 || st.st_size < (off_t) sizeof(kern_multirels))
+	{
+		snprintf(err, errlen, "the inner buffer '%s' is empty", name);
+		close(fd);
+		return -1;
+	}
+	align = vk->host_import_alignment ? vk->host_import_alignment : 4096;
+	if ((size_t) sysconf(_SC_PAGESIZE) > align)
+		align = sysconf(_SC_PAGESIZE);
+	maplen = ((size_t) st.st_size + align - 1) & ~(align - 1);
+	map = mmap(NULL, maplen, PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (map == MAP_FAILED)
+	{
+		snprintf(err, errlen, "cannot map the inner buffer: %s", strerror(errno));
+		return -1;
+	}
+	kmrels = (const kern_multirels *) map;
+	if (kmrels->num_inner_rels != 1 || kmrels->length > (size_t) st.st_size)
+	{
+		snprintf(err, errlen, "the inner buffer holds %u relations (one is supported)", kmrels->num_inner_rels);
+		munmap(map, maplen);
+		return -1;
+	}
+	if (kmrels->chunks[0].is_nestloop || kmrels->chunks[0].left_outer || kmrels->chunks[0].right_outer ||
+		kmrels->chunks[0].pinned_buffer || kmrels->chunks[0].gist_offset != 0 || kmrels->kbuf_part_offset != 0)
+	{
+		snprintf(err, errlen, "only a plain inner hash join is implemented by the Vulkan service");
+		munmap(map, maplen);
+		return -1;
+	}
+	kds_offset = kmrels->chunks[0].kds_offset;
+	kds = (const kern_data_store *)((const char *) map + kds_offset);
+	if (kds_offset == 0 || kds_offset + kds->length > (uint64_t) st.st_size ||
+		kds->format != KDS_FORMAT_HASH || kds->hash_nslots == 0 || kds_offset + kds->length >= 0xffffffffULL)
+	{
+		snprintf(err, errlen, "the inner buffer is not a hash store the service can use (format '%c', %u slots)",
+				 kds->format, kds->hash_nslots);
+		munmap(map, maplen);
+		return -1;
+	}
+	if (maplen > vk->limits.maxStorageBufferRange ||
+		gpu_vk_buffer_import_host(vk, &ji->buf, map, maplen) != 0)
+	{
+		/* copy instead */
+		if (gpu_vk_buffer_create(vk, &ji->buf, maplen, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate %zu bytes for the inner buffer: %s", maplen, vk->err);
+			munmap(map, maplen);
+			return -1;
+		}
+		memcpy(ji->buf.map, map, st.st_size);
+		ji->own_buf = 1;
+	}
+	ji->map = map;
+	ji->maplen = maplen;
+	ji->kds_in = kds;
+	ji->kds_end = (uint32_t)(kds_offset + kds->length);
+	ji->hslot_word = (uint32_t)((kds_offset + KDS_HEAD_LENGTH(kds)) / 4);
+	ji->nslots = kds->hash_nslots;
+	ji->ready = 1;
+	return 0;
+}
+
+void
+join_inner_free(scan_engine *eng, join_inner *ji)
+{
+	if (!ji->ready)
+		return;
+	gpu_vk_buffer_destroy(eng->vk, &ji->buf);
+	munmap(ji->map, ji->maplen);
+	memset(ji, 0, sizeof(*ji));
+}
+
+XpuCommand *
+scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+					join_inner *ji, const XpuCommand *task,
+					size_t *p_len, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const kern_session_info *session = &session_cmd->u.session;
+	const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(session);
+	const kern_data_store *kds_src;
+	const char *pathname = NULL;
+	const io_vector *iovec = NULL;
+	gpu_vk_buffer bout, bprog, btab;
+	page_set	ps;
+	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant;
+	uint32_t	npages, nloaded, total_lps = 0, ncomp, rec_words, cap, nmatch = 0;
+	size_t		out_words;
+	const uint32_t *out = NULL;
+	XpuCommand *resp = NULL;
+	form_ctx	fc;
+	double		t0 = now_ms(), t1 = 0, t2 = 0;
+
+	memset(&ps, 0, sizeof(ps));
+	err[0] = '\0';
+	if (!ji->ready)
+	{
+		snprintf(err, errlen, "the inner buffer is not attached");
+		return NULL;
+	}
+	if (!task->u.task.kds_src_offset)
+	{
+		snprintf(err, errlen, "no source data store in the task");
+		return NULL;
+	}
+	kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
+	if (kds_src->format != KDS_FORMAT_BLOCK)
+	{
+		snprintf(err, errlen, "source format '%c' is not implemented by the Vulkan GpuJoin yet", kds_src->format);
+		return NULL;
+	}
+	if (task->u.task.kds_src_pathname)
+		pathname = (const char *) task + task->u.task.kds_src_pathname;
+	if (task->u.task.kds_src_iovec)
+		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
+	npages = kds_src->nitems;
+	nloaded = kds_src->block_nloaded;
+	if (nloaded > npages || kds_src->block_offset + (size_t) nloaded * BLCKSZ > task->length)
+	{
+		snprintf(err, errlen, "corrupted block data store");
+		return NULL;
+	}
+	if (!prog->words &&
+		scan_prog_build_join(session, kds_src, ji->kds_in, ji->kds_end, ji->hslot_word, ji->nslots,
+							 prog, err, errlen) != 0)
+		return NULL;
+	if (!prog->join_mode)
+	{
+		snprintf(err, errlen, "not a join program");
+		return NULL;
+	}
+	ncomp = prog->ncomp;
+	rec_words = 3 + 3 * ncomp;
+	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
+	if (!eng->join_pipe_ready[variant])
+	{
+		const unsigned char *spv = (variant == 0 ? kspv_gpujoin8 : variant == 1 ? kspv_gpujoin16 : kspv_gpujoin32);
+		size_t		spv_len = (variant == 0 ? kspv_gpujoin8_len : variant == 1 ? kspv_gpujoin16_len : kspv_gpujoin32_len);
+
+		if (gpu_vk_pipeline_create(vk, &eng->join_pipe[variant], spv, spv_len, 6, 20) != 0)
+		{
+			snprintf(err, errlen, "cannot create the join pipeline: %s", vk->err);
+			return NULL;
+		}
+		eng->join_pipe_ready[variant] = 1;
+	}
+	if (npages == 0)
+	{
+		/* an empty task: an empty reply */
+		resp = calloc(1, MAXALIGN(offsetof(XpuCommand, u.results.stats[0])));
+		if (!resp)
+			return NULL;
+		resp->magic = XpuCommandMagicNumber;
+		resp->tag = XpuCommandTag__Success;
+		resp->length = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
+		resp->u.results.scan_relidx = task->u.task.scan_relidx;
+		*p_len = resp->length;
+		return resp;
+	}
+	if (task_pages_open(eng, &ps, kds_src, pathname, iovec, &mapped, err, errlen) != 0)
+		goto error;
+	t1 = now_ms();
+	if (gpu_vk_buffer_create(vk, &btab, sizeof(uint32_t) * 2 * npages, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the page table: %s", vk->err);
+		goto error;
+	}
+	have_tab = 1;
+	for (uint32_t i = 0; i < npages; i++)
+	{
+		uint16_t	pd_lower;
+
+		memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
+		((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
+		((uint32_t *) btab.map)[2 * i + 1] = 0;
+		if (pd_lower > 24)
+			total_lps += (pd_lower - 24) / 4;
+	}
+	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
+		goto error;
+	}
+	have_prog = 1;
+	memcpy(bprog.map, prog->words, prog->nwords * 4);
+
+	/* run; if there are more matches than the output holds, run again with room for all */
+	cap = (total_lps > 4096 ? total_lps : 4096);
+	for (int attempt = 0; attempt < 2; attempt++)
+	{
+		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &ji->buf};
+		uint32_t	pc[5];
+
+		out_words = 4 + (size_t) cap * rec_words;
+		if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
+			goto error;
+		}
+		have_out = 1;
+		out = (const uint32_t *) bout.map;
+		memset(bout.map, 0, 16);
+		for (uint32_t base = 0; base < npages; base += SCAN_WG_MAX)
+		{
+			uint32_t	groups = npages - base;
+
+			if (groups > SCAN_WG_MAX)
+				groups = SCAN_WG_MAX;
+			pc[0] = npages;
+			pc[1] = base;
+			pc[2] = BLCKSZ;
+			pc[3] = cap;
+			pc[4] = 0;
+			if (gpu_vk_dispatch(vk, &eng->join_pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+			{
+				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+				goto error;
+			}
+		}
+		if (out[1] != 0)
+		{
+			describe_kernel_error(out[1], out[2], out[3], err, errlen);
+			goto error;
+		}
+		nmatch = out[0];
+		if (nmatch <= cap)
+			break;
+		cap = nmatch;						/* the exact number of matches */
+		gpu_vk_buffer_destroy(vk, &bout);
+		have_out = 0;
+	}
+	if (nmatch > cap)
+	{
+		snprintf(err, errlen, "the join produced more matches than the output could hold");
+		goto error;
+	}
+	t2 = now_ms();
+
+	/* the result chunk, in one pass */
+	memset(&fc, 0, sizeof(fc));
+	fc.kds_dst_head = kds_dst_head;
+	fc.kds_src = kds_src;
+	fc.prog = prog;
+	fc.maxres = prog->max_src_resno;
+	fc.kds_in = ji->kds_in;
+	fc.maxres_inner = prog->max_inner_resno;
+	{
+		size_t		head_sz = KDS_HEAD_LENGTH(kds_dst_head);
+		size_t		resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
+		size_t		idx_sz = MAXALIGN(sizeof(uint64_t) * nmatch);
+		size_t		cap_b = resp_sz + head_sz + idx_sz + (size_t) nmatch * 64 + 4096;
+		size_t		usage = 0, chunk_len;
+		uint64_t   *rowindex;
+		kern_data_store *kds;
+
+		resp = calloc(1, cap_b);
+		if (!resp)
+		{
+			snprintf(err, errlen, "out of memory");
+			goto error;
+		}
+		for (uint32_t r = 0; r < nmatch; r++)
+		{
+			const uint32_t *rec = &out[4 + (size_t) r * rec_words];
+			uint32_t	page = rec[0], lp = rec[1], item = rec[2], lpd;
+			const unsigned char *pg = PAGE_AT(&ps, page);
+			int			sz;
+
+			if (page >= npages || item >= ji->maplen)
+			{
+				snprintf(err, errlen, "corrupt match record");
+				goto error;
+			}
+			memcpy(&lpd, pg + 24 + (size_t) lp * 4, 4);
+			if (resp_sz + head_sz + idx_sz + usage + (lpd >> 17) + 1024 > cap_b)
+			{
+				size_t		ncap = cap_b * 2 + (lpd >> 17) + 4096;
+				XpuCommand *nr = realloc(resp, ncap);
+
+				if (!nr)
+				{
+					snprintf(err, errlen, "out of memory");
+					goto error;
+				}
+				resp = nr;
+				cap_b = ncap;
+			}
+			sz = form_tuple(&fc, pg + (lpd & 0x7fff), (const unsigned char *) ji->map + item,
+							rec + 3, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[page], lp + 1,
+							(kern_tupitem *)((char *) resp + resp_sz + head_sz + idx_sz + usage),
+							r, err, errlen);
+			if (sz < 0)
+				goto error;
+			((uint64_t *)((char *) resp + resp_sz + head_sz))[r] = usage;
+			usage += MAXALIGN(sz);
+		}
+		chunk_len = head_sz + idx_sz + usage;
+		kds = (kern_data_store *)((char *) resp + resp_sz);
+		memcpy(kds, kds_dst_head, head_sz);
+		kds->length = chunk_len;
+		kds->usage = usage;
+		kds->nitems = nmatch;
+		kds->format = KDS_FORMAT_ROW;
+		kds->hash_nslots = 0;
+		rowindex = (uint64_t *)((char *) kds + head_sz);
+		for (uint32_t r = 0; r < nmatch; r++)
+			rowindex[r] = usage - rowindex[r];
+		resp->magic = XpuCommandMagicNumber;
+		resp->tag = XpuCommandTag__Success;
+		resp->length = resp_sz + chunk_len;
+		resp->u.results.scan_relidx = task->u.task.scan_relidx;
+		resp->u.results.chunks_offset = resp_sz;
+		resp->u.results.chunks_nitems = (nmatch > 0 ? 1 : 0);
+		resp->u.results.nitems_raw = total_lps;
+		resp->u.results.nitems_in = total_lps;
+		resp->u.results.nitems_out = nmatch;
+		resp->u.results.npages_vfs_read = (npages - nloaded) * PAGES_PER_BLOCK;
+		if (nmatch == 0)
+			resp->length = resp_sz;
+		*p_len = resp->length;
+	}
+	if (eng->trace)
+		fprintf(stderr, "pgstrom-gpuserv: join task: %u pages, pages-in %.1f ms, gpu %.1f ms, results %.1f ms (%u matches)\n",
+				npages, t1 - t0, t2 - t1, now_ms() - t2, nmatch);
+	gpu_vk_buffer_destroy(vk, &bprog);
+	if (have_out)
+		gpu_vk_buffer_destroy(vk, &bout);
+	gpu_vk_buffer_destroy(vk, &btab);
+	page_set_release(vk, &ps);
+	return resp;
+
+error:
+	free(resp);
+	if (have_prog)
+		gpu_vk_buffer_destroy(vk, &bprog);
+	if (have_out)
+		gpu_vk_buffer_destroy(vk, &bout);
+	if (have_tab)
+		gpu_vk_buffer_destroy(vk, &btab);
+	page_set_release(vk, &ps);
+	if (err[0] == '\0')
+		snprintf(err, errlen, "join failed");
+	return NULL;
 }

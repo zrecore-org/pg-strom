@@ -33,7 +33,9 @@ struct wire_client
 	XpuCommand	   *session;			/* copy of the OpenSession frame */
 	scan_prog		prog;				/* the session's scan program, built on the first task */
 	agg_state		agg;				/* GpuPreAgg: the running partial aggregates */
+	join_inner		join;				/* GpuJoin: the inner relation */
 	int				closing;
+	scan_engine	   *eng;				/* for releasing the join inner buffer */
 };
 
 static void
@@ -345,7 +347,20 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 						 wc->agg.npages_vfs_read - vfs0);
 		return;
 	}
-	resp = scan_exec_task(&ws->scan, wc->session, &wc->prog, xcmd, &resp_len, msg, sizeof(msg));
+	if ((wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	{
+		if (!wc->join.ready &&
+			scan_exec_join_open(&ws->scan, wc->session, &wc->join, msg, sizeof(msg)) != 0)
+		{
+			wlog(ws, 1, "task failed: %s", msg);
+			reply_error(wc, "XpuTaskExec", "%s", msg);
+			return;
+		}
+		resp = scan_exec_join_task(&ws->scan, wc->session, &wc->prog, &wc->join, xcmd, &resp_len,
+								   msg, sizeof(msg));
+	}
+	else
+		resp = scan_exec_task(&ws->scan, wc->session, &wc->prog, xcmd, &resp_len, msg, sizeof(msg));
 	if (!resp)
 	{
 		wlog(ws, 1, "task failed: %s", msg);
@@ -408,6 +423,7 @@ client_free(wire_client *wc)
 	free(wc->rbuf);
 	scan_prog_free(&wc->prog);
 	agg_state_free(&wc->agg);
+	join_inner_free(wc->eng, &wc->join);
 	free(wc->session);
 	free(wc);
 }
@@ -537,6 +553,7 @@ wire_server_accept(wire_server *ws, int listen_fd)
 	}
 	(void) fcntl(fd, F_SETFD, FD_CLOEXEC);
 	wc->fd = fd;
+	wc->eng = &ws->scan;
 	ws->clients[ws->nclients++] = wc;
 }
 

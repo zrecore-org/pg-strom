@@ -162,6 +162,39 @@ runagg_any s1 "text key stays on the CPU" "select f, count(*) from %T group by f
 runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
 plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?
 
+echo "joins"
+sql "create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp,
+	case when i % 9 = 0 then null else (i::int8 * 3 - 5) end as pay, repeat(chr(65 + i % 26), (i % 30)::int) as txt, i::int8 as k8
+	from generate_series(1, 20000) i"
+sql "insert into sd select k, grp + 100, pay, txt, k8 from sd where k % 10 = 0"          # duplicate keys: several matches per outer row
+sql "analyze sd"
+JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
+runjoin() { # table, label, query-with-%T and %D [, settings]; the plan must use GpuJoin
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g"); set_extra=${4:-}
+	plan=$($PSQL -d scantest -c "$GPU $JOINSET $set_extra explain $qry" | grep -c "Custom Scan (GpuJoin)")
+	g=$(q "$GPU $JOINSET $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	if { [ "$plan" -ge 1 ] || [ "$ANYPLAN" = 1 ]; } && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
+	else echo "  FAIL  $tbl: $label (plan GpuJoin=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+for t in s1 s2 s3; do
+	ANYPLAN=0
+	runjoin $t "int4 = int4, pass-through columns of both sides" "select t.i, t.a, d.grp, d.pay from %T t join %D d on t.b = d.k"
+	runjoin $t "int8 key" "select t.i, d.grp from %T t join %D d on t.c % 20000 = d.k8"
+	runjoin $t "quals on both sides" "select t.i, d.grp, d.pay from %T t join %D d on t.b = d.k where t.a > 0 and d.grp < 8 and d.pay is not null"
+	runjoin $t "computed projection mixing both sides" "select t.i, t.a + d.grp as x, d.pay * 2 as y, t.b - d.k as z from %T t join %D d on t.b = d.k"
+	runjoin $t "text column of the inner side" "select t.i, d.txt from %T t join %D d on t.b = d.k"
+	runjoin $t "text column of the outer side" "select d.grp, t.f from %T t join %D d on t.b = d.k where t.i < 5000"
+	runjoin $t "extra join qual" "select t.i, d.grp from %T t join %D d on t.b = d.k and t.a > d.grp"
+	runjoin $t "no match at all" "select t.i, d.grp from %T t join %D d on t.b = d.k + 1000000"
+	runjoin $t "ctid of the outer side" "select t.ctid, d.grp from %T t join %D d on t.b = d.k where t.i % 100 = 0"
+done
+ANYPLAN=1
+runjoin s1 "aggregate on top (the join stays below the CPU aggregate)" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1"
+runjoin s1 "left join is not offloaded" "select t.i, d.grp from %T t left join %D d on t.b = d.k where t.i < 3000"
+runjoin s1 "float key stays on the CPU" "select t.i, d.grp from %T t join %D d on t.d::float8 = d.k::float8 where t.i < 3000"
+ANYPLAN=0
+runjoin s1 "parallel workers" "select t.i, d.grp from %T t join %D d on t.b = d.k" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+
 echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)

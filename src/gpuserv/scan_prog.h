@@ -17,6 +17,7 @@
 #define SCAN_PROJ_SRC		1		/* copy of the source column 'resno' (any type) */
 #define SCAN_PROJ_COMP		2		/* value computed on the GPU, 'comp'-th result */
 #define SCAN_PROJ_SYS		3		/* system column: ctid (-1) or tableoid (-6) */
+#define SCAN_PROJ_INNER		4		/* a join: copy of the inner relation's column 'resno' */
 
 typedef struct scan_proj_attr
 {
@@ -35,6 +36,9 @@ typedef struct scan_prog
 	uint32_t		ncomp;			/* number of computed values per matching row */
 	int				nregs;			/* registers the program needs (selects the kernel variant) */
 	int				max_src_resno;	/* highest source column copied as is */
+	/* join (GpuJoin, one inner relation) */
+	int				join_mode;
+	int				max_inner_resno;	/* highest inner column copied as is */
 	/* aggregation (GpuPreAgg without GROUP BY) */
 	int				agg_mode;
 	int				nagg;			/* number of aggregates (not counting key columns) */
@@ -51,6 +55,16 @@ struct kern_data_store;
 int		scan_prog_build(const struct kern_session_info *session,
 						const struct kern_data_store *kds_src,
 						scan_prog *prog, char *err, size_t errlen);
+/*
+ * The same for a GpuJoin session (one inner relation, inner hash join). kds_in is the inner
+ * relation's hash-format store; the three numbers describe where its hash slots and its end are
+ * in the buffer the kernel sees.
+ */
+int		scan_prog_build_join(const struct kern_session_info *session,
+							 const struct kern_data_store *kds_src,
+							 const struct kern_data_store *kds_in,
+							 uint32_t kds_end, uint32_t hslot_word, uint32_t nslots,
+							 scan_prog *prog, char *err, size_t errlen);
 void	scan_prog_free(scan_prog *prog);
 
 #endif	/* GPUSERV_SCAN_PROG_H */

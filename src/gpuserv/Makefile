@@ -33,7 +33,8 @@ endif
 SLANG_SRCS := $(sort $(wildcard kernels/*.slang))
 AGG_SPV    := $(foreach r,8 16 32,$(foreach a,4 8 12,build/gpuagg$(r)_$(a).spv))
 GAGG_SPV   := $(foreach r,16 32,$(foreach a,4 8 12,build/gagg$(r)_$(a).spv))
-SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV)
+JOIN_SPV   := $(foreach r,8 16 32,build/gpujoin$(r).spv)
+SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(JOIN_SPV)
 # per-kernel extra slangc flags (the memory model kernel must declare the Vulkan memory model)
 SLANGFLAGS_memmodel := -capability vk_mem_model
 
@@ -95,6 +96,11 @@ cpu_vm.o: cpu_vm.c cpu_vm.h scan_prog.h scan_caps.h kernels_vm/scan_vm_ops.inc .
 build/gagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/gagg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
+
+# the join kernel: one variant per register count
+build/gpujoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/join.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry join_main -stage compute -o $@
 
 scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<

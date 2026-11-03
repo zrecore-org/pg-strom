@@ -18,7 +18,7 @@
 #include "scan_caps.h"
 
 
-#define PROG_HDR_WORDS		14
+#define PROG_HDR_WORDS		24
 #define NO_REG				(-1)
 
 /* ----------------------------------------------------------------
@@ -35,6 +35,10 @@ typedef struct
 	uint32_t	nslots;
 	int			maxreg;						/* highest register in use + 1 */
 	int			slot_resno[SCAN_MAX_REGS];	/* source attribute of a slot, 0 if none */
+	int			slot_iresno[SCAN_MAX_REGS];	/* attribute of the inner relation (a join), 0 if none */
+	int			slot_iused[SCAN_MAX_REGS];
+	int			slot_ivtype[SCAN_MAX_REGS];
+	const kern_data_store *kds_inner;
 	int			slot_sysattr[SCAN_MAX_REGS];	/* system attribute (ctid, ...) of a slot, 0 if none */
 	int			slot_nullonly[SCAN_MAX_REGS];/* only IS [NOT] NULL reads the slot */
 	int			slot_used[SCAN_MAX_REGS];
@@ -220,7 +224,7 @@ emit_boolexpr(builder *b, const kern_expression *kexp, int *next)
 	int			first_step = -1;
 	uint32_t	nsteps = 0;
 	uint32_t	end;
-	int			is_and = (kexp->opcode == FuncOpCode__BoolExpr_And);
+	int			is_and = (kexp->opcode != FuncOpCode__BoolExpr_Or);
 	int			steps[64];
 
 	if (acc < 0)
@@ -274,14 +278,18 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return fail(b, "variable slot %u is out of range", slot);
 			if (!reg_vtype(kexp->exptype, &bytes))
 				return fail(b, "variable of an unsupported type (opcode type %u)", kexp->exptype);
-			if (b->slot_resno[slot] <= 0)
+			if (b->slot_resno[slot] > 0)
+				b->slot_used[slot] = 1;
+			else if (b->slot_iresno[slot] > 0)
+				b->slot_iused[slot] = 1;
+			else
 				return fail(b, "variable slot %u is not loaded from the scan relation", slot);
-			b->slot_used[slot] = 1;
 			return (int) slot;
 		}
 
 		case FuncOpCode__BoolExpr_And:
 		case FuncOpCode__BoolExpr_Or:
+		case FuncOpCode__JoinQuals:
 			return emit_boolexpr(b, kexp, next);
 
 		case FuncOpCode__BoolExpr_Not:
@@ -893,5 +901,339 @@ error:
 	scan_prog_free(prog);
 	if (err[0] == '\0')
 		snprintf(err, errlen, "cannot build the scan program");
+	return -1;
+}
+
+
+/* ----------------------------------------------------------------
+ * GpuJoin
+ * ----------------------------------------------------------------
+ */
+
+/* the HashValue of the join keys: HASHINIT, one HASHMERGE per key, HASHFIN; returns its register */
+static int
+emit_hash_value(builder *b, const kern_expression *khash, int *next)
+{
+	const kern_expression *karg = KEXP_FIRST_ARG(khash);
+	int			mark = *next;
+	int			acc = new_reg(b, next);
+
+	if (acc < 0 || emit(b, SOP_HASHINIT, acc, 0, 0, 0, 0) < 0)
+		return -1;
+	for (uint32_t i = 0; i < khash->nr_args; i++, karg = KEXP_NEXT_ARG(karg))
+	{
+		int		bytes, r;
+
+		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4)
+			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
+		*next = acc + 1;
+		r = expr_to_reg(b, karg, next);
+		if (r < 0 || emit(b, SOP_HASHMERGE, acc, r, 0, bytes, 0) < 0)
+			return -1;
+	}
+	if (emit(b, SOP_HASHFIN, acc, 0, 0, 0, 0) < 0)
+		return -1;
+	*next = mark + 1;
+	return acc;
+}
+
+int
+scan_prog_build_join(const kern_session_info *session, const kern_data_store *kds_src,
+					 const kern_data_store *kds_in,
+					 uint32_t kds_end, uint32_t hslot_word, uint32_t nslots,
+					 scan_prog *prog, char *err, size_t errlen)
+{
+	builder		b;
+	const kern_expression *kload0, *kload1, *kquals, *khash, *kjq, *kproj;
+	const kern_varslot_desc *vs = SESSION_KVARS_SLOT_DESC(session);
+	const kern_data_store *kds_dst = SESSION_KDS_DST_HEAD(session);
+	int			qreg = -1, hash_reg = -1, jq_reg = -1;
+	uint32_t	nq, hash_end, join_end;
+	int			next, ncols = 0, incols = 0;
+	uint32_t	nattrs = 0, ncomp = 0, nwords;
+	uint32_t   *comp_regs = NULL, *w;
+	int			max_src = 0, max_inner = 0;
+
+	memset(prog, 0, sizeof(*prog));
+	memset(&b, 0, sizeof(b));
+	err[0] = '\0';
+	b.session = session;
+	b.kds_src = kds_src;
+	b.kds_inner = kds_in;
+	b.err = err;
+	b.errlen = errlen;
+	b.nslots = session->kcxt_kvars_nslots;
+
+	if ((session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__JOIN)
+	{
+		fail(&b, "not a GpuJoin session");
+		goto error;
+	}
+	if (session->xpucode_groupby_actions || session->xpucode_gpusort_keydesc)
+	{
+		fail(&b, "aggregation or sort on top of a join is not implemented by the Vulkan service yet");
+		goto error;
+	}
+	if (session->kcxt_kvecs_ndims != 2)
+	{
+		fail(&b, "joins of %d inner relations are not implemented by the Vulkan service yet",
+			 (int) session->kcxt_kvecs_ndims - 1);
+		goto error;
+	}
+	if (b.nslots > SCAN_MAX_REGS || !kds_dst || !SESSION_KEXP_PROJECTION(session))
+	{
+		fail(&b, "unsupported join session (slots %u)", b.nslots);
+		goto error;
+	}
+	/* the outer and inner columns the kernel variables come from */
+	kload0 = SESSION_KEXP_LOAD_VARS(session, 0);
+	if (kload0)
+		for (int i = 0; i < kload0->u.load.nitems; i++)
+		{
+			int		resno = kload0->u.load.desc[i].vl_resno;
+			int		slot = kload0->u.load.desc[i].vl_slot_id;
+
+			if (slot < 0 || slot >= (int) b.nslots)
+				continue;
+			if (resno < 0)
+				b.slot_sysattr[slot] = resno;
+			else if (resno > 0 && resno <= (int) kds_src->ncols)
+				b.slot_resno[slot] = resno;
+		}
+	kload1 = SESSION_KEXP_LOAD_VARS(session, 1);
+	if (kload1)
+		for (int i = 0; i < kload1->u.load.nitems; i++)
+		{
+			int		resno = kload1->u.load.desc[i].vl_resno;
+			int		slot = kload1->u.load.desc[i].vl_slot_id;
+
+			if (slot < 0 || slot >= (int) b.nslots)
+				continue;
+			if (resno > 0 && resno <= (int) kds_in->ncols)
+				b.slot_iresno[slot] = resno;
+		}
+	/* sections: scan quals, hash value, join quals, projection */
+	next = b.nslots;
+	kquals = SESSION_KEXP_SCAN_QUALS(session);
+	if (kquals)
+	{
+		qreg = expr_to_reg(&b, kquals, &next);
+		if (qreg < 0)
+			goto error;
+	}
+	nq = b.ninsn;
+	khash = SESSION_KEXP_HASH_VALUE(session, 1);
+	if (!khash)
+	{
+		fail(&b, "the join has no hash value (only hash joins are implemented)");
+		goto error;
+	}
+	next = b.nslots;
+	hash_reg = emit_hash_value(&b, khash, &next);
+	if (hash_reg < 0)
+		goto error;
+	hash_end = b.ninsn;
+	kjq = SESSION_KEXP_JOIN_QUALS(session, 1);
+	next = b.nslots;
+	if (kjq)
+	{
+		jq_reg = expr_to_reg(&b, kjq, &next);
+		if (jq_reg < 0)
+			goto error;
+	}
+	join_end = b.ninsn;
+
+	kproj = SESSION_KEXP_PROJECTION(session);
+	nattrs = kproj->u.proj.nattrs;
+	prog->attrs = calloc(nattrs ? nattrs : 1, sizeof(scan_proj_attr));
+	comp_regs = calloc(nattrs ? nattrs : 1, sizeof(uint32_t));
+	if (!prog->attrs || !comp_regs)
+	{
+		fail(&b, "out of memory");
+		goto error;
+	}
+	prog->nattrs = nattrs;
+	if (kds_dst->ncols < nattrs || kproj->nr_args != nattrs)
+	{
+		fail(&b, "projection has %u columns but the result store has %u", nattrs, kds_dst->ncols);
+		goto error;
+	}
+	{
+		const kern_expression *ksave = KEXP_FIRST_ARG(kproj);
+		int		perm = b.nslots;
+
+		for (uint32_t j = 0; j < nattrs; j++, ksave = KEXP_NEXT_ARG(ksave))
+		{
+			const kern_expression *kin;
+			scan_proj_attr *pa = &prog->attrs[j];
+
+			if (ksave->opcode != FuncOpCode__SaveExpr || ksave->nr_args != 1)
+			{
+				fail(&b, "unexpected projection element %s", scan_vm_opcode_name(ksave->opcode));
+				goto error;
+			}
+			kin = KEXP_FIRST_ARG(ksave);
+			if (kin->opcode == FuncOpCode__VarExpr && kin->u.v.var_slot_id < b.nslots &&
+				b.slot_resno[kin->u.v.var_slot_id] > 0)
+			{
+				pa->kind = SCAN_PROJ_SRC;
+				pa->resno = b.slot_resno[kin->u.v.var_slot_id];
+				if (pa->resno > max_src)
+					max_src = pa->resno;
+			}
+			else if (kin->opcode == FuncOpCode__VarExpr && kin->u.v.var_slot_id < b.nslots &&
+					 b.slot_iresno[kin->u.v.var_slot_id] > 0)
+			{
+				pa->kind = SCAN_PROJ_INNER;
+				pa->resno = b.slot_iresno[kin->u.v.var_slot_id];
+				if (pa->resno > max_inner)
+					max_inner = pa->resno;
+			}
+			else if (kin->opcode == FuncOpCode__VarExpr && kin->u.v.var_slot_id < b.nslots &&
+					 (b.slot_sysattr[kin->u.v.var_slot_id] == -1 ||
+					  b.slot_sysattr[kin->u.v.var_slot_id] == -6))
+			{
+				pa->kind = SCAN_PROJ_SYS;
+				pa->resno = b.slot_sysattr[kin->u.v.var_slot_id];
+			}
+			else
+			{
+				int		bytes, r, nx = perm;
+
+				if (!reg_vtype(ksave->exptype, &bytes))
+				{
+					fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
+					goto error;
+				}
+				r = expr_to_reg(&b, kin, &nx);
+				if (r < 0)
+					goto error;
+				if (r < (int) b.nslots)
+				{
+					int		d = new_reg(&b, &nx);
+
+					if (d < 0 || emit(&b, SOP_MOV, d, r, 0, 0, 0) < 0)
+						goto error;
+					r = d;
+				}
+				pa->kind = SCAN_PROJ_COMP;
+				pa->comp = ncomp;
+				pa->comp_bytes = bytes;
+				comp_regs[ncomp++] = r;
+				perm = r + 1;
+			}
+		}
+	}
+	/* column tables: up to the highest column the program reads on each side */
+	for (uint32_t s = 0; s < b.nslots; s++)
+	{
+		int		bytes;
+
+		if (b.slot_used[s])
+		{
+			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
+			if (!b.slot_vtype[s] && b.slot_nullonly[s])
+				b.slot_vtype[s] = SOP_VT_NULLONLY;
+			else if (!b.slot_vtype[s] || kds_src->colmeta[b.slot_resno[s] - 1].attlen != bytes ||
+					 !kds_src->colmeta[b.slot_resno[s] - 1].attbyval)
+			{
+				fail(&b, "outer column %d does not have the type the expression expects", b.slot_resno[s]);
+				goto error;
+			}
+			if (b.slot_resno[s] > ncols)
+				ncols = b.slot_resno[s];
+		}
+		if (b.slot_iused[s])
+		{
+			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
+			if (!b.slot_ivtype[s] && b.slot_nullonly[s])
+				b.slot_ivtype[s] = SOP_VT_NULLONLY;
+			else if (!b.slot_ivtype[s] || kds_in->colmeta[b.slot_iresno[s] - 1].attlen != bytes ||
+					 !kds_in->colmeta[b.slot_iresno[s] - 1].attbyval)
+			{
+				fail(&b, "inner column %d does not have the type the expression expects", b.slot_iresno[s]);
+				goto error;
+			}
+			if (b.slot_iresno[s] > incols)
+				incols = b.slot_iresno[s];
+		}
+	}
+	nwords = PROG_HDR_WORDS + ncols + incols + 6 * b.ninsn + ncomp;
+	if (nwords > 16384)
+	{
+		fail(&b, "the join program is too large");
+		goto error;
+	}
+	w = calloc(nwords, sizeof(uint32_t));
+	if (!w)
+	{
+		fail(&b, "out of memory");
+		goto error;
+	}
+	w[0] = PROG_HDR_WORDS;							/* outer column table */
+	w[1] = PROG_HDR_WORDS + ncols + incols;
+	w[2] = PROG_HDR_WORDS + ncols + incols;			/* instructions */
+	w[3] = ncols;
+	w[5] = nq;
+	w[6] = b.ninsn;
+	w[7] = (qreg < 0) ? 0xffffffffU : (uint32_t) qreg;
+	w[8] = ncomp;
+	w[9] = PROG_HDR_WORDS + ncols + incols + 6 * b.ninsn;
+	w[14] = hash_end;
+	w[15] = join_end;
+	w[16] = (uint32_t) hash_reg;
+	w[17] = (jq_reg < 0) ? 0xffffffffU : (uint32_t) jq_reg;
+	w[18] = PROG_HDR_WORDS + ncols;					/* inner column table */
+	w[19] = incols;
+	w[20] = kds_end;
+	w[21] = hslot_word;
+	w[22] = nslots;
+	for (int side = 0; side < 2; side++)
+	{
+		const kern_data_store *kds = (side == 0 ? kds_src : kds_in);
+		int		n = (side == 0 ? ncols : incols);
+		uint32_t base = PROG_HDR_WORDS + (side == 0 ? 0 : ncols);
+
+		for (int c = 0; c < n; c++)
+		{
+			const kern_colmeta *cm = &kds->colmeta[c];
+			uint32_t	alen = (cm->attlen == -1 ? 0xff : cm->attlen == -2 ? 0xfe : (uint32_t) cm->attlen);
+			uint32_t	slot = 0xff, vt = 0;
+
+			for (uint32_t s = 0; s < b.nslots; s++)
+			{
+				if (side == 0 && b.slot_used[s] && b.slot_resno[s] == c + 1)
+				{
+					slot = s;
+					vt = b.slot_vtype[s];
+				}
+				if (side == 1 && b.slot_iused[s] && b.slot_iresno[s] == c + 1)
+				{
+					slot = s;
+					vt = b.slot_ivtype[s];
+				}
+			}
+			w[base + c] = alen | ((uint32_t) cm->attalign << 8) | (vt << 12) | (slot << 16);
+		}
+	}
+	memcpy(w + PROG_HDR_WORDS + ncols + incols, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
+	memcpy(w + PROG_HDR_WORDS + ncols + incols + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
+	prog->words = w;
+	prog->nwords = nwords;
+	prog->ncomp = ncomp;
+	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
+	prog->max_src_resno = max_src;
+	prog->max_inner_resno = max_inner;
+	prog->join_mode = 1;
+	free(b.insn);
+	free(comp_regs);
+	return 0;
+
+error:
+	free(b.insn);
+	free(comp_regs);
+	scan_prog_free(prog);
+	if (err[0] == '\0')
+		snprintf(err, errlen, "cannot build the join program");
 	return -1;
 }
