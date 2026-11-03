@@ -889,7 +889,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                     if (ldb_s(sa, oa + i) == first && str_memcmp(sa, oa + i, sb, ob, lb) == 0)
                     {
                         res = true;
-                        return 0;
+                        break;
                     }
                 }
             }
@@ -960,7 +960,7 @@ bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg r
 // operands (the specialized kernels) Slang folds the switch, and a "break" in the middle of a case that sits
 // in a nested "if" came out of its SPIR-V structurizer as a fall-through (the code after the "if" ran for
 // the NULL branch too: `n1 = 12.34 or n1 = 0` counted the rows with a NULL n1). A "break" that leaves an
-// inner loop or switch (ARITH's switch on the operator) is not affected and stays.
+// inner loop or switch (ARITH's switch on the operator, the loop of LIKE '%x%') is not affected and stays.
 // Executes one instruction { op, dst, ra, rb, k0, k1 }; AND / OR set ip to their jump target. Returns the
 // FuncOpCode of a failing function, 0 on success. vm_run() below interprets a program with it; the
 // specialized kernels (specialize.c) call it with constant operands, so the generated code runs
