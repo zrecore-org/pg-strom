@@ -120,6 +120,8 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		/* A6: strings are registers that point into a buffer */
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:      *p_bytes = 0; return SOP_VT_STR;
+		/* A6: numeric is { unscaled int64, scale } when the value fits (otherwise the row is rechecked) */
+		case TypeOpCode__numeric:     *p_bytes = 0; return SOP_VT_NUM;
 		default:
 			break;
 	}
@@ -175,6 +177,25 @@ pool_add(builder *b, const unsigned char *data, uint32_t len)
 	return off;
 }
 
+/* a numeric constant as a register: it must fit { int64, scale } (the planner checks, too) */
+static int
+emit_numconst(builder *b, const unsigned char *datum, int isnull, int *next)
+{
+	int			dst;
+	int64_t		v = 0;
+	uint32_t	sc = 0;
+
+	if (b->no_strings)
+		return fail(b, "numeric is not supported in a join");
+	if (!isnull && !scan_vm_numeric_datum_decode(datum, &v, &sc))
+		return fail(b, "a numeric constant that does not fit 64 bits (or NaN/Infinity)");
+	dst = new_reg(b, next);
+	if (dst < 0)
+		return -1;
+	return emit(b, SOP_NUMCONST, dst, isnull ? 1 : 0, sc,
+				(uint32_t)((uint64_t) v & 0xffffffffU), (uint32_t)((uint64_t) v >> 32)) < 0 ? -1 : dst;
+}
+
 /* a string constant (a text datum) as a register */
 static int
 emit_conststr(builder *b, const unsigned char *datum, int isnull, int *next)
@@ -214,6 +235,8 @@ emit_const(builder *b, const kern_expression *kexp, int *next)
 		return fail(b, "constant of an unsupported type (opcode type %u)", kexp->exptype);
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
+	if (vt == SOP_VT_NUM)
+		return emit_numconst(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (!kexp->u.c.const_isnull)
 	{
 		const unsigned char *p = (const unsigned char *) kexp->u.c.const_value;
@@ -271,6 +294,8 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 	off = session->poffset[id];
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) session + off, off == 0, next);
+	if (vt == SOP_VT_NUM)
+		return emit_numconst(b, (const unsigned char *) session + off, off == 0, next);
 	if (off != 0)
 	{
 		const unsigned char *p = (const unsigned char *) session + off;
@@ -373,10 +398,10 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				return fail(b, "variable slot %u is out of range", slot);
 			if (!reg_vtype(kexp->exptype, &bytes))
 				return fail(b, "variable of an unsupported type (opcode type %u)", kexp->exptype);
-			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR)
+			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR || reg_vtype(kexp->exptype, &bytes) == SOP_VT_NUM)
 			{
 				if (b->no_strings)
-					return fail(b, "strings are not supported in a join");
+					return fail(b, "strings and numerics are not supported in a join");
 				b->slot_strval[slot] = 1;
 			}
 			if (b->slot_resno[slot] > 0)
@@ -412,6 +437,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			kin = KEXP_FIRST_ARG(kexp);
 			if (op != SOP_NOT && kin->opcode == FuncOpCode__VarExpr &&
 				(!reg_vtype(kin->exptype, &bytes) || reg_vtype(kin->exptype, &bytes) == SOP_VT_STR ||
+			  reg_vtype(kin->exptype, &bytes) == SOP_VT_NUM ||
 			  kin->exptype == TypeOpCode__date || kin->exptype == TypeOpCode__time ||
 			  kin->exptype == TypeOpCode__timestamp || kin->exptype == TypeOpCode__timestamptz))
 			{
@@ -449,7 +475,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		return fail(b, "%s is not supported by the Vulkan GpuScan yet", scan_vm_opcode_name(kexp->opcode));
 
 	if (fc.cls == SOP_CAST || fc.cls == SOP_MOV || fc.cls == SOP_I2F || fc.cls == SOP_F2I ||
-		fc.cls == -SOP_ARITH || fc.cls == SOP_D2TS || fc.cls == SOP_TS2D || fc.cls == SOP_STRLEN)
+		fc.cls == -SOP_ARITH || fc.cls == SOP_D2TS || fc.cls == SOP_TS2D || fc.cls == SOP_STRLEN ||
+		fc.cls == SOP_I2N || fc.cls == SOP_N2I || (fc.cls == SOP_NUMARITH && fc.kind >= SOP_NUMOP_NEG))
 	{
 		if (kexp->nr_args != 1)
 			return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
@@ -473,6 +500,12 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		}
 		*next = mark;
 		dst = new_reg(b, next);
+		if (fc.cls == SOP_NUMARITH)		/* numeric_uminus, numeric_abs */
+		{
+			if (dst < 0 || emit(b, SOP_NUMARITH, dst, ra, 0, fc.kind, kexp->opcode) < 0)
+				return -1;
+			return dst;
+		}
 		if (dst < 0 ||
 			emit(b, fc.cls, dst, ra, 0, fc.width, kexp->opcode) < 0)
 			return -1;
@@ -571,7 +604,12 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			break;
 		case SOP_CMPI:
 		case SOP_CMPF:
+		case SOP_NUMCMP:
 			if (emit(b, fc.cls, dst, ra, rb, fc.kind, 0) < 0)
+				return -1;
+			break;
+		case SOP_NUMARITH:
+			if (emit(b, SOP_NUMARITH, dst, ra, rb, fc.kind, kexp->opcode) < 0)
 				return -1;
 			break;
 		case SOP_ARITH:
@@ -995,6 +1033,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					pa->kind = SCAN_PROJ_COMP;
 					pa->comp = ncomp;
 					pa->comp_bytes = bytes;
+					pa->comp_numeric = (reg_vtype(ksave->exptype, &bytes) == SOP_VT_NUM);
 					comp_regs[ncomp++] = r;
 					perm = r + 1;
 				}
@@ -1015,9 +1054,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			b.slot_bytes[s] = bytes;
 			if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* a date/time column that only IS [NOT] NULL reads */
-			else if (b.slot_vtype[s] == SOP_VT_STR && !b.slot_strval[s])
+			else if ((b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM) && !b.slot_strval[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* only IS [NOT] NULL reads it */
-			else if (b.slot_vtype[s] == SOP_VT_STR)
+			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM)
 			{
 				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
 				{
@@ -1121,7 +1160,8 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 	{
 		int		bytes, r;
 
-		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4)
+		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4 ||
+			reg_vtype(karg->exptype, &bytes) == SOP_VT_STR || reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
 		*next = acc + 1;
 		r = expr_to_reg(b, karg, next);
@@ -1320,7 +1360,8 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			{
 				int		bytes, r, nx = perm;
 
-				if (!reg_vtype(ksave->exptype, &bytes))
+				if (!reg_vtype(ksave->exptype, &bytes) || reg_vtype(ksave->exptype, &bytes) == SOP_VT_STR ||
+					reg_vtype(ksave->exptype, &bytes) == SOP_VT_NUM)
 				{
 					fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
 					goto error;
@@ -1352,7 +1393,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		if (b.slot_used[s])
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_vtype[s] == SOP_VT_STR)		/* join programs read the NULL-ness of strings only */
+			if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM)		/* join programs read the NULL-ness of strings only */
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
 			else if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
@@ -1372,7 +1413,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
 
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_ivtype[s] == SOP_VT_STR)
+			if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM)
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_ivtype[s] && b.slot_nullonly[s])
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;

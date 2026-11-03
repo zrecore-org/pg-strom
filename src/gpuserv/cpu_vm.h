@@ -13,6 +13,7 @@ typedef struct
 {
 	int64_t		v;
 	uint32_t	isnull;
+	uint32_t	sc;				/* numeric: the scale of v */
 } vm_reg;
 
 /*

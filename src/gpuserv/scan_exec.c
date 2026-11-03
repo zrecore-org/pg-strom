@@ -180,7 +180,7 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *c
 		if (pa->kind == SCAN_PROJ_SYS)
 			continue;
 		if (pa->kind == SCAN_PROJ_SRC ? isnull_src[pa->resno - 1] :
-			pa->kind == SCAN_PROJ_INNER ? isnull_in[pa->depth][pa->resno - 1] : (comp[3 * pa->comp] != 0))
+			pa->kind == SCAN_PROJ_INNER ? isnull_in[pa->depth][pa->resno - 1] : ((comp[3 * pa->comp] & 1u) != 0))
 		{
 			hasnull = 1;
 			infomask |= 1;				/* HEAP_HASNULL */
@@ -204,6 +204,7 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *c
 		const unsigned char *src = NULL;
 		uint32_t	sz = 0, t_next;
 		unsigned char tmp[8];
+		unsigned char numbuf[SCAN_NUMERIC_MAXLEN];
 
 		if (pa->kind == SCAN_PROJ_SYS)
 		{
@@ -261,17 +262,31 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *c
 			uint32_t	hi = comp[3 * pa->comp + 2];
 			uint64_t	v = (uint64_t) lo | ((uint64_t) hi << 32);
 
-			if (comp[3 * pa->comp] != 0)
-				continue;				/* NULL */
-			if (cm->attlen != pa->comp_bytes || !cm->attbyval)
+			if ((comp[3 * pa->comp] & 1u) != 0)
+				continue;				/* NULL (the scale of a numeric rides above bit 0) */
+			if (pa->comp_numeric)
+			{
+				if (cm->attlen != -1)
+				{
+					snprintf(err, errlen, "column %d: computed numeric does not fit the result type (len %d)",
+							 j + 1, cm->attlen);
+					return -1;
+				}
+				sz = scan_vm_numeric_encode((int64_t) v, comp[3 * pa->comp] >> 8, numbuf);
+				src = numbuf;
+			}
+			else if (cm->attlen != pa->comp_bytes || !cm->attbyval)
 			{
 				snprintf(err, errlen, "column %d: computed %d-byte value does not fit the result type (len %d)",
 						 j + 1, pa->comp_bytes, cm->attlen);
 				return -1;
 			}
-			memcpy(tmp, &v, 8);			/* little endian */
-			src = tmp;
-			sz = pa->comp_bytes;
+			if (!pa->comp_numeric)
+			{
+				memcpy(tmp, &v, 8);			/* little endian */
+				src = tmp;
+				sz = pa->comp_bytes;
+			}
 		}
 		if (cm->attlen == -1)
 		{
@@ -1941,6 +1956,16 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 				n_overflow++;
 				if (cpu_eval_row(prog, page + (lpd & 0x7fff), regs, &e) != 1)
 				{
+					if (e == SOP_RECHECK_CODE)			/* a numeric the VM cannot evaluate: the backend */
+					{
+						if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
+									page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+						{
+							snprintf(err, errlen, "out of memory");
+							goto done;
+						}
+						continue;
+					}
 					if (e != 0)
 					{
 						describe_kernel_error(e, i, lp, err, errlen);

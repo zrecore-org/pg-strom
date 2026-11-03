@@ -3302,6 +3302,7 @@ __arrowQualNeedsUnsupportedValue(Node *node, void *context)
 		case TIMEOID:
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
+		case NUMERICOID:
 			return true;
 		default:
 			break;
