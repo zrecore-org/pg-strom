@@ -817,6 +817,7 @@ extern void		pgstrom_init_gpu_client(void);
  * gpu_scan.c
  */
 extern bool		pgstrom_is_gpuscan_path(const Path *path);
+extern bool		pgstromPathScansArrowFdw(PlannerInfo *root, const CustomPath *cpath);
 extern bool		pgstrom_is_gpuscan_plan(const Plan *plan);
 extern bool		pgstrom_is_gpuscan_state(const PlanState *ps);
 extern pgstromPlanInfo *try_fetch_xpuscan_planinfo(const Path *path);
@@ -899,6 +900,7 @@ extern void		pgstrom_init_gpu_sort(void);
  */
 extern int		arrow_metadata_cache_size_kb;		/* GUC */
 extern bool		baseRelIsArrowFdw(RelOptInfo *baserel);
+extern bool		arrowFdwGpuScanSupported(RelOptInfo *baserel);
 extern bool 	RelationIsArrowFdw(Relation frel);
 extern gpumask_t GetOptimalGpusForArrowFdw(PlannerInfo *root,
 										   RelOptInfo *baserel);

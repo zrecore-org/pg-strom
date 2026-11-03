@@ -39,6 +39,10 @@ SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_mai
 SLANGFLAGS_memmodel := -capability vk_mem_model
 
 LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.o scan_prog.o scan_exec.o scan_caps.o cpu_vm.o
+# Arrow_Fdw scans (A5)
+ARROW_SPV  := $(foreach r,8 16 32,build/gpuarrow$(r).spv)
+SPV_FILES  += $(ARROW_SPV)
+LIB_OBJS   += arrow_exec.o
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
 
@@ -101,6 +105,14 @@ build/gagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/s
 build/gpujoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/join.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry join_main -stage compute -o $@
+
+# the Arrow scan kernel: one variant per register count
+build/gpuarrow%.spv: kernels_vm/arrow.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/arrow.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry arrow_main -stage compute -o $@
+
+arrow_exec.o: arrow_exec.c scan_exec.h scan_prog.h scan_caps.h kernels_spv.h ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
 
 scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<

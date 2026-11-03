@@ -3240,6 +3240,83 @@ baseRelIsArrowFdw(RelOptInfo *baserel)
 }
 
 /*
+ * arrowFdwGpuScanSupported
+ *
+ * The Vulkan service reads Arrow record batches itself (arrow_exec.c) and forms the result tuples
+ * from the columnar buffers. It supports the Arrow types of the columns that are referenced by the
+ * query, if they are: Int (1-8 bytes), FloatingPoint, Bool, Utf8/LargeUtf8, Binary/LargeBinary,
+ * Date[day], Time, Timestamp, FixedSizeBinary mapped to bpchar, and virtual columns (Parquet row-groups are decoded by the backend and sent inline). Decimal,
+ * interval, list, struct and the rest stay on the CPU path.
+ */
+static bool
+__arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
+{
+	const ArrowTypeOptions *attopts = &field->attopts;
+
+	switch (attopts->tag)
+	{
+		case ArrowType__Int:
+			return (attopts->unitsz == 1 || attopts->unitsz == 2 ||
+					attopts->unitsz == 4 || attopts->unitsz == 8);
+		case ArrowType__FloatingPoint:
+			return (attopts->unitsz == 2 || attopts->unitsz == 4 || attopts->unitsz == 8);
+		case ArrowType__Bool:
+		case ArrowType__Utf8:
+		case ArrowType__LargeUtf8:
+		case ArrowType__Binary:
+		case ArrowType__LargeBinary:
+		case ArrowType__Time:
+		case ArrowType__Timestamp:
+			return true;
+		case ArrowType__Date:
+			return (attopts->date.unit == ArrowDateUnit__Day);
+		case ArrowType__FixedSizeBinary:
+			return (field->atttypid == BPCHAROID);
+		default:
+			return false;
+	}
+}
+
+bool
+arrowFdwGpuScanSupported(RelOptInfo *baserel)
+{
+	List	   *af_states;
+	Bitmapset  *referenced;
+	bool		whole_row;
+	ListCell   *lc;
+
+	if (!baseRelIsArrowFdw(baserel) ||
+		list_length(baserel->fdw_private) != 2)
+		return false;
+	af_states = linitial(baserel->fdw_private);
+	referenced = lsecond(baserel->fdw_private);
+	whole_row = bms_is_member(-FirstLowInvalidHeapAttributeNumber, referenced);
+	foreach (lc, af_states)
+	{
+		ArrowFileState *af_state = lfirst(lc);
+		RecordBatchState *rb_state;
+
+		if (af_state->rb_list == NIL)
+			continue;
+		rb_state = linitial(af_state->rb_list);
+		for (int j=0; j < af_state->ncols; j++)
+		{
+			int		k = j + 1 - FirstLowInvalidHeapAttributeNumber;
+			int		field_index = af_state->attrs[j].field_index;
+
+			if (!whole_row && !bms_is_member(k, referenced))
+				continue;
+			if (field_index < 0)
+				continue;		/* virtual column */
+			if (field_index >= rb_state->nfields ||
+				!__arrowFieldGpuScanSupported(&rb_state->fields[field_index]))
+				return false;
+		}
+	}
+	return true;
+}
+
+/*
  * RelationIsArrowFdw
  */
 bool
@@ -5356,7 +5433,42 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	}
 	else
 	{
+		/*
+		 * A Parquet row-group is decoded here (libparquet) into an Arrow-style
+		 * store that carries its column buffers; the service reads it from the
+		 * task itself (no i/o vector).
+		 */
+		kern_data_store *kds_head;
+		kern_data_store *kds_rg;
+		uint32_t	npages_direct_read = 0;
+		uint32_t	npages_vfs_read = 0;
+		uint32_t	nchunks_parquet_read = 0;
+		uint32_t	ncaches_parquet_load = 0;
+		char		error_message[320];
+		size_t		head_len = chunk_buffer->len - kds_src_offset;
+
 		Assert(kds_src->format == KDS_FORMAT_PARQUET);
+		kds_head = alloca(head_len);
+		memcpy(kds_head, (char *)kds_src, head_len);
+		Assert(kds_head->format == KDS_FORMAT_PARQUET);
+		chunk_buffer->len = kds_src_offset;
+		kds_rg = parquetReadOneRowGroup(af_state->filename,
+										kds_head,
+										__parquetFillupAllocBuffer,
+										(void *)chunk_buffer,
+										&npages_direct_read,
+										&npages_vfs_read,
+										&nchunks_parquet_read,
+										&ncaches_parquet_load,
+										error_message,
+										sizeof(error_message));
+		if (!kds_rg)
+			elog(ERROR, "Unable to load row-group %d of the parquet file '%s': %s",
+				 rb_state->rb_index, af_state->filename, error_message);
+		Assert((char *)kds_rg == chunk_buffer->data + kds_src_offset);
+		chunk_buffer->len = kds_src_offset + kds_rg->length;
+		pg_atomic_fetch_add_u32(arrow_state->nchunks_parquet_read, nchunks_parquet_read);
+		pg_atomic_fetch_add_u32(arrow_state->ncaches_parquet_load, ncaches_parquet_load);
 	}
 	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;

@@ -305,7 +305,7 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *c
 
 /* ---------------------------------------------------------------- */
 /* the message of a kernel error code (FuncOpCode | reason << 16, see scan_vm_ops.inc) */
-static void
+void
 describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen)
 {
 	if (err & 0x80000000U)
@@ -397,6 +397,7 @@ scan_engine_fini(scan_engine *eng)
 {
 	for (int i = 0; i < SCAN_MAP_CACHE; i++)
 		map_entry_drop(eng, &eng->maps[i]);
+	arrow_engine_fini(eng);
 	for (int i = 0; i < 3; i++)
 	{
 		if (eng->pipe_ready[i])
@@ -741,6 +742,8 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 		return NULL;
 	}
 	kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
+	if (kds_src->format == KDS_FORMAT_ARROW)
+		return scan_exec_arrow_task(eng, session_cmd, prog, task, p_len, err, errlen);
 	if (kds_src->format != KDS_FORMAT_BLOCK)
 	{
 		snprintf(err, errlen, "source format '%c' is not implemented by the Vulkan GpuScan yet",
