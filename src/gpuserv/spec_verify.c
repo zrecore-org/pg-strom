@@ -62,13 +62,19 @@ multiset_equal(const uint32_t *p, const uint32_t *q, size_t n, size_t rw)
 
 /*
  * 0: equal, 1: different (msg says where), 2: not comparable (a group table overflowed)
+ * kind may carry SPEC_ARROW: the group kernels' overflow list then follows the tables at pc[3], as for a join
  * pc: the push constants of the dispatch; groups: its workgroup count
  */
-int
+static int
 spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, const uint32_t *pc,
 					uint32_t groups, const uint32_t *a, const uint32_t *b, size_t words,
 					char *msg, size_t msglen)
 {
+	int			arrow = ((kind & SPEC_ARROW) != 0);
+
+	kind &= ~SPEC_ARROW;
+	if (arrow && kind == SPEC_GAGG)
+		kind = SPEC_JGAGG;		/* the same layout: tables, then an overflow list at pc[3] */
 	switch (kind)
 	{
 		case SPEC_SCAN:
@@ -195,4 +201,54 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 		}
 	}
 	return 0;
+}
+
+int
+spec_dispatch(scan_engine *eng, scan_prog *prog, int kind, const spec_shape *sh,
+			  gpu_vk_pipeline *vm, gpu_vk_pipeline *sp, gpu_vk_buffer *const *bufs, const void *pc,
+			  uint32_t groups)
+{
+	gpu_vk_ctx *vk = eng->vk;
+
+	if (!sp || sp == vm || !spec_check_enabled(eng))
+		return gpu_vk_dispatch(vk, sp ? sp : vm, bufs, pc, groups, 1, 1, NULL);
+	{
+		gpu_vk_buffer *ob = bufs[1];			/* the kernels write only their output buffer */
+		size_t		words = ob->size / 4;
+		uint32_t   *snap = malloc(ob->size), *res = malloc(ob->size);
+		char		msg[200];
+		int			rc, cmp;
+
+		if (!snap || !res)
+		{
+			free(snap);
+			free(res);
+			return gpu_vk_dispatch(vk, sp, bufs, pc, groups, 1, 1, NULL);
+		}
+		memcpy(snap, ob->map, ob->size);
+		rc = gpu_vk_dispatch(vk, vm, bufs, pc, groups, 1, 1, NULL);
+		if (rc != 0)
+			goto out;
+		memcpy(res, ob->map, ob->size);
+		memcpy(ob->map, snap, ob->size);
+		rc = gpu_vk_dispatch(vk, sp, bufs, pc, groups, 1, 1, NULL);
+		if (rc != 0)
+			goto out;
+		msg[0] = '\0';
+		cmp = spec_verify_compare(kind, prog, sh->agg_max, sh->ga_c, (const uint32_t *) pc, groups,
+								  res, (const uint32_t *) ob->map, words, msg, sizeof(msg));
+		if (cmp == 1)
+		{
+			fprintf(stderr, "pgstrom-gpuserv: specialize: CHECK FAILED (kernel kind %d): %s\n", kind, msg);
+			snprintf(vk->err, sizeof(vk->err), "the specialized kernel differs from the VM: %s", msg);
+			rc = -1;
+		}
+		else
+			fprintf(stderr, "pgstrom-gpuserv: specialize: check %s (kernel kind %d)\n",
+					cmp == 0 ? "ok" : "skipped: a group table overflowed", kind);
+out:
+		free(snap);
+		free(res);
+		return rc;
+	}
 }

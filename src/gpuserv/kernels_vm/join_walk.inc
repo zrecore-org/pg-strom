@@ -44,7 +44,10 @@
 
         g_src = outer_src;
         // the outer row: deform and scan quals only (nins = nq)
-#ifdef ARROW_SRC
+#if defined(ARROW_SRC) && defined(SPEC_PROG)
+        if (lp < nlp)
+            hit = spec_arrow_eval_row(row0 + lp, page, lp, true, regs);
+#elif defined(ARROW_SRC)
         if (lp < nlp)
             hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
 #elif defined(SPEC_PROG)

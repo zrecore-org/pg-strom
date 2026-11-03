@@ -160,6 +160,8 @@ XpuCommand *scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd,
 void	scan_agg_state_prepare(agg_state *st, int nagg);
 void	scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total);
 void	scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *ov_rec);
+/* groups the session has so far (the size a specialized GROUP BY kernel is made for) */
+uint32_t scan_group_count(const agg_state *st);
 int		scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
 								uint32_t cap, uint32_t rec_words, uint32_t blk_words);
 int		scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,

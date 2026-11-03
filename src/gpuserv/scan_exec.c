@@ -68,63 +68,19 @@ scan_engine_init(scan_engine *eng, gpu_vk_ctx *vk)
 }
 
 
-/*
- * Dispatch of a kernel: the specialized pipeline sp when the program has one ready (sp != vm), else the
- * VM kernel. In check mode (PGSTROM_GPUSERV_SPECIALIZE=check) both run on the same input and the outputs
- * must agree (spec_verify.c); a difference fails the task.
- */
-int		spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, const uint32_t *pc,
-							uint32_t groups, const uint32_t *a, const uint32_t *b, size_t words,
-							char *msg, size_t msglen);
-
+/* a task's dispatch: the specialized kernel or the VM's (spec_dispatch, spec_verify.c) */
 static int
 kdispatch(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c,
 		  gpu_vk_pipeline *vm, gpu_vk_pipeline *sp, gpu_vk_buffer *const *bufs, const void *pc,
 		  uint32_t groups)
 {
-	gpu_vk_ctx *vk = eng->vk;
+	spec_shape	sh;
 
-	if (!sp || sp == vm || !spec_check_enabled(eng))
-		return gpu_vk_dispatch(vk, sp ? sp : vm, bufs, pc, groups, 1, 1, NULL);
-	{
-		gpu_vk_buffer *ob = bufs[1];			/* the kernels write only their output buffer */
-		size_t		words = ob->size / 4;
-		uint32_t   *snap = malloc(ob->size), *res = malloc(ob->size);
-		char		msg[200];
-		int			rc, cmp;
-
-		if (!snap || !res)
-		{
-			free(snap);
-			free(res);
-			return gpu_vk_dispatch(vk, sp, bufs, pc, groups, 1, 1, NULL);
-		}
-		memcpy(snap, ob->map, ob->size);
-		rc = gpu_vk_dispatch(vk, vm, bufs, pc, groups, 1, 1, NULL);
-		if (rc != 0)
-			goto out;
-		memcpy(res, ob->map, ob->size);
-		memcpy(ob->map, snap, ob->size);
-		rc = gpu_vk_dispatch(vk, sp, bufs, pc, groups, 1, 1, NULL);
-		if (rc != 0)
-			goto out;
-		msg[0] = '\0';
-		cmp = spec_verify_compare(kind, prog, agg_max, ga_c, (const uint32_t *) pc, groups,
-								  res, (const uint32_t *) ob->map, words, msg, sizeof(msg));
-		if (cmp == 1)
-		{
-			fprintf(stderr, "pgstrom-gpuserv: specialize: CHECK FAILED (kernel kind %d): %s\n", kind, msg);
-			snprintf(vk->err, sizeof(vk->err), "the specialized kernel differs from the VM: %s", msg);
-			rc = -1;
-		}
-		else
-			fprintf(stderr, "pgstrom-gpuserv: specialize: check %s (kernel kind %d)\n",
-					cmp == 0 ? "ok" : "skipped: a group table overflowed", kind);
-out:
-		free(snap);
-		free(res);
-		return rc;
-	}
+	memset(&sh, 0, sizeof(sh));
+	sh.kind = kind;
+	sh.agg_max = agg_max;
+	sh.ga_c = ga_c;
+	return spec_dispatch(eng, prog, kind, &sh, vm, sp, bufs, pc, groups);
 }
 
 /* ---------------------------------------------------------------- */
@@ -3367,6 +3323,12 @@ void
 scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total)
 {
 	agg_merge_workgroups(prog, st, out, ngroups_total);
+}
+
+uint32_t
+scan_group_count(const agg_state *st)
+{
+	return st->groups ? st->groups->nents : 0;
 }
 
 void

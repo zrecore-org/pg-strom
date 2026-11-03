@@ -152,7 +152,10 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             bool hit = false;
 
             // A: evaluate and stage
-#ifdef ARROW_SRC
+#if defined(ARROW_SRC) && defined(SPEC_PROG)
+            if (lp < nlp)
+                hit = spec_arrow_eval_row(row0 + lp, page, lp, false, regs);
+#elif defined(ARROW_SRC)
             if (lp < nlp)
                 hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
 #elif defined(SPEC_PROG)

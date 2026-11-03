@@ -56,6 +56,7 @@ typedef struct spec_entry
 	uint64_t	key[2];
 	char		keyhex[33];
 	int			kind;
+	int			arrow;
 	int			agg_max, ga_c;
 	char	   *defs, *body;
 	int			refs;				/* programs using it (main thread only) */
@@ -136,6 +137,15 @@ spec_log(spec_mgr *m, int always, const char *fmt, ...)
 static const char *
 kind_name(int kind)
 {
+	if (kind & SPEC_ARROW)
+	{
+		static char names[8][24];
+		static int	next = 0;
+		char	   *p = names[next++ & 7];
+
+		snprintf(p, 24, "arrow %s", kind_name(kind & ~SPEC_ARROW));
+		return p;
+	}
 	switch (kind)
 	{
 		case SPEC_SCAN:		return "scan";
@@ -488,7 +498,8 @@ compile_entry(spec_mgr *m, spec_entry *e, size_t *p_len, double *p_ms)
 	snprintf(fp, sizeof(fp), "%s/spec_gen.inc", jobdir);
 	if (write_file(fp, e->body, strlen(e->body)) != 0)
 		goto fail_write;
-	snprintf(text, sizeof(text), "#include \"spec_defs.inc\"\n#include \"%s\"\n", kind_file(e->kind));
+	snprintf(text, sizeof(text), "#include \"spec_defs.inc\"\n#include \"%s\"\n",
+			 (e->arrow && e->kind == SPEC_SCAN) ? "arrow.slang" : kind_file(e->kind));
 	snprintf(mainp, sizeof(mainp), "%s/main.slang", jobdir);
 	if (write_file(mainp, text, strlen(text)) != 0)
 		goto fail_write;
@@ -496,7 +507,8 @@ compile_entry(spec_mgr *m, spec_entry *e, size_t *p_len, double *p_ms)
 	snprintf(logp, sizeof(logp), "%s/slangc.log", jobdir);
 	{
 		char	   *argv[] = {m->slangc, mainp, "-I", jobdir, "-I", m->srcdir, "-target", "spirv", "-entry",
-							  (char *) kind_entry(e->kind), "-stage", "compute", "-o", spv, NULL};
+							  (char *) ((e->arrow && e->kind == SPEC_SCAN) ? "arrow_main" : kind_entry(e->kind)),
+							  "-stage", "compute", "-o", spv, NULL};
 		int			rc = run_cmd(m, argv, logp);
 
 		if (rc != 0)
@@ -595,7 +607,10 @@ build_entry(spec_mgr *m, spec_entry *e)
 	void	   *spv;
 	double		t0 = now_ms(), t_compile = 0, t1;
 	int			from_cache = 0;
-	uint32_t	nbind = (e->kind >= SPEC_JOIN ? 6 : 5), pcs = (e->kind >= SPEC_JOIN ? 20 : 16);
+	/* the bindings and the push constants of the kernel: the join kernels have the inner buffer and a fifth word, so do
+	 * the aggregations of an Arrow record batch (arrow_exec.c) */
+	uint32_t	nbind = (e->kind >= SPEC_JOIN ? 6 : 5);
+	uint32_t	pcs = (e->kind >= SPEC_JOIN || (e->arrow && (e->kind == SPEC_AGG || e->kind == SPEC_GAGG))) ? 20 : 16;
 	char		perr[256];
 
 	spv = cache_load(m, e, &len);
@@ -620,7 +635,7 @@ build_entry(spec_mgr *m, spec_entry *e)
 	}
 	free(spv);
 	spec_log(m, 0, "%s kernel %.8s ready: %s %.0f ms, pipeline %.0f ms, %.0f ms in all",
-			 kind_name(e->kind), e->keyhex, from_cache ? "disk cache" : "slangc",
+			 kind_name(e->kind | (e->arrow ? SPEC_ARROW : 0)), e->keyhex, from_cache ? "disk cache" : "slangc",
 			 from_cache ? t1 - t0 : t_compile, now_ms() - t1, now_ms() - t0);
 	if (from_cache)
 		m->n_hits_disk++;
@@ -757,7 +772,7 @@ worker_main(void *arg)
 		if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) != SPEC_READY)
 		{
 			m->n_failed++;
-			spec_log(m, 1, "%s kernel %.8s not used: %s", kind_name(e->kind), e->keyhex,
+			spec_log(m, 1, "%s kernel %.8s not used: %s", kind_name(e->kind | (e->arrow ? SPEC_ARROW : 0)), e->keyhex,
 					 e->err[0] ? e->err : "failed");
 			__atomic_store_n(&e->state, SPEC_FAILED, __ATOMIC_RELEASE);
 		}
@@ -979,6 +994,7 @@ entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
 	e->key[1] = k1;
 	snprintf(e->keyhex, sizeof(e->keyhex), "%016llx%016llx", (unsigned long long) k0, (unsigned long long) k1);
 	e->kind = kind;
+	e->arrow = sh->arrow;
 	e->agg_max = sh->agg_max;
 	e->ga_c = sh->ga_c;
 	e->defs = defs;
@@ -995,7 +1011,7 @@ entry_find_or_add(spec_mgr *m, const spec_shape *sh, char *defs, char *body)
 	m->qtail = e;
 	pthread_cond_signal(&m->cv);
 	pthread_mutex_unlock(&m->mu);
-	spec_log(m, 0, "%s kernel %.8s queued (%zu bytes of generated code)", kind_name(kind), e->keyhex, strlen(body));
+	spec_log(m, 0, "%s kernel %.8s queued (%zu bytes of generated code)", kind_name(kind | (sh->arrow ? SPEC_ARROW : 0)), e->keyhex, strlen(body));
 	return e;
 }
 
@@ -1070,7 +1086,10 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 	spec_entry *e;
 	spec_shape	in, sh;
 	int			want_wait = 0;
+	int			arrow = ((kind & SPEC_ARROW) != 0);
 
+	kind &= ~SPEC_ARROW;
+	in.arrow = arrow;
 	in.kind = kind;
 	in.agg_max = agg_max;
 	in.ga_c = ga_c;
@@ -1088,7 +1107,7 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 		pick_shape(m, prog, kind, &in, groups_seen, &sh);
 		if (spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) != 0)
 		{
-			spec_log(m, 0, "%s program stays on the VM: %s", kind_name(kind), err);
+			spec_log(m, 0, "%s program stays on the VM: %s", kind_name(kind | (arrow ? SPEC_ARROW : 0)), err);
 			prog->spec_state = 2;
 			return vm_pipe;
 		}
@@ -1181,7 +1200,7 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, ui
 			if (!e->announced)
 			{
 				e->announced = 1;
-				spec_log(m, 0, "%s kernel %.8s in use (%d aggregates, %d slots)", kind_name(e->kind), e->keyhex,
+				spec_log(m, 0, "%s kernel %.8s in use (%d aggregates, %d slots)", kind_name(e->kind | (e->arrow ? SPEC_ARROW : 0)), e->keyhex,
 						 e->agg_max, e->ga_c);
 			}
 			if (out_shape)

@@ -166,7 +166,7 @@ build_join(int mode, scan_prog *prog)
 }
 
 static int
-emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int ga_c)
+emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int ga_c, int arrow)
 {
 	scan_prog	prog;
 	spec_shape	sh;
@@ -180,6 +180,7 @@ emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int 
 	else
 		build(kind - 1, &prog);
 	sh.kind = kind;
+	sh.arrow = arrow;
 	sh.agg_max = agg_max;
 	sh.ga_c = ga_c;
 	if (spec_generate(&sh, &prog, &defs, &body, err, sizeof(err)) != 0)
@@ -195,7 +196,9 @@ emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int 
 	snprintf(path, sizeof(path), "%s/spec_gen.inc", dir);
 	f = fopen(path, "w"); fputs(body, f); fclose(f);
 	snprintf(path, sizeof(path), "%s/main.slang", dir);
-	f = fopen(path, "w"); fprintf(f, "#include \"spec_defs.inc\"\n#include \"%s\"\n", kfile[kind]); fclose(f);
+	f = fopen(path, "w");
+	fprintf(f, "#include \"spec_defs.inc\"\n#include \"%s\"\n", (arrow && kind == SPEC_SCAN) ? "arrow.slang" : kfile[kind]);
+	fclose(f);
 	printf("%s\n", name);
 	free(defs);
 	free(body);
@@ -209,11 +212,21 @@ main(int argc, char **argv)
 	const char *out = argc > 1 ? argv[1] : "spec_out";
 	int			rc = 0;
 
-	rc |= emit(out, "scan", SPEC_SCAN, 0, 0, 0);
-	rc |= emit(out, "agg", SPEC_AGG, 0, 4, 0);
-	rc |= emit(out, "gagg", SPEC_GAGG, 0, 4, 128);
-	rc |= emit(out, "join", SPEC_JOIN, 0, 0, 0);
-	rc |= emit(out, "jagg", SPEC_JAGG, 1, 4, 0);
-	rc |= emit(out, "jgagg", SPEC_JGAGG, 2, 4, 128);
+	rc |= emit(out, "scan", SPEC_SCAN, 0, 0, 0, 0);
+	rc |= emit(out, "agg", SPEC_AGG, 0, 4, 0, 0);
+	rc |= emit(out, "gagg", SPEC_GAGG, 0, 4, 128, 0);
+	rc |= emit(out, "join", SPEC_JOIN, 0, 0, 0, 0);
+	rc |= emit(out, "jagg", SPEC_JAGG, 1, 4, 0, 0);
+	rc |= emit(out, "jgagg", SPEC_JGAGG, 2, 4, 128, 0);
+	/* a different shape of the GROUP BY kernels: exact aggregates, a small table */
+	rc |= emit(out, "gagg3", SPEC_GAGG, 0, 3, 16, 0);
+	rc |= emit(out, "jgagg3", SPEC_JGAGG, 2, 2, 32, 0);
+	/* an Arrow record batch as the outer relation */
+	rc |= emit(out, "ascan", SPEC_SCAN, 0, 0, 0, 1);
+	rc |= emit(out, "aagg", SPEC_AGG, 0, 4, 0, 1);
+	rc |= emit(out, "agagg", SPEC_GAGG, 0, 4, 128, 1);
+	rc |= emit(out, "ajoin", SPEC_JOIN, 0, 0, 0, 1);
+	rc |= emit(out, "ajagg", SPEC_JAGG, 1, 4, 0, 1);
+	rc |= emit(out, "ajgagg", SPEC_JGAGG, 2, 4, 128, 1);
 	return rc ? 1 : 0;
 }

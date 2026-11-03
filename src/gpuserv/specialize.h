@@ -28,9 +28,13 @@ enum
 	SPEC_JGAGG				/* jgagg.slang */
 };
 
+/* a kind or'ed with SPEC_ARROW: the same kernel with an Arrow record batch as the outer relation (-DARROW_SRC) */
+#define SPEC_ARROW		0x10
+
 typedef struct spec_shape
 {
 	int			kind;
+	int			arrow;		/* the outer relation is an Arrow record batch */
 	int			agg_max;	/* AGG_MAX / GA_NA of the kernel variant (the layout of the output) */
 	int			ga_c;		/* GA_C: slots of a workgroup's group table */
 } spec_shape;
@@ -64,7 +68,16 @@ gpu_vk_pipeline *spec_pipe(struct scan_engine *eng, struct scan_prog *prog, int 
 /* drop the program's reference to its compiled entry (scan_prog_free) */
 void	spec_release(struct scan_prog *prog);
 
-/* PGSTROM_GPUSERV_SPECIALIZE=check: every dispatch also runs the VM kernel and compares (scan_exec.c) */
+/* PGSTROM_GPUSERV_SPECIALIZE=check: every dispatch also runs the VM kernel and compares (spec_verify.c) */
 int		spec_check_enabled(struct scan_engine *eng);
+
+/*
+ * Dispatch of a task's kernel: the specialized pipeline sp when it is not the VM's (sp != vm), else the VM
+ * kernel; in check mode both, on the same input, and the outputs must agree (spec_verify.c), else the
+ * dispatch fails. sh: the layout of the specialized kernel's output (spec_pipe's out_shape).
+ */
+int		spec_dispatch(struct scan_engine *eng, struct scan_prog *prog, int kind, const spec_shape *sh,
+					  gpu_vk_pipeline *vm, gpu_vk_pipeline *sp, gpu_vk_buffer *const *bufs, const void *pc,
+					  uint32_t groups);
 
 #endif	/* GPUSERV_SPECIALIZE_H */

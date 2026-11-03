@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include "xpu_common.h"
 #include "kernels_spv.h"
+#include "specialize.h"
 #include "scan_exec.h"
 #include "scan_caps.h"
 
@@ -1462,6 +1463,8 @@ XpuCommand *
 scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 					 const XpuCommand *task, size_t *p_len, char *err, size_t errlen)
 {
+	gpu_vk_pipeline *sp;
+	spec_shape	sh;
 	gpu_vk_ctx *vk = eng->vk;
 	const kern_session_info *session = &session_cmd->u.session;
 	const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(session);
@@ -1495,7 +1498,9 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	ncomp = prog->ncomp;
 
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
-	if (!eng->arrow_pipe_ready[variant])
+	memset(&sh, 0, sizeof(sh));
+	sp = spec_pipe(eng, prog, SPEC_SCAN | SPEC_ARROW, 0, 0, 0, NULL, &eng->arrow_pipe[variant]);
+	if ((sp == &eng->arrow_pipe[variant] || spec_check_enabled(eng)) && !eng->arrow_pipe_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_gpuarrow8 : variant == 1 ? kspv_gpuarrow16 : kspv_gpuarrow32);
 		size_t		spv_len = (variant == 0 ? kspv_gpuarrow8_len : variant == 1 ? kspv_gpuarrow16_len : kspv_gpuarrow32_len);
@@ -1557,7 +1562,7 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 				pc[1] = g0;
 				pc[2] = base;
 				pc[3] = n;
-				if (gpu_vk_dispatch(vk, &eng->arrow_pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, SPEC_SCAN | SPEC_ARROW, &sh, &eng->arrow_pipe[variant], sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto error;
@@ -1656,11 +1661,14 @@ int
 scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 						 agg_state *st, const XpuCommand *task, char *err, size_t errlen)
 {
+	gpu_vk_pipeline *sp;
+	spec_shape	sh;
 	gpu_vk_ctx *vk = eng->vk;
 	const kern_session_info *session = &session_cmd->u.session;
 	arrow_task	at;
 	gpu_vk_buffer bout;
 	int			have_out = 0, variant, avariant, grouped, rv = -1;
+	gpu_vk_pipeline *vmpipe;
 	uint32_t	nrows, nagg, ppw, pass_rows;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	uint64_t	n_overflow = 0;
@@ -1683,11 +1691,22 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	variant = (prog->nregs <= 16 ? 0 : 1);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
 	if (grouped)
-	{
 		scan_group_variant(avariant, &cap, &rec_words, &ov_rec);
+	vmpipe = (grouped ? &eng->agagg_pipe[variant][avariant] : &eng->aagg_pipe[variant][avariant]);
+	memset(&sh, 0, sizeof(sh));
+	sh.agg_max = 4 * (avariant + 1);
+	sh.ga_c = cap;
+	sp = spec_pipe(eng, prog, (grouped ? SPEC_GAGG : SPEC_AGG) | SPEC_ARROW, sh.agg_max, sh.ga_c,
+				   st->groups ? scan_group_count(st) : 0, &sh, vmpipe);
+	if (grouped)
+	{
+		cap = sh.ga_c;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
-	if (arrow_ensure_agg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
+	if ((sp == vmpipe || spec_check_enabled(eng)) &&
+		arrow_ensure_agg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
 		return -1;
 	if (nrows == 0)
 		return 0;
@@ -1711,7 +1730,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 		uint32_t	n = nrows - first, pages, ngroups;
 		size_t		out_words, ovf_base = 0;
 		const uint32_t *out = NULL;
-		gpu_vk_pipeline *pipe = (grouped ? &eng->agagg_pipe[variant][avariant] : &eng->aagg_pipe[variant][avariant]);
+		gpu_vk_pipeline *pipe = vmpipe;
 		gpu_vk_buffer *bufs[5];
 		double		tp;
 
@@ -1761,7 +1780,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 				pc[2] = ppw;
 				pc[3] = (uint32_t) ovf_base;
 				pc[4] = ovf_cap;
-				if (gpu_vk_dispatch(vk, pipe, bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, (grouped ? SPEC_GAGG : SPEC_AGG) | SPEC_ARROW, &sh, pipe, sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto done;
@@ -1830,6 +1849,8 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 						  join_inner *ji, const XpuCommand *task,
 						  size_t *p_len, char *err, size_t errlen)
 {
+	gpu_vk_pipeline *sp;
+	spec_shape	sh;
 	gpu_vk_ctx *vk = eng->vk;
 	const kern_session_info *session = &session_cmd->u.session;
 	const kern_data_store *kds_dst_head = SESSION_KDS_DST_HEAD(session);
@@ -1868,7 +1889,9 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 	ncomp = prog->ncomp;
 	rec_words = 2 + prog->ndepth + 3 * ncomp;
 	variant = (prog->nregs <= 16 ? 0 : 1);
-	if (!eng->ajoin_ready[variant])
+	memset(&sh, 0, sizeof(sh));
+	sp = spec_pipe(eng, prog, SPEC_JOIN | SPEC_ARROW, 0, 0, 0, NULL, &eng->ajoin_pipe[variant]);
+	if ((sp == &eng->ajoin_pipe[variant] || spec_check_enabled(eng)) && !eng->ajoin_ready[variant])
 	{
 		const unsigned char *spv = (variant == 0 ? kspv_ajoin16 : kspv_ajoin32);
 		size_t		spv_len = (variant == 0 ? kspv_ajoin16_len : kspv_ajoin32_len);
@@ -1930,7 +1953,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 				pc[2] = 0;
 				pc[3] = cap;
 				pc[4] = 0;
-				if (gpu_vk_dispatch(vk, &eng->ajoin_pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, SPEC_JOIN | SPEC_ARROW, &sh, &eng->ajoin_pipe[variant], sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto error;
@@ -2054,11 +2077,14 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 							 join_inner *ji, agg_state *st, const XpuCommand *task,
 							 char *err, size_t errlen)
 {
+	gpu_vk_pipeline *sp;
+	spec_shape	sh;
 	gpu_vk_ctx *vk = eng->vk;
 	const kern_session_info *session = &session_cmd->u.session;
 	arrow_task	at;
 	gpu_vk_buffer bout;
 	int			have_out = 0, variant, avariant, grouped, rv = -1;
+	gpu_vk_pipeline *vmpipe;
 	uint32_t	nrows, nagg, ppw, pass_rows;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	uint64_t	n_overflow = 0;
@@ -2087,11 +2113,22 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	variant = (prog->nregs <= 16 ? 0 : 1);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
 	if (grouped)
-	{
 		scan_group_variant(avariant, &cap, &rec_words, &ov_rec);
+	vmpipe = (grouped ? &eng->ajgagg_pipe[variant][avariant] : &eng->ajagg_pipe[variant][avariant]);
+	memset(&sh, 0, sizeof(sh));
+	sh.agg_max = 4 * (avariant + 1);
+	sh.ga_c = cap;
+	sp = spec_pipe(eng, prog, (grouped ? SPEC_JGAGG : SPEC_JAGG) | SPEC_ARROW, sh.agg_max, sh.ga_c,
+				   st->groups ? scan_group_count(st) : 0, &sh, vmpipe);
+	if (grouped)
+	{
+		cap = sh.ga_c;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
-	if (arrow_ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
+	if ((sp == vmpipe || spec_check_enabled(eng)) &&
+		arrow_ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
 		return -1;
 	if (nrows == 0)
 		return 0;
@@ -2114,7 +2151,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		uint32_t	n = nrows - first, pages, ngroups;
 		size_t		out_words, ovf_base = 0;
 		const uint32_t *out = NULL;
-		gpu_vk_pipeline *pipe = (grouped ? &eng->ajgagg_pipe[variant][avariant] : &eng->ajagg_pipe[variant][avariant]);
+		gpu_vk_pipeline *pipe = vmpipe;
 		gpu_vk_buffer *bufs[6];
 		double		tp;
 
@@ -2164,7 +2201,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 				pc[2] = ppw;
 				pc[3] = (uint32_t) ovf_base;
 				pc[4] = ovf_cap;
-				if (gpu_vk_dispatch(vk, pipe, bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, (grouped ? SPEC_JGAGG : SPEC_JAGG) | SPEC_ARROW, &sh, pipe, sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto done;

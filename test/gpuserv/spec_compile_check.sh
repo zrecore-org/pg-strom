@@ -13,7 +13,7 @@ make -C "$GS" spec_check >/dev/null || { echo "spec_check: build failed"; exit 1
 rm -rf "$OUT"
 "$GS/spec_check" "$OUT" >/dev/null || { echo "spec_check: the generator failed"; exit 1; }
 fail=0
-for k in scan:scan_main agg:agg_main gagg:gagg_main join:join_main jagg:jagg_main jgagg:jgagg_main; do
+for k in scan:scan_main agg:agg_main gagg:gagg_main join:join_main jagg:jagg_main jgagg:jgagg_main gagg3:gagg_main jgagg3:jgagg_main ascan:arrow_main aagg:agg_main agagg:gagg_main ajoin:join_main ajagg:jagg_main ajgagg:jgagg_main; do
 	name=${k%%:*}; entry=${k##*:}
 	s=$(date +%s)
 	if "$SLANGC" "$OUT/$name/main.slang" -I "$OUT/$name" -I "$GS/kernels_vm" -target spirv -entry "$entry" -stage compute -o "$OUT/$name/out.spv" >"$OUT/$name/slangc.log" 2>&1; then
