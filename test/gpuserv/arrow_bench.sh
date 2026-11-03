@@ -37,6 +37,7 @@ max_worker_processes = 24
 max_parallel_workers = 16
 CONF
 trap stop EXIT INT TERM
+[ -f /tmp/a5b_trace ] && export PGSTROM_GPUSERV_TRACE=1
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
@@ -67,7 +68,12 @@ bench() { # label query
 		echo "   $cfg:$t ms   [$plan]"
 	done
 }
-bench "aggregate, quals" "select count(*), sum(a), max(c) from big where b > 0"
+if [ -n "$ONLY" ]; then	# ONLY='<query>': benchmark just that query (and show the service's task trace if /tmp/a5b_trace exists)
+	bench "only" "$ONLY"
+	[ -f /tmp/a5b_trace ] && grep "pgstrom-gpuserv: arrow" "$ROOT/log" | tail -12
+	exit 0
+fi
+bench "aggregate, quals""select count(*), sum(a), max(c) from big where b > 0"
 bench "aggregate, selective qual" "select count(*), sum(a), max(c) from big where a > 9990 and b < 100"
 bench "aggregate, text qual" "select count(*), sum(b) from big where f like 'abc%'"
 bench "GROUP BY 20 groups" "select a, count(*), sum(b), max(c) from big where a >= -10000 and a < -9980 group by a"

@@ -20,7 +20,7 @@ done, which is why a trivial qual costs more than it would in generated code.
 
 | | On the GPU | Stays on the CPU |
 |---|---|---|
-| Sources | Heap tables (page by page); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, and as the inner side of a GpuJoin) | GPU-Cache (a stub); GpuJoin / GpuPreAgg with an Arrow outer source. BRIN-index assisted scans: not tested on this branch |
+| Sources | Heap tables (page by page); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, GpuPreAgg and GpuJoin as the outer relation, and as the inner side of a GpuJoin) | GPU-Cache (a stub). BRIN-index assisted scans: not tested on this branch |
 | Scan (`GpuScan`) | Quals and computed projections over the types below; pass-through columns of any type; UPDATE and DELETE scans; query parameters | See "types" |
 | Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float, numeric and text aggregates; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
 | Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
@@ -77,7 +77,11 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   queries with more than `pg_strom.gpupreagg_max_groups` (default 16) estimated groups on PostgreSQL.
 - Aggregation over a join is `Aggregate (CPU) -> GpuJoin`: every joined row is shipped to the backend
   (a GPU-side join-then-aggregate was designed in the plan but is not built as of this commit).
-- GpuPreAgg over an Arrow or Parquet outer source is not supported (`Aggregate -> GpuScan`).
+- GpuPreAgg and GpuJoin run directly on an Arrow or Parquet outer source (`Custom Scan (GpuPreAgg) on <arrow table>`,
+  GpuJoin whose outer relation is the Arrow table, and aggregation over such a join), with the same shapes as for heap
+  tables. Quals, join keys and group keys may read integer, float4, bool, date, time, timestamp (every unit), utf8,
+  large_utf8 and `char(n)` columns; the Arrow date/time units are converted exactly as the CPU does. Decimal, Interval,
+  List, Struct, Date[ms], inet and macaddr columns, and numeric expressions over them, keep the table on the CPU.
 
 ## GpuJoin
 

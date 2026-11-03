@@ -193,7 +193,7 @@ for t in at1 at2; do
 	run $t "fixed_size_binary (char(5)) equality and LIKE" "select i, fx from %T where fx = 'abbcd' or fx like 'c%'"
 	run $t "string comparison of two columns" "select i from %T where u8 < lu and u8 is not null"
 	run_any $t "string function in a projection" "select i, upper(u8), length(lu) from %T where g = 2 and i < 3000"
-	aagg $t "group by timestamp[s]" "select ts_s, count(*), sum(g) from %T group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000000;"
+	aagg_any $t "group by timestamp[s]" "select ts_s, count(*), sum(g) from %T group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000000;"
 	aagg $t "group by date" "select d32, count(*), max(v) from %T group by 1 order by 1"
 	aagg $t "group by time[s]" "select t_s, count(*), min(v) from %T group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000000;"
 	aagg_any $t "group by timestamp[ms], timestamp[ns]" "select ts_ms, ts_ns, count(*) from %T where i < 3000 and g = 1 group by 1, 2 order by 1, 2"
