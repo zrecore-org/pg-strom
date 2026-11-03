@@ -168,10 +168,11 @@ sql "create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp,
 	from generate_series(1, 20000) i"
 sql "insert into sd select k, grp + 100, pay, txt, k8 from sd where k % 10 = 0"          # duplicate keys: several matches per outer row
 sql "analyze sd"
+JOINPAT="Custom Scan (GpuJoin)"
 JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
 runjoin() { # table, label, query-with-%T and %D [, settings]; the plan must use GpuJoin
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g"); set_extra=${4:-}
-	plan=$($PSQL -d scantest -c "$GPU $JOINSET $set_extra explain $qry" | grep -c "Custom Scan (GpuJoin)")
+	plan=$($PSQL -d scantest -c "$GPU $JOINSET $set_extra explain $qry" | grep -c "$JOINPAT")
 	g=$(q "$GPU $JOINSET $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if { [ "$plan" -ge 1 ] || [ "$ANYPLAN" = 1 ]; } && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
 	else echo "  FAIL  $tbl: $label (plan GpuJoin=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
@@ -187,10 +188,39 @@ for t in s1 s2 s3; do
 	runjoin $t "extra join qual" "select t.i, d.grp from %T t join %D d on t.b = d.k and t.a > d.grp"
 	runjoin $t "no match at all" "select t.i, d.grp from %T t join %D d on t.b = d.k + 1000000"
 	runjoin $t "ctid of the outer side" "select t.ctid, d.grp from %T t join %D d on t.b = d.k where t.i % 100 = 0"
+	runjoin $t "LEFT JOIN: unmatched outer rows get NULLs" "select t.i, t.b, d.grp, d.pay, d.txt from %T t left join %D d on t.b = d.k + 20000 where t.i < 60000"
+	runjoin $t "LEFT JOIN with duplicate inner keys and computed values" "select t.i, t.a + d.grp as x, coalesce(d.pay, -1) as y from %T t left join %D d on t.b = d.k"
+	runjoin $t "LEFT JOIN with an ON qual on the inner side" "select t.i, d.grp from %T t left join %D d on t.b = d.k and d.grp < 3"
+	runjoin $t "LEFT JOIN with an ON qual on the outer side" "select t.i, d.grp from %T t left join %D d on t.b = d.k and t.a > 0"
+	runjoin $t "LEFT JOIN with no match at all" "select t.i, d.grp, d.txt from %T t left join %D d on t.b = d.k + 1000000"
 done
+sql "create table sd2 as select (i - 1)::int4 as k2, (i % 5)::int4 as g2, (i * 11)::int8 as p2 from generate_series(1, 400) i"
+sql "insert into sd2 select k2, g2 + 50, p2 + 1 from sd2 where k2 % 40 = 0"                # duplicates at the second depth
+sql "create table sd3 as select (i * 3)::int4 as k3, (i % 7)::int4 as g3 from generate_series(0, 30000) i"
+sql "analyze sd2"; sql "analyze sd3"
+# stacked joins: several inner relations in one GpuJoin ("Join Quals [2]" in the plan). Without enable_seqscan=off
+# the planner keeps the big table as the probe side; the plan must show the second depth.
+JOINSET_SAVE="$JOINSET"
+JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_mergejoin=off; set enable_nestloop=off;"
+JOINPAT='Join Quals \[2\]'
+for t in s1 s2 s3; do
+	ANYPLAN=0
+	runjoin $t "two inner relations, columns of both and computed" "select t.i, t.a + d.grp + e.g2 as x, d.pay, e.p2, e.k2 from %T t join %D d on t.b = d.k join sd2 e on t.a % 400 = e.k2"
+	runjoin $t "two inner relations, duplicate keys at both depths" "select t.i, d.grp, e.g2, e.p2 from %T t join %D d on t.b = d.k join sd2 e on t.a % 400 = e.k2 where t.a > -200"
+	runjoin $t "three inner relations" "select t.i, d.grp, e.g2, f.g3 from %T t join %D d on t.b = d.k join sd2 e on t.a % 400 = e.k2 join sd3 f on t.a + 20000 = f.k3"
+	runjoin $t "inner join, then LEFT join" "select t.i, d.grp, e.g2, e.p2 from %T t join %D d on t.b = d.k left join sd2 e on t.a % 40 = e.k2 + 400"
+	runjoin $t "LEFT join, then inner join" "select t.i, d.grp, e.g2 from %T t left join %D d on t.b = d.k + 20000 join sd2 e on t.a % 400 = e.k2 where t.i < 80000"
+	runjoin $t "two LEFT joins, the first without matches" "select t.i, d.grp, e.g2 from %T t left join %D d on t.b = d.k + 1000000 left join sd2 e on t.a % 400 = e.k2 where t.i < 50000"
+	runjoin $t "text columns of two inner relations" "select t.i, d.txt, e.k2 from %T t join %D d on t.b = d.k join sd2 e on t.a % 400 = e.k2 where t.i < 30000"
+done
+JOINPAT="Custom Scan (GpuJoin)"
+for t in s1 s2 s3; do
+	runjoin $t "join of a join result (separate GpuJoins)" "select t.i, d.grp, e.g2 from %T t join %D d on t.b = d.k join sd2 e on d.grp = e.k2 where t.a < 0"
+done
+JOINSET="$JOINSET_SAVE"
 ANYPLAN=1
 runjoin s1 "aggregate on top (the join stays below the CPU aggregate)" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1"
-runjoin s1 "left join is not offloaded" "select t.i, d.grp from %T t left join %D d on t.b = d.k where t.i < 3000"
+runjoin s1 "LEFT JOIN with a WHERE qual on the inner side stays on the CPU" "select t.i, d.grp from %T t left join %D d on t.b = d.k where d.grp is null and t.i < 3000"
 runjoin s1 "float key stays on the CPU" "select t.i, d.grp from %T t join %D d on t.d::float8 = d.k::float8 where t.i < 3000"
 ANYPLAN=0
 runjoin s1 "parallel workers" "select t.i, d.grp from %T t join %D d on t.b = d.k" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"

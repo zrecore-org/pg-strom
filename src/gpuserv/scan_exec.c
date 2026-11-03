@@ -121,8 +121,9 @@ typedef struct
 	const kern_data_store *kds_src;
 	const scan_prog *prog;
 	int			maxres;
-	const kern_data_store *kds_in;		/* a join: the inner relation's store */
-	int			maxres_inner;
+	const kern_data_store *kds_in[SCAN_JOIN_MAXDEPTH + 1];	/* a join: the inner relations' stores (index 1 ...) */
+	int			maxres_inner[SCAN_JOIN_MAXDEPTH + 1];
+	int			ndepth;
 } form_ctx;
 
 /*
@@ -130,7 +131,7 @@ typedef struct
  * results of this row: (isnull, lo, hi) per computed attribute. Returns t_len, or -1.
  */
 static int
-form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *htup_in,
+form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *const *htup_in,
 		   const uint32_t *comp, uint32_t blkno, uint32_t posid,
 		   kern_tupitem *titem, uint32_t rowid, char *err, size_t errlen)
 {
@@ -140,10 +141,7 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *h
 	uint8_t		isnull_src[nsrc];
 	const unsigned char *ptrs[nsrc];
 	uint32_t	lens[nsrc];
-	int			nin = (fc->kds_in ? fc->maxres_inner : 0) + 1;
-	uint8_t		isnull_in[nin];
-	const unsigned char *ptrs_in[nin];
-	uint32_t	lens_in[nin];
+	int			nin = 1;
 	uint32_t	t_hoff;
 	uint16_t	infomask = 0;
 	int			hasnull = 0;
@@ -155,8 +153,25 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *h
 	}
 	if (fc->maxres > 0)
 		deform_src(fc->kds_src, htup, fc->maxres, isnull_src, ptrs, lens);
-	if (fc->kds_in && htup_in && fc->maxres_inner > 0)
-		deform_src(fc->kds_in, htup_in, fc->maxres_inner, isnull_in, ptrs_in, lens_in);
+	for (int d = 1; d <= fc->ndepth; d++)
+		if (fc->maxres_inner[d] + 1 > nin)
+			nin = fc->maxres_inner[d] + 1;
+	uint8_t		isnull_in[SCAN_JOIN_MAXDEPTH + 1][nin];
+	const unsigned char *ptrs_in[SCAN_JOIN_MAXDEPTH + 1][nin];
+	uint32_t	lens_in[SCAN_JOIN_MAXDEPTH + 1][nin];
+
+	for (int d = 1; d <= fc->ndepth; d++)
+	{
+		if (htup_in && htup_in[d] && fc->maxres_inner[d] > 0)
+			deform_src(fc->kds_in[d], htup_in[d], fc->maxres_inner[d], isnull_in[d], ptrs_in[d], lens_in[d]);
+		else
+		{
+			/* no inner tuple (an outer row without a match): all its columns are NULL */
+			memset(isnull_in[d], 1, nin);
+			memset(ptrs_in[d], 0, sizeof(ptrs_in[d]));
+			memset(lens_in[d], 0, sizeof(lens_in[d]));
+		}
+	}
 
 	for (int j = 0; j < nattrs; j++)
 	{
@@ -165,7 +180,7 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *h
 		if (pa->kind == SCAN_PROJ_SYS)
 			continue;
 		if (pa->kind == SCAN_PROJ_SRC ? isnull_src[pa->resno - 1] :
-			pa->kind == SCAN_PROJ_INNER ? isnull_in[pa->resno - 1] : (comp[3 * pa->comp] != 0))
+			pa->kind == SCAN_PROJ_INNER ? isnull_in[pa->depth][pa->resno - 1] : (comp[3 * pa->comp] != 0))
 		{
 			hasnull = 1;
 			infomask |= 1;				/* HEAP_HASNULL */
@@ -216,14 +231,14 @@ form_tuple(const form_ctx *fc, const unsigned char *htup, const unsigned char *h
 		}
 		else if (pa->kind == SCAN_PROJ_INNER)
 		{
-			if (isnull_in[pa->resno - 1])
+			if (isnull_in[pa->depth][pa->resno - 1])
 				continue;
-			src = ptrs_in[pa->resno - 1];
-			sz = lens_in[pa->resno - 1];
-			if (cm->attlen != fc->kds_in->colmeta[pa->resno - 1].attlen)
+			src = ptrs_in[pa->depth][pa->resno - 1];
+			sz = lens_in[pa->depth][pa->resno - 1];
+			if (cm->attlen != fc->kds_in[pa->depth]->colmeta[pa->resno - 1].attlen)
 			{
 				snprintf(err, errlen, "column %d: result type length %d differs from the inner relation (%d)",
-						 j + 1, cm->attlen, fc->kds_in->colmeta[pa->resno - 1].attlen);
+						 j + 1, cm->attlen, fc->kds_in[pa->depth]->colmeta[pa->resno - 1].attlen);
 				return -1;
 			}
 		}
@@ -2036,28 +2051,42 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		return -1;
 	}
 	kmrels = (const kern_multirels *) map;
-	if (kmrels->num_inner_rels != 1 || kmrels->length > (size_t) st.st_size)
+	if (kmrels->num_inner_rels < 1 || kmrels->num_inner_rels > SCAN_JOIN_MAXDEPTH ||
+		kmrels->length > (size_t) st.st_size || kmrels->kbuf_part_offset != 0)
 	{
-		snprintf(err, errlen, "the inner buffer holds %u relations (one is supported)", kmrels->num_inner_rels);
+		snprintf(err, errlen, "the inner buffer holds %u relations (1 to %d are supported)",
+				 kmrels->num_inner_rels, SCAN_JOIN_MAXDEPTH);
 		munmap(map, maplen);
 		return -1;
 	}
-	if (kmrels->chunks[0].is_nestloop || kmrels->chunks[0].left_outer || kmrels->chunks[0].right_outer ||
-		kmrels->chunks[0].pinned_buffer || kmrels->chunks[0].gist_offset != 0 || kmrels->kbuf_part_offset != 0)
+	ji->nrels = kmrels->num_inner_rels;
+	for (int i = 0; i < ji->nrels; i++)
 	{
-		snprintf(err, errlen, "only a plain inner hash join is implemented by the Vulkan service");
-		munmap(map, maplen);
-		return -1;
-	}
-	kds_offset = kmrels->chunks[0].kds_offset;
-	kds = (const kern_data_store *)((const char *) map + kds_offset);
-	if (kds_offset == 0 || kds_offset + kds->length > (uint64_t) st.st_size ||
-		kds->format != KDS_FORMAT_HASH || kds->hash_nslots == 0 || kds_offset + kds->length >= 0xffffffffULL)
-	{
-		snprintf(err, errlen, "the inner buffer is not a hash store the service can use (format '%c', %u slots)",
-				 kds->format, kds->hash_nslots);
-		munmap(map, maplen);
-		return -1;
+		const kern_buffer_partitions *dummy = NULL;
+		uint64_t	kds_offset = kmrels->chunks[i].kds_offset;
+		const kern_data_store *kds = (const kern_data_store *)((const char *) map + kds_offset);
+
+		(void) dummy;
+		if (kmrels->chunks[i].is_nestloop || kmrels->chunks[i].right_outer ||
+			kmrels->chunks[i].pinned_buffer || kmrels->chunks[i].gist_offset != 0)
+		{
+			snprintf(err, errlen, "only plain inner and left hash joins are implemented by the Vulkan service");
+			munmap(map, maplen);
+			return -1;
+		}
+		if (kds_offset == 0 || kds_offset + sizeof(kern_data_store) > (uint64_t) st.st_size ||
+			kds_offset + kds->length > (uint64_t) st.st_size ||
+			kds->format != KDS_FORMAT_HASH || kds->hash_nslots == 0 || kds_offset + kds->length >= 0xffffffffULL)
+		{
+			snprintf(err, errlen, "inner relation %d is not a hash store the service can use", i + 1);
+			munmap(map, maplen);
+			return -1;
+		}
+		ji->rels[i].kds = kds;
+		ji->rels[i].kds_end = (uint32_t)(kds_offset + kds->length);
+		ji->rels[i].hslot_word = (uint32_t)((kds_offset + KDS_HEAD_LENGTH(kds)) / 4);
+		ji->rels[i].nslots = kds->hash_nslots;
+		ji->rels[i].left_outer = kmrels->chunks[i].left_outer ? 1 : 0;
 	}
 	if (maplen > vk->limits.maxStorageBufferRange ||
 		gpu_vk_buffer_import_host(vk, &ji->buf, map, maplen) != 0)
@@ -2074,10 +2103,6 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 	}
 	ji->map = map;
 	ji->maplen = maplen;
-	ji->kds_in = kds;
-	ji->kds_end = (uint32_t)(kds_offset + kds->length);
-	ji->hslot_word = (uint32_t)((kds_offset + KDS_HEAD_LENGTH(kds)) / 4);
-	ji->nslots = kds->hash_nslots;
 	ji->ready = 1;
 	return 0;
 }
@@ -2143,8 +2168,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		return NULL;
 	}
 	if (!prog->words &&
-		scan_prog_build_join(session, kds_src, ji->kds_in, ji->kds_end, ji->hslot_word, ji->nslots,
-							 prog, err, errlen) != 0)
+		scan_prog_build_join(session, kds_src, ji->rels, ji->nrels, prog, err, errlen) != 0)
 		return NULL;
 	if (!prog->join_mode)
 	{
@@ -2152,7 +2176,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		return NULL;
 	}
 	ncomp = prog->ncomp;
-	rec_words = 3 + 3 * ncomp;
+	rec_words = 2 + prog->ndepth + 3 * ncomp;
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
 	if (!eng->join_pipe_ready[variant])
 	{
@@ -2264,8 +2288,12 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	fc.kds_src = kds_src;
 	fc.prog = prog;
 	fc.maxres = prog->max_src_resno;
-	fc.kds_in = ji->kds_in;
-	fc.maxres_inner = prog->max_inner_resno;
+	fc.ndepth = prog->ndepth;
+	for (int d = 1; d <= prog->ndepth; d++)
+	{
+		fc.kds_in[d] = ji->rels[d - 1].kds;
+		fc.maxres_inner[d] = prog->max_inner_resno[d];
+	}
 	{
 		size_t		head_sz = KDS_HEAD_LENGTH(kds_dst_head);
 		size_t		resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
@@ -2284,14 +2312,27 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		for (uint32_t r = 0; r < nmatch; r++)
 		{
 			const uint32_t *rec = &out[4 + (size_t) r * rec_words];
-			uint32_t	page = rec[0], lp = rec[1], item = rec[2], lpd;
+			uint32_t	page = rec[0], lp = rec[1], lpd;
 			const unsigned char *pg = PAGE_AT(&ps, page);
+			const unsigned char *inner[SCAN_JOIN_MAXDEPTH + 1];
 			int			sz;
 
-			if (page >= npages || item >= ji->maplen)
+			if (page >= npages)
 			{
 				snprintf(err, errlen, "corrupt match record");
 				goto error;
+			}
+			inner[0] = NULL;
+			for (int d = 1; d <= prog->ndepth; d++)
+			{
+				uint32_t	item = rec[1 + d];
+
+				if (item != 0xffffffffu && item >= ji->maplen)
+				{
+					snprintf(err, errlen, "corrupt match record");
+					goto error;
+				}
+				inner[d] = (item == 0xffffffffu ? NULL : (const unsigned char *) ji->map + item);
 			}
 			memcpy(&lpd, pg + 24 + (size_t) lp * 4, 4);
 			if (resp_sz + head_sz + idx_sz + usage + (lpd >> 17) + 1024 > cap_b)
@@ -2307,8 +2348,8 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 				resp = nr;
 				cap_b = ncap;
 			}
-			sz = form_tuple(&fc, pg + (lpd & 0x7fff), (const unsigned char *) ji->map + item,
-							rec + 3, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[page], lp + 1,
+			sz = form_tuple(&fc, pg + (lpd & 0x7fff), inner,
+							rec + 2 + prog->ndepth, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[page], lp + 1,
 							(kern_tupitem *)((char *) resp + resp_sz + head_sz + idx_sz + usage),
 							r, err, errlen);
 			if (sz < 0)

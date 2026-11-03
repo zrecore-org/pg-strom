@@ -391,8 +391,8 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	/* cross join is not welcome */
 	if (!restrict_clauses)
 		return NULL;
-	/* the Vulkan service joins one inner relation per GpuJoin so far */
-	if (list_length(inner_paths_list) != 1)
+	/* the Vulkan service joins up to SCAN_JOIN_MAXDEPTH inner relations per GpuJoin */
+	if (list_length(inner_paths_list) > SCAN_JOIN_MAXDEPTH)
 		return NULL;
 
 	/* setup inner_target_list */
@@ -510,6 +510,13 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	}
 	/* hash join only: no GpuNestLoop, and no GiST-index join */
 	if (hash_outer_keys == NIL)
+		return NULL;
+
+	/*
+	 * The Vulkan service returns an outer row without a match with NULL inner columns, but cannot
+	 * apply a WHERE-derived qual to the null-extended row (other_quals) yet.
+	 */
+	if (join_type == JOIN_LEFT && other_quals != NIL)
 		return NULL;
 
 	/*
@@ -938,8 +945,8 @@ GpuJoinAddCustomPath(PlannerInfo *root,
 		List	   *inner_pathlist = innerrel->pathlist;
 		ListCell   *lc;
 
-		/* quick bailout if unsupported join type (the Vulkan service runs inner joins only so far) */
-		if (join_type != JOIN_INNER)
+		/* quick bailout if unsupported join type (the Vulkan service runs inner and left joins) */
+		if (join_type != JOIN_INNER && join_type != JOIN_LEFT)
 			return;
 		//TODO: JOIN_SEMI and JOIN_ANTI
 		for (int try_parallel=0; try_parallel < 2; try_parallel++)

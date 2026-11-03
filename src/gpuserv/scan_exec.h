@@ -97,10 +97,8 @@ typedef struct join_inner
 	size_t		maplen;
 	gpu_vk_buffer buf;
 	int			own_buf;			/* buf holds a copy (the import was not possible) */
-	const kern_data_store *kds_in;	/* the inner relation's hash store inside map */
-	uint32_t	kds_end;			/* byte offset of the end of the store in the buffer */
-	uint32_t	hslot_word;			/* word offset of its hash slots */
-	uint32_t	nslots;
+	int			nrels;					/* inner relations (1 ...) */
+	scan_join_rel rels[SCAN_JOIN_MAXDEPTH];
 } join_inner;
 
 int		scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner *ji,

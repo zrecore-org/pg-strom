@@ -24,8 +24,8 @@ PostgreSQL.
 |---|---|
 | Validated on | Apple Silicon (M1 Pro, MoltenVK, macOS), PostgreSQL 17. Arm64 Linux with lavapipe (a CPU Vulkan device) checks the host code. |
 | Designed for, **not tested** | NVIDIA, AMD and Intel GPUs on Linux and Windows. Their behavior and speed are unknown. |
-| Works | GpuScan on heap tables: bool, int1/2/4/8 and float4 quals and projections run on the GPU; everything else stays on the CPU and returns the same rows. UPDATE and DELETE scans. Query parameters. Aggregation (count, sum, avg, min, max of integers), with and without GROUP BY on up to two integer keys. Inner hash joins on integer keys with one inner relation (GpuJoin). |
-| Not yet | Fast GROUP BY with many groups (the GPU only wins for roughly 16 groups or fewer today), outer / nest-loop / multi-relation GpuJoin (inner hash joins on integer keys with one inner relation work), GPU-Sort, GPU-Cache, Arrow/Parquet on the GPU, jsonb, float8 and numeric on the GPU, SELECT INTO direct. GPU-Direct Storage and PostGIS are dropped. |
+| Works | GpuScan on heap tables: bool, int1/2/4/8 and float4 quals and projections run on the GPU; everything else stays on the CPU and returns the same rows. UPDATE and DELETE scans. Query parameters. Aggregation (count, sum, avg, min, max of integers), with and without GROUP BY on up to two integer keys. Inner and LEFT hash joins on integer keys, up to four inner relations (GpuJoin). |
+| Not yet | Fast GROUP BY with many groups (the GPU only wins for roughly 16 groups or fewer today), RIGHT/FULL/nest-loop GpuJoin and joins on non-integer keys, GPU-Sort, GPU-Cache, Arrow/Parquet on the GPU, jsonb, float8 and numeric on the GPU, SELECT INTO direct. GPU-Direct Storage and PostGIS are dropped. |
 | Speed | On a 16.8M-row table: a selective scan is about 1.4x and an aggregate 2.6-4x faster than 8-process PostgreSQL on the same Mac; wide results are slower (see the plan). |
 
 **Build and try it** (macOS shown; needs PostgreSQL 15 or later with its

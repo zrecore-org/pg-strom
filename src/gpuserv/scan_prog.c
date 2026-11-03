@@ -35,10 +35,10 @@ typedef struct
 	uint32_t	nslots;
 	int			maxreg;						/* highest register in use + 1 */
 	int			slot_resno[SCAN_MAX_REGS];	/* source attribute of a slot, 0 if none */
-	int			slot_iresno[SCAN_MAX_REGS];	/* attribute of the inner relation (a join), 0 if none */
+	int			slot_iresno[SCAN_MAX_REGS];	/* attribute of an inner relation (a join), 0 if none */
+	int			slot_idepth[SCAN_MAX_REGS];	/* ... and which inner relation (1 ...) */
 	int			slot_iused[SCAN_MAX_REGS];
 	int			slot_ivtype[SCAN_MAX_REGS];
-	const kern_data_store *kds_inner;
 	int			slot_sysattr[SCAN_MAX_REGS];	/* system attribute (ctid, ...) of a slot, 0 if none */
 	int			slot_nullonly[SCAN_MAX_REGS];/* only IS [NOT] NULL reads the slot */
 	int			slot_used[SCAN_MAX_REGS];
@@ -937,29 +937,39 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 	return acc;
 }
 
+/*
+ * Join program layout (words): header (PROG_HDR_WORDS), the outer column table, the column table
+ * of each inner relation, the depth table (JDT_WORDS per inner relation), the instructions, the
+ * registers of the computed values. Instructions: scan quals [0, nq), then for each depth its hash
+ * value and its join quals, then the projection. Header: [0] outer column table, [2] instructions,
+ * [3] outer columns, [5] end of the scan quals, [6] end of the program, [7] scan qual register,
+ * [8] computed values, [9] their registers, [14] number of inner relations, [15] depth table,
+ * [16] first projection instruction.
+ */
+#define JDT_WORDS			12
+
 int
 scan_prog_build_join(const kern_session_info *session, const kern_data_store *kds_src,
-					 const kern_data_store *kds_in,
-					 uint32_t kds_end, uint32_t hslot_word, uint32_t nslots,
+					 const scan_join_rel *rels, int nrels,
 					 scan_prog *prog, char *err, size_t errlen)
 {
 	builder		b;
-	const kern_expression *kload0, *kload1, *kquals, *khash, *kjq, *kproj;
+	const kern_expression *kquals, *kproj;
 	const kern_varslot_desc *vs = SESSION_KVARS_SLOT_DESC(session);
 	const kern_data_store *kds_dst = SESSION_KDS_DST_HEAD(session);
-	int			qreg = -1, hash_reg = -1, jq_reg = -1;
-	uint32_t	nq, hash_end, join_end;
-	int			next, ncols = 0, incols = 0;
+	int			qreg = -1;
+	uint32_t	nq, proj_begin;
+	int			next, ncols = 0, incols[SCAN_JOIN_MAXDEPTH + 1] = {0}, inc_total = 0;
+	uint32_t	dsec[SCAN_JOIN_MAXDEPTH + 1][5];	/* hash begin, hash end, jq end, hash reg, jq reg */
 	uint32_t	nattrs = 0, ncomp = 0, nwords;
 	uint32_t   *comp_regs = NULL, *w;
-	int			max_src = 0, max_inner = 0;
+	int			max_src = 0;
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));
 	err[0] = '\0';
 	b.session = session;
 	b.kds_src = kds_src;
-	b.kds_inner = kds_in;
 	b.err = err;
 	b.errlen = errlen;
 	b.nslots = session->kcxt_kvars_nslots;
@@ -974,10 +984,10 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		fail(&b, "aggregation or sort on top of a join is not implemented by the Vulkan service yet");
 		goto error;
 	}
-	if (session->kcxt_kvecs_ndims != 2)
+	if (nrels < 1 || nrels > SCAN_JOIN_MAXDEPTH || session->kcxt_kvecs_ndims != nrels + 1)
 	{
-		fail(&b, "joins of %d inner relations are not implemented by the Vulkan service yet",
-			 (int) session->kcxt_kvecs_ndims - 1);
+		fail(&b, "joins of %d inner relations are not implemented by the Vulkan service (up to %d)",
+			 (int) session->kcxt_kvecs_ndims - 1, SCAN_JOIN_MAXDEPTH);
 		goto error;
 	}
 	if (b.nslots > SCAN_MAX_REGS || !kds_dst || !SESSION_KEXP_PROJECTION(session))
@@ -985,34 +995,36 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		fail(&b, "unsupported join session (slots %u)", b.nslots);
 		goto error;
 	}
-	/* the outer and inner columns the kernel variables come from */
-	kload0 = SESSION_KEXP_LOAD_VARS(session, 0);
-	if (kload0)
-		for (int i = 0; i < kload0->u.load.nitems; i++)
+	/* the columns the kernel variables come from: depth 0 is the outer relation */
+	for (int depth = 0; depth <= nrels; depth++)
+	{
+		const kern_expression *kload = SESSION_KEXP_LOAD_VARS(session, depth);
+		const kern_data_store *kds = (depth == 0 ? kds_src : rels[depth - 1].kds);
+
+		if (!kload)
+			continue;
+		for (int i = 0; i < kload->u.load.nitems; i++)
 		{
-			int		resno = kload0->u.load.desc[i].vl_resno;
-			int		slot = kload0->u.load.desc[i].vl_slot_id;
+			int		resno = kload->u.load.desc[i].vl_resno;
+			int		slot = kload->u.load.desc[i].vl_slot_id;
 
 			if (slot < 0 || slot >= (int) b.nslots)
 				continue;
-			if (resno < 0)
-				b.slot_sysattr[slot] = resno;
-			else if (resno > 0 && resno <= (int) kds_src->ncols)
-				b.slot_resno[slot] = resno;
-		}
-	kload1 = SESSION_KEXP_LOAD_VARS(session, 1);
-	if (kload1)
-		for (int i = 0; i < kload1->u.load.nitems; i++)
-		{
-			int		resno = kload1->u.load.desc[i].vl_resno;
-			int		slot = kload1->u.load.desc[i].vl_slot_id;
-
-			if (slot < 0 || slot >= (int) b.nslots)
-				continue;
-			if (resno > 0 && resno <= (int) kds_in->ncols)
+			if (depth == 0)
+			{
+				if (resno < 0)
+					b.slot_sysattr[slot] = resno;
+				else if (resno > 0 && resno <= (int) kds->ncols)
+					b.slot_resno[slot] = resno;
+			}
+			else if (resno > 0 && resno <= (int) kds->ncols)
+			{
 				b.slot_iresno[slot] = resno;
+				b.slot_idepth[slot] = depth;
+			}
 		}
-	/* sections: scan quals, hash value, join quals, projection */
+	}
+	/* sections: scan quals, then hash value and join quals of each depth, then the projection */
 	next = b.nslots;
 	kquals = SESSION_KEXP_SCAN_QUALS(session);
 	if (kquals)
@@ -1022,26 +1034,35 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			goto error;
 	}
 	nq = b.ninsn;
-	khash = SESSION_KEXP_HASH_VALUE(session, 1);
-	if (!khash)
+	for (int depth = 1; depth <= nrels; depth++)
 	{
-		fail(&b, "the join has no hash value (only hash joins are implemented)");
-		goto error;
-	}
-	next = b.nslots;
-	hash_reg = emit_hash_value(&b, khash, &next);
-	if (hash_reg < 0)
-		goto error;
-	hash_end = b.ninsn;
-	kjq = SESSION_KEXP_JOIN_QUALS(session, 1);
-	next = b.nslots;
-	if (kjq)
-	{
-		jq_reg = expr_to_reg(&b, kjq, &next);
-		if (jq_reg < 0)
+		const kern_expression *khash = SESSION_KEXP_HASH_VALUE(session, depth);
+		const kern_expression *kjq = SESSION_KEXP_JOIN_QUALS(session, depth);
+		int		hash_reg, jq_reg = -1;
+
+		if (!khash)
+		{
+			fail(&b, "join %d has no hash value (only hash joins are implemented)", depth);
 			goto error;
+		}
+		dsec[depth][0] = b.ninsn;
+		next = b.nslots;
+		hash_reg = emit_hash_value(&b, khash, &next);
+		if (hash_reg < 0)
+			goto error;
+		dsec[depth][1] = b.ninsn;
+		next = b.nslots;
+		if (kjq)
+		{
+			jq_reg = expr_to_reg(&b, kjq, &next);
+			if (jq_reg < 0)
+				goto error;
+		}
+		dsec[depth][2] = b.ninsn;
+		dsec[depth][3] = (uint32_t) hash_reg;
+		dsec[depth][4] = (jq_reg < 0) ? 0xffffffffU : (uint32_t) jq_reg;
 	}
-	join_end = b.ninsn;
+	proj_begin = b.ninsn;
 
 	kproj = SESSION_KEXP_PROJECTION(session);
 	nattrs = kproj->u.proj.nattrs;
@@ -1086,8 +1107,9 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			{
 				pa->kind = SCAN_PROJ_INNER;
 				pa->resno = b.slot_iresno[kin->u.v.var_slot_id];
-				if (pa->resno > max_inner)
-					max_inner = pa->resno;
+				pa->depth = b.slot_idepth[kin->u.v.var_slot_id];
+				if (pa->resno > prog->max_inner_resno[pa->depth])
+					prog->max_inner_resno[pa->depth] = pa->resno;
 			}
 			else if (kin->opcode == FuncOpCode__VarExpr && kin->u.v.var_slot_id < b.nslots &&
 					 (b.slot_sysattr[kin->u.v.var_slot_id] == -1 ||
@@ -1145,6 +1167,8 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		}
 		if (b.slot_iused[s])
 		{
+			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
+
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
 			if (!b.slot_ivtype[s] && b.slot_nullonly[s])
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
@@ -1154,11 +1178,13 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 				fail(&b, "inner column %d does not have the type the expression expects", b.slot_iresno[s]);
 				goto error;
 			}
-			if (b.slot_iresno[s] > incols)
-				incols = b.slot_iresno[s];
+			if (b.slot_iresno[s] > incols[b.slot_idepth[s]])
+				incols[b.slot_idepth[s]] = b.slot_iresno[s];
 		}
 	}
-	nwords = PROG_HDR_WORDS + ncols + incols + 6 * b.ninsn + ncomp;
+	for (int depth = 1; depth <= nrels; depth++)
+		inc_total += incols[depth];
+	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp;
 	if (nwords > 16384)
 	{
 		fail(&b, "the join program is too large");
@@ -1170,60 +1196,77 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		fail(&b, "out of memory");
 		goto error;
 	}
-	w[0] = PROG_HDR_WORDS;							/* outer column table */
-	w[1] = PROG_HDR_WORDS + ncols + incols;
-	w[2] = PROG_HDR_WORDS + ncols + incols;			/* instructions */
-	w[3] = ncols;
-	w[5] = nq;
-	w[6] = b.ninsn;
-	w[7] = (qreg < 0) ? 0xffffffffU : (uint32_t) qreg;
-	w[8] = ncomp;
-	w[9] = PROG_HDR_WORDS + ncols + incols + 6 * b.ninsn;
-	w[14] = hash_end;
-	w[15] = join_end;
-	w[16] = (uint32_t) hash_reg;
-	w[17] = (jq_reg < 0) ? 0xffffffffU : (uint32_t) jq_reg;
-	w[18] = PROG_HDR_WORDS + ncols;					/* inner column table */
-	w[19] = incols;
-	w[20] = kds_end;
-	w[21] = hslot_word;
-	w[22] = nslots;
-	for (int side = 0; side < 2; side++)
 	{
-		const kern_data_store *kds = (side == 0 ? kds_src : kds_in);
-		int		n = (side == 0 ? ncols : incols);
-		uint32_t base = PROG_HDR_WORDS + (side == 0 ? 0 : ncols);
+		uint32_t	dtab = PROG_HDR_WORDS + ncols + inc_total;
+		uint32_t	insnoff = dtab + JDT_WORDS * nrels;
+		uint32_t	ibase = PROG_HDR_WORDS + ncols;
 
-		for (int c = 0; c < n; c++)
+		w[0] = PROG_HDR_WORDS;						/* outer column table */
+		w[1] = insnoff;
+		w[2] = insnoff;								/* instructions */
+		w[3] = ncols;
+		w[5] = nq;
+		w[6] = b.ninsn;
+		w[7] = (qreg < 0) ? 0xffffffffU : (uint32_t) qreg;
+		w[8] = ncomp;
+		w[9] = insnoff + 6 * b.ninsn;
+		w[14] = nrels;
+		w[15] = dtab;
+		w[16] = proj_begin;
+		for (int depth = 1; depth <= nrels; depth++)
 		{
-			const kern_colmeta *cm = &kds->colmeta[c];
-			uint32_t	alen = (cm->attlen == -1 ? 0xff : cm->attlen == -2 ? 0xfe : (uint32_t) cm->attlen);
-			uint32_t	slot = 0xff, vt = 0;
+			uint32_t   *dt = &w[dtab + JDT_WORDS * (depth - 1)];
 
-			for (uint32_t s = 0; s < b.nslots; s++)
-			{
-				if (side == 0 && b.slot_used[s] && b.slot_resno[s] == c + 1)
-				{
-					slot = s;
-					vt = b.slot_vtype[s];
-				}
-				if (side == 1 && b.slot_iused[s] && b.slot_iresno[s] == c + 1)
-				{
-					slot = s;
-					vt = b.slot_ivtype[s];
-				}
-			}
-			w[base + c] = alen | ((uint32_t) cm->attalign << 8) | (vt << 12) | (slot << 16);
+			dt[0] = dsec[depth][0];
+			dt[1] = dsec[depth][1];
+			dt[2] = dsec[depth][2];
+			dt[3] = dsec[depth][3];
+			dt[4] = dsec[depth][4];
+			dt[5] = ibase;							/* this relation's column table */
+			dt[6] = incols[depth];
+			dt[7] = rels[depth - 1].kds_end;
+			dt[8] = rels[depth - 1].hslot_word;
+			dt[9] = rels[depth - 1].nslots;
+			dt[10] = rels[depth - 1].left_outer ? 1 : 0;
+			ibase += incols[depth];
 		}
+		for (int side = 0; side <= nrels; side++)
+		{
+			const kern_data_store *kds = (side == 0 ? kds_src : rels[side - 1].kds);
+			int		n = (side == 0 ? ncols : incols[side]);
+			uint32_t base = (side == 0 ? PROG_HDR_WORDS : w[dtab + JDT_WORDS * (side - 1) + 5]);
+
+			for (int c = 0; c < n; c++)
+			{
+				const kern_colmeta *cm = &kds->colmeta[c];
+				uint32_t	alen = (cm->attlen == -1 ? 0xff : cm->attlen == -2 ? 0xfe : (uint32_t) cm->attlen);
+				uint32_t	slot = 0xff, vt = 0;
+
+				for (uint32_t s = 0; s < b.nslots; s++)
+				{
+					if (side == 0 && b.slot_used[s] && b.slot_resno[s] == c + 1)
+					{
+						slot = s;
+						vt = b.slot_vtype[s];
+					}
+					if (side > 0 && b.slot_iused[s] && b.slot_idepth[s] == side && b.slot_iresno[s] == c + 1)
+					{
+						slot = s;
+						vt = b.slot_ivtype[s];
+					}
+				}
+				w[base + c] = alen | ((uint32_t) cm->attalign << 8) | (vt << 12) | (slot << 16);
+			}
+		}
+		memcpy(w + insnoff, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
+		memcpy(w + insnoff + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 	}
-	memcpy(w + PROG_HDR_WORDS + ncols + incols, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
-	memcpy(w + PROG_HDR_WORDS + ncols + incols + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 	prog->words = w;
 	prog->nwords = nwords;
 	prog->ncomp = ncomp;
 	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
 	prog->max_src_resno = max_src;
-	prog->max_inner_resno = max_inner;
+	prog->ndepth = nrels;
 	prog->join_mode = 1;
 	free(b.insn);
 	free(comp_regs);

@@ -23,6 +23,7 @@ typedef struct scan_proj_attr
 {
 	int			kind;
 	int			resno;				/* SCAN_PROJ_SRC: attribute number; SCAN_PROJ_SYS: the system attribute */
+	int			depth;				/* SCAN_PROJ_INNER: which inner relation (1 ...) */
 	int			comp;				/* SCAN_PROJ_COMP: index in the per-row results */
 	int			comp_bytes;			/* SCAN_PROJ_COMP: size of the datum (1, 2, 4 or 8) */
 } scan_proj_attr;
@@ -36,9 +37,10 @@ typedef struct scan_prog
 	uint32_t		ncomp;			/* number of computed values per matching row */
 	int				nregs;			/* registers the program needs (selects the kernel variant) */
 	int				max_src_resno;	/* highest source column copied as is */
-	/* join (GpuJoin, one inner relation) */
+	/* join (GpuJoin) */
 	int				join_mode;
-	int				max_inner_resno;	/* highest inner column copied as is */
+	int				ndepth;				/* inner relations */
+	int				max_inner_resno[SCAN_JOIN_MAXDEPTH + 1];	/* highest column of inner relation d copied as is */
 	/* aggregation (GpuPreAgg without GROUP BY) */
 	int				agg_mode;
 	int				nagg;			/* number of aggregates (not counting key columns) */
@@ -56,14 +58,22 @@ int		scan_prog_build(const struct kern_session_info *session,
 						const struct kern_data_store *kds_src,
 						scan_prog *prog, char *err, size_t errlen);
 /*
- * The same for a GpuJoin session (one inner relation, inner hash join). kds_in is the inner
- * relation's hash-format store; the three numbers describe where its hash slots and its end are
+ * The same for a GpuJoin session (hash joins of up to SCAN_JOIN_MAXDEPTH inner relations). Each
+ * inner relation is a hash-format store; the numbers describe where its hash slots and its end are
  * in the buffer the kernel sees.
  */
+typedef struct scan_join_rel
+{
+	const struct kern_data_store *kds;
+	uint32_t	kds_end;			/* byte offset of the end of the store in the inner buffer */
+	uint32_t	hslot_word;			/* word offset of its hash slots */
+	uint32_t	nslots;
+	int			left_outer;			/* unmatched outer rows are kept (NULL inner columns) */
+} scan_join_rel;
+
 int		scan_prog_build_join(const struct kern_session_info *session,
 							 const struct kern_data_store *kds_src,
-							 const struct kern_data_store *kds_in,
-							 uint32_t kds_end, uint32_t hslot_word, uint32_t nslots,
+							 const scan_join_rel *rels, int nrels,
 							 scan_prog *prog, char *err, size_t errlen);
 void	scan_prog_free(scan_prog *prog);
 

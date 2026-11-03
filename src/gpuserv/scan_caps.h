@@ -36,6 +36,7 @@ bool	scan_vm_agg_action_supported(int action);
 
 /* GROUP BY: up to this many key columns (gagg.slang's GA_NK), of these types */
 #define SCAN_GROUP_KEYS		2
+#define SCAN_JOIN_MAXDEPTH	4		/* inner relations of one GpuJoin; must equal JOIN_MAXD of join.slang */
 bool	scan_vm_groupkey_type_supported(int type_code);
 
 #endif	/* GPUSERV_SCAN_CAPS_H */
