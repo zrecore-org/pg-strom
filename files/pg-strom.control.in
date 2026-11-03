@@ -1,5 +1,14 @@
 Package: pg-strom-pg@@PG_MAJORVERSION@@
 Maintainer: KaiGai Kohei <kaigai@heterodb.com>
-Architecture: amd64
+Architecture: @@DEB_ARCH@@
 Version: @@PGSTROM_VERSION@@
+Section: database
+Priority: optional
+Depends: postgresql-@@PG_MAJORVERSION@@, libvulkan1, libarrow@@ARROW_MAJOR@@00, libparquet@@PARQUET_MAJOR@@00, libnuma1
+Recommends: mesa-vulkan-drivers
 Description: PG-Strom - extension for GPU acceleration in PostgreSQL database
+ GPU offload of scan, join and aggregation through Vulkan compute (Vulkan
+ build, experimental; validated on Apple Silicon only), and an Apache Arrow
+ and Parquet foreign data wrapper. The GPU service is installed as
+ pgstrom-gpuserv in the PostgreSQL package library directory; it needs a
+ Vulkan driver (for example mesa-vulkan-drivers). No CUDA is used.
