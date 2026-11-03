@@ -32,6 +32,7 @@ struct wire_client
 	size_t			rcap;
 	XpuCommand	   *session;			/* copy of the OpenSession frame */
 	scan_prog		prog;				/* the session's scan program, built on the first task */
+	agg_state		agg;				/* GpuPreAgg: the running partial aggregates */
 	int				closing;
 };
 
@@ -117,6 +118,17 @@ dump_kexp(const kern_expression *kexp, int depth)
 		case FuncOpCode__Projection:
 			fprintf(stderr, " nattrs=%d", kexp->u.proj.nattrs);
 			break;
+		case FuncOpCode__AggFuncs:
+			fprintf(stderr, " nattrs=%d [", kexp->u.pagg.nattrs);
+			for (int i = 0; i < kexp->u.pagg.nattrs; i++)
+				fprintf(stderr, "%saction=%u arg0=%d arg1=%d filter=%d", i ? " | " : "",
+						kexp->u.pagg.desc[i].action, kexp->u.pagg.desc[i].arg0_slot_id,
+						kexp->u.pagg.desc[i].arg1_slot_id, kexp->u.pagg.desc[i].filter_slot_id);
+			fputc(']', stderr);
+			break;
+		case FuncOpCode__SaveExpr:
+			fprintf(stderr, " -> slot%u", kexp->u.save.sv_slot_id);
+			break;
 		default:
 			break;
 	}
@@ -153,6 +165,8 @@ dump_session(const wire_server *ws, const kern_session_info *s)
 		{"hash_values",   offsetof(kern_session_info, xpucode_hash_values_packed)},
 		{"projection",    offsetof(kern_session_info, xpucode_projection)},
 		{"groupby_keyhash", offsetof(kern_session_info, xpucode_groupby_keyhash)},
+		{"groupby_keyload", offsetof(kern_session_info, xpucode_groupby_keyload)},
+		{"groupby_keycomp", offsetof(kern_session_info, xpucode_groupby_keycomp)},
 		{"groupby_actions", offsetof(kern_session_info, xpucode_groupby_actions)},
 		{"gpusort_keydesc", offsetof(kern_session_info, xpucode_gpusort_keydesc)},
 	};
@@ -244,6 +258,24 @@ reply_success(wire_client *wc, int final_plan_task)
 		wc->closing = 1;
 }
 
+static void
+reply_task_stats(wire_client *wc, int32_t scan_relidx, uint32_t raw, uint32_t in, uint32_t vfs)
+{
+	XpuCommand	resp;
+
+	memset(&resp, 0, sizeof(resp));
+	resp.magic = XpuCommandMagicNumber;
+	resp.tag = XpuCommandTag__Success;
+	resp.length = offsetof(XpuCommand, u.results.stats);
+	resp.u.results.scan_relidx = scan_relidx;
+	resp.u.results.nitems_raw = raw;
+	resp.u.results.nitems_in = in;
+	resp.u.results.nitems_out = in;
+	resp.u.results.npages_vfs_read = vfs;
+	if (write_all(wc->fd, &resp, resp.length) != 0)
+		wc->closing = 1;
+}
+
 /* ----------------------------------------------------------------
  * command handlers
  * ----------------------------------------------------------------
@@ -295,6 +327,22 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 		reply_error(wc, "XpuTaskExec", "GPU-Cache tasks are not implemented in the Vulkan service");
 		return;
 	}
+	if ((wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
+	{
+		uint64_t	raw0 = wc->agg.nitems_raw, in0 = wc->agg.nitems_in;
+		uint32_t	vfs0 = wc->agg.npages_vfs_read;
+
+		if (scan_exec_agg_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg)) != 0)
+		{
+			wlog(ws, 1, "task failed: %s", msg);
+			reply_error(wc, "XpuTaskExec", "%s", msg);
+			return;
+		}
+		reply_task_stats(wc, xcmd->u.task.scan_relidx,
+						 (uint32_t)(wc->agg.nitems_raw - raw0), (uint32_t)(wc->agg.nitems_in - in0),
+						 wc->agg.npages_vfs_read - vfs0);
+		return;
+	}
 	resp = scan_exec_task(&ws->scan, wc->session, &wc->prog, xcmd, &resp_len, msg, sizeof(msg));
 	if (!resp)
 	{
@@ -320,7 +368,25 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			handle_task_exec(ws, wc, xcmd);
 			break;
 		case XpuCommandTag__XpuTaskFinal:
-			reply_success(wc, 1);
+			if (wc->session &&
+				(wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
+			{
+				char		msg[256];
+				size_t		len = 0;
+				XpuCommand *resp = scan_exec_agg_final(wc->session, &wc->agg, &len, msg, sizeof(msg));
+
+				if (!resp)
+				{
+					wlog(ws, 1, "final failed: %s", msg);
+					reply_error(wc, "XpuTaskFinal", "%s", msg);
+					break;
+				}
+				if (write_all(wc->fd, resp, len) != 0)
+					wc->closing = 1;
+				free(resp);
+			}
+			else
+				reply_success(wc, 1);
 			break;
 		default:
 			reply_error(wc, "wire", "unknown command tag %u", xcmd->tag);

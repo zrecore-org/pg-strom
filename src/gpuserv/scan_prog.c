@@ -18,7 +18,7 @@
 #include "scan_caps.h"
 
 
-#define PROG_HDR_WORDS		10
+#define PROG_HDR_WORDS		12
 #define NO_REG				(-1)
 
 /* ----------------------------------------------------------------
@@ -426,6 +426,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	uint32_t	nwords;
 	uint32_t   *w;
 	int			max_src = 0;
+	int			agg_mode;
+	uint32_t	agg_tab[4 * SCAN_AGG_MAX];
+	int			nagg = 0;
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));
@@ -436,16 +439,35 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	b.errlen = errlen;
 	b.nslots = session->kcxt_kvars_nslots;
 
-	if ((session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__SCAN)
+	agg_mode = ((session->xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG);
+	if (!agg_mode && (session->xpu_task_flags & DEVTASK__MASK) != DEVTASK__SCAN)
 	{
-		fail(&b, "only GpuScan is implemented by the Vulkan service so far (task flags %08x)",
+		fail(&b, "only GpuScan and GpuPreAgg are implemented by the Vulkan service so far (task flags %08x)",
 			 session->xpu_task_flags);
 		goto error;
 	}
-	if (session->xpucode_groupby_actions || session->xpucode_gpusort_keydesc ||
-		session->xpucode_join_quals_packed)
+	if (session->xpucode_gpusort_keydesc || session->xpucode_join_quals_packed)
 	{
-		fail(&b, "aggregation, join and sort are not implemented by the Vulkan service yet");
+		fail(&b, "join and sort are not implemented by the Vulkan service yet");
+		goto error;
+	}
+	if (agg_mode)
+	{
+		if (!session->xpucode_groupby_actions)
+		{
+			fail(&b, "GpuPreAgg without aggregate actions");
+			goto error;
+		}
+		if (session->xpucode_groupby_keyhash || session->xpucode_groupby_keyload ||
+			session->xpucode_groupby_keycomp)
+		{
+			fail(&b, "GROUP BY is not implemented by the Vulkan service yet");
+			goto error;
+		}
+	}
+	else if (session->xpucode_groupby_actions)
+	{
+		fail(&b, "unexpected aggregate actions in a scan");
 		goto error;
 	}
 	if (b.nslots > SCAN_MAX_REGS)
@@ -453,7 +475,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		fail(&b, "too many kernel variables (%u)", b.nslots);
 		goto error;
 	}
-	if (!kds_dst || !SESSION_KEXP_PROJECTION(session))
+	if (!agg_mode && (!kds_dst || !SESSION_KEXP_PROJECTION(session)))
 	{
 		fail(&b, "the scan has no projection");
 		goto error;
@@ -492,73 +514,61 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	}
 	nq = b.ninsn;
 
-	kproj = SESSION_KEXP_PROJECTION(session);
-	nattrs = kproj->u.proj.nattrs;
-	prog->attrs = calloc(nattrs ? nattrs : 1, sizeof(scan_proj_attr));
-	comp_regs = calloc(nattrs ? nattrs : 1, sizeof(uint32_t));
-	if (!prog->attrs || !comp_regs)
+	if (agg_mode)
 	{
-		fail(&b, "out of memory");
-		goto error;
-	}
-	prog->nattrs = nattrs;
-	if (kds_dst->ncols < nattrs)
-	{
-		fail(&b, "projection has %u columns but the result store has %u", nattrs, kds_dst->ncols);
-		goto error;
-	}
-	{
-		const kern_expression *ksave = KEXP_FIRST_ARG(kproj);
-		int		perm = b.nslots;		/* computed values live above this */
+		const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
+		const kern_expression *ksave = KEXP_FIRST_ARG(kagg);
+		int		slot_reg[SCAN_MAX_REGS];
+		int		perm = b.nslots;
 
-		if (kproj->nr_args != nattrs)
+		for (int i = 0; i < SCAN_MAX_REGS; i++)
+			slot_reg[i] = -1;
+		nagg = kagg->u.pagg.nattrs;
+		if (nagg < 1 || nagg > SCAN_AGG_MAX)
 		{
-			fail(&b, "projection arguments (%u) do not match its attributes (%u)",
-				 kproj->nr_args, nattrs);
+			fail(&b, "%d aggregates (up to %d are supported)", nagg, SCAN_AGG_MAX);
 			goto error;
 		}
-		for (uint32_t j = 0; j < nattrs; j++, ksave = KEXP_NEXT_ARG(ksave))
+		prog->nattrs = nagg;
+		/* the argument values: SaveExpr slots, computed after the quals */
+		for (uint32_t j = 0; j < kagg->nr_args; j++, ksave = KEXP_NEXT_ARG(ksave))
 		{
 			const kern_expression *kin;
-			scan_proj_attr *pa = &prog->attrs[j];
+			uint32_t	slot;
 
 			if (ksave->opcode != FuncOpCode__SaveExpr || ksave->nr_args != 1)
 			{
-				fail(&b, "unexpected projection element %s", scan_vm_opcode_name(ksave->opcode));
+				fail(&b, "unexpected aggregate argument element %s", scan_vm_opcode_name(ksave->opcode));
 				goto error;
 			}
+			slot = ksave->u.save.sv_slot_id;
 			kin = KEXP_FIRST_ARG(ksave);
-			if (kin->opcode == FuncOpCode__VarExpr &&
-				kin->u.v.var_slot_id < b.nslots &&
-				(b.slot_sysattr[kin->u.v.var_slot_id] == -1 ||
-				 b.slot_sysattr[kin->u.v.var_slot_id] == -6))
+			if (slot >= b.nslots)
 			{
-				pa->kind = SCAN_PROJ_SYS;
-				pa->resno = b.slot_sysattr[kin->u.v.var_slot_id];
+				fail(&b, "aggregate argument slot %u is out of range", slot);
+				goto error;
 			}
-			else if (kin->opcode == FuncOpCode__VarExpr &&
-				kin->u.v.var_slot_id < b.nslots &&
-				b.slot_resno[kin->u.v.var_slot_id] > 0)
+			if (kin->opcode == FuncOpCode__VarExpr &&
+				kin->u.v.var_slot_id < b.nslots && b.slot_resno[kin->u.v.var_slot_id] > 0)
 			{
-				pa->kind = SCAN_PROJ_SRC;
-				pa->resno = b.slot_resno[kin->u.v.var_slot_id];
-				if (pa->resno > max_src)
-					max_src = pa->resno;
+				int		bytes;
+
+				if (!reg_vtype(kin->exptype, &bytes))
+				{
+					fail(&b, "aggregate argument of an unsupported type (opcode type %u)", kin->exptype);
+					goto error;
+				}
+				b.slot_used[kin->u.v.var_slot_id] = 1;
+				slot_reg[slot] = (int) kin->u.v.var_slot_id;
 			}
 			else
 			{
-				int		bytes, r;
-				int		nx = perm;
+				int		nx = perm, r;
 
-				if (!reg_vtype(ksave->exptype, &bytes))
-				{
-					fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
-					goto error;
-				}
 				r = expr_to_reg(&b, kin, &nx);
 				if (r < 0)
 					goto error;
-				if (r < (int) b.nslots)		/* a slot register: copy, results must be stable */
+				if (r < (int) b.nslots)
 				{
 					int		d = new_reg(&b, &nx);
 
@@ -566,13 +576,165 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 						goto error;
 					r = d;
 				}
-				pa->kind = SCAN_PROJ_COMP;
-				pa->comp = ncomp;
-				pa->comp_bytes = bytes;
-				comp_regs[ncomp++] = r;
+				slot_reg[slot] = r;
 				perm = r + 1;
 			}
 		}
+		/* the aggregate table */
+		for (int i = 0; i < nagg; i++)
+		{
+			const kern_aggregate_desc *d = &kagg->u.pagg.desc[i];
+			int		sources[2] = {d->arg0_slot_id, d->filter_slot_id};
+			int		regs_of[2] = {-1, -1};
+			uint32_t	cls;
+
+			switch (d->action)
+			{
+				case KAGG_ACTION__NROWS_ANY:	cls = 1; break;
+				case KAGG_ACTION__NROWS_COND:	cls = 2; break;
+				case KAGG_ACTION__PSUM_INT:
+				case KAGG_ACTION__PSUM_INT64:
+				case KAGG_ACTION__PAVG_INT:
+				case KAGG_ACTION__PAVG_INT64:	cls = 3; break;
+				case KAGG_ACTION__PMIN_INT32:
+				case KAGG_ACTION__PMIN_INT64:	cls = 4; break;
+				case KAGG_ACTION__PMAX_INT32:
+				case KAGG_ACTION__PMAX_INT64:	cls = 5; break;
+				default:
+					fail(&b, "aggregate action %u is not implemented by the Vulkan service", d->action);
+					goto error;
+			}
+			for (int k = 0; k < 2; k++)
+			{
+				int		sl = sources[k];
+
+				if (sl < 0)
+					continue;
+				if (sl >= (int) b.nslots)
+				{
+					fail(&b, "aggregate slot %d is out of range", sl);
+					goto error;
+				}
+				if (slot_reg[sl] >= 0)
+					regs_of[k] = slot_reg[sl];
+				else if (b.slot_resno[sl] > 0)
+				{
+					int		bytes;
+
+					if (!reg_vtype(vs[sl].vs_type_code, &bytes))
+					{
+						fail(&b, "aggregate argument of an unsupported type");
+						goto error;
+					}
+					b.slot_used[sl] = 1;
+					regs_of[k] = sl;
+				}
+				else
+				{
+					fail(&b, "aggregate slot %d has no value", sl);
+					goto error;
+				}
+			}
+			if ((cls == 2 || cls >= 3) && regs_of[0] < 0)
+			{
+				fail(&b, "aggregate %d has no argument", i);
+				goto error;
+			}
+			agg_tab[4 * i + 0] = cls;
+			agg_tab[4 * i + 1] = regs_of[0] < 0 ? 0xffffffffU : (uint32_t) regs_of[0];
+			agg_tab[4 * i + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
+			agg_tab[4 * i + 3] = 0;
+			prog->agg_action[i] = d->action;
+		}
+		prog->agg_mode = 1;
+		prog->nagg = nagg;
+	}
+	else
+	{
+		kproj = SESSION_KEXP_PROJECTION(session);
+		nattrs = kproj->u.proj.nattrs;
+		prog->attrs = calloc(nattrs ? nattrs : 1, sizeof(scan_proj_attr));
+		comp_regs = calloc(nattrs ? nattrs : 1, sizeof(uint32_t));
+		if (!prog->attrs || !comp_regs)
+		{
+			fail(&b, "out of memory");
+			goto error;
+		}
+		prog->nattrs = nattrs;
+		if (kds_dst->ncols < nattrs)
+		{
+			fail(&b, "projection has %u columns but the result store has %u", nattrs, kds_dst->ncols);
+			goto error;
+		}
+		{
+			const kern_expression *ksave = KEXP_FIRST_ARG(kproj);
+			int		perm = b.nslots;		/* computed values live above this */
+
+			if (kproj->nr_args != nattrs)
+			{
+				fail(&b, "projection arguments (%u) do not match its attributes (%u)",
+					 kproj->nr_args, nattrs);
+				goto error;
+			}
+			for (uint32_t j = 0; j < nattrs; j++, ksave = KEXP_NEXT_ARG(ksave))
+			{
+				const kern_expression *kin;
+				scan_proj_attr *pa = &prog->attrs[j];
+
+				if (ksave->opcode != FuncOpCode__SaveExpr || ksave->nr_args != 1)
+				{
+					fail(&b, "unexpected projection element %s", scan_vm_opcode_name(ksave->opcode));
+					goto error;
+				}
+				kin = KEXP_FIRST_ARG(ksave);
+				if (kin->opcode == FuncOpCode__VarExpr &&
+					kin->u.v.var_slot_id < b.nslots &&
+					(b.slot_sysattr[kin->u.v.var_slot_id] == -1 ||
+					 b.slot_sysattr[kin->u.v.var_slot_id] == -6))
+				{
+					pa->kind = SCAN_PROJ_SYS;
+					pa->resno = b.slot_sysattr[kin->u.v.var_slot_id];
+				}
+				else if (kin->opcode == FuncOpCode__VarExpr &&
+					kin->u.v.var_slot_id < b.nslots &&
+					b.slot_resno[kin->u.v.var_slot_id] > 0)
+				{
+					pa->kind = SCAN_PROJ_SRC;
+					pa->resno = b.slot_resno[kin->u.v.var_slot_id];
+					if (pa->resno > max_src)
+						max_src = pa->resno;
+				}
+				else
+				{
+					int		bytes, r;
+					int		nx = perm;
+
+					if (!reg_vtype(ksave->exptype, &bytes))
+					{
+						fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
+						goto error;
+					}
+					r = expr_to_reg(&b, kin, &nx);
+					if (r < 0)
+						goto error;
+					if (r < (int) b.nslots)		/* a slot register: copy, results must be stable */
+					{
+						int		d = new_reg(&b, &nx);
+
+						if (d < 0 || emit(&b, SOP_MOV, d, r, 0, 0, 0) < 0)
+							goto error;
+						r = d;
+					}
+					pa->kind = SCAN_PROJ_COMP;
+					pa->comp = ncomp;
+					pa->comp_bytes = bytes;
+					comp_regs[ncomp++] = r;
+					perm = r + 1;
+				}
+			}
+		}
+
+
 	}
 
 	/* the columns the kernel must walk: up to the highest slot the program reads */
@@ -597,7 +759,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		}
 	}
 
-	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp;
+	nwords = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;
 	w = calloc(nwords, sizeof(uint32_t));
 	if (!w)
 	{
@@ -614,6 +776,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	w[7] = (qreg < 0) ? 0xffffffffU : (uint32_t) qreg;
 	w[8] = ncomp;
 	w[9] = PROG_HDR_WORDS + ncols + 6 * b.ninsn;	/* compoff */
+	w[10] = nagg;
+	w[11] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp;	/* aggoff */
 	for (int c = 0; c < ncols; c++)
 	{
 		const kern_colmeta *cm = &kds_src->colmeta[c];
@@ -630,6 +794,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	}
 	memcpy(w + PROG_HDR_WORDS + ncols, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
+	memcpy(w + PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp, agg_tab, sizeof(uint32_t) * 4 * nagg);
 
 	prog->words = w;
 	prog->nwords = nwords;

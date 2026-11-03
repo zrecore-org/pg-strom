@@ -116,6 +116,27 @@ for t in s1 s2 s3; do
 	run $t "IS NOT NULL on a text column" "select f from %T where f is not null and b > 49000"
 done
 
+echo "aggregation (GpuPreAgg)"
+runagg() { # table, label, query-with-%T [, settings]
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); set_extra=${4:-}
+	plan=$($PSQL -d scantest -c "$GPU $set_extra explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
+	g=$($PSQL -d scantest -c "$GPU $set_extra $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
+	if { [ "$plan" -ge 1 ] || [ -n "$ANYPLAN" ]; } && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label"
+	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+for t in s1 s2 s3; do
+	runagg $t "count, sum, min, max, avg of int4 with NULLs" "select count(*), count(b), sum(b), min(b), max(b), avg(b) from %T"
+	runagg $t "int2 and int8 columns" "select sum(a), min(a), max(a), avg(a), sum(c), min(c), max(c), avg(c) from %T"
+	runagg $t "with quals" "select count(*), sum(a), max(c) from %T where a > 0 and b is not null"
+	runagg $t "empty input" "select count(*), count(b), sum(b), min(b), max(c), avg(a) from %T where a > 100000"
+	runagg $t "only NULL values" "select count(b), sum(b), min(b), max(b) from %T where b is null"
+	runagg $t "expressions as arguments" "select sum(a + b), max(b * 2), min(c - 1), count(a * 2) from %T"
+	runagg $t "FILTER (WHERE ...)" "select count(*) filter (where b > 0), sum(b) filter (where a < 0), max(c) filter (where e) from %T"
+	runagg $t "sum beyond 64 bits" "select sum(c + 9000000000000000000), avg(c + 9000000000000000000), sum(c) from %T"
+	ANYPLAN=1 runagg $t "float aggregates stay on the CPU too" "select count(*), sum(a), sum(d) from %T where a > 9000"
+done
+runagg s1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+
 echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)

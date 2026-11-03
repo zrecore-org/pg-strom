@@ -10,6 +10,7 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/scan_caps.h"
 
 /* static variables */
 static create_upper_paths_hook_type	create_upper_paths_next = NULL;
@@ -1395,6 +1396,9 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 		return NULL;
 	if (entry->numeric_aware && !pgstrom_enable_numeric_aggfuncs)
 		return NULL;
+	/* only the aggregates the Vulkan service implements */
+	if (!scan_vm_agg_action_supported(entry->partial_func_action))
+		return NULL;
 	return entry;
 }
 
@@ -2490,7 +2494,11 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	 * can ignore this overhead.
 	 * Elsewhere, no CPU-based Agg-node is needed.
 	 */
-	if (pgstrom_cpu_fallback_elevel < ERROR || parse->groupClause == NIL)
+	/*
+	 * The Vulkan service returns partial aggregate states only, and PostgreSQL's own
+	 * Agg node always combines and finalizes them (the service has no final buffer).
+	 */
+	if (true)
 	{
 		Path   *__path = &cpath->path;
 

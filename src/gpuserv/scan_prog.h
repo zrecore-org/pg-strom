@@ -9,7 +9,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define SCAN_MAX_REGS		32		/* must equal VM_MAX_REGS of scan.slang */
+#define SCAN_MAX_REGS		32		/* must equal VM_MAX_REGS of scan_common.slang */
+#define SCAN_AGG_MAX		12		/* must equal AGG_MAX of agg.slang */
 
 /* where an output column of the scan comes from */
 #define SCAN_PROJ_SRC		1		/* copy of the source column 'resno' (any type) */
@@ -33,6 +34,10 @@ typedef struct scan_prog
 	uint32_t		ncomp;			/* number of computed values per matching row */
 	int				nregs;			/* registers the program needs (selects the kernel variant) */
 	int				max_src_resno;	/* highest source column copied as is */
+	/* aggregation (GpuPreAgg without GROUP BY) */
+	int				agg_mode;
+	int				nagg;
+	uint16_t		agg_action[SCAN_AGG_MAX];	/* KAGG_ACTION__* of each output column */
 } scan_prog;
 
 struct kern_session_info;

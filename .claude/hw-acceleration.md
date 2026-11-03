@@ -1,4 +1,6 @@
-# PG-Strom on Vulkan: Apple Silicon first, CUDA removed (branch `apple-silicon`)
+# PG-Strom on Vulkan: Apple Silicon first, CUDA removed (branch `vulkan-gpu`)
+
+> The branch was created as `apple-silicon` and renamed `vulkan-gpu` after A2 (it is the Vulkan port, validated on Apple Silicon only). Older text below keeps the old name where it describes history.
 
 ## Context and decisions
 
@@ -8,14 +10,14 @@ The goal changed from "add Vulkan next to CUDA" to "no longer depend on NVIDIA; 
 |---|---|
 | Clean replacement: remove CUDA, no CUDA fallback or oracle | Applies to the new branch only. The oracle for tests is PostgreSQL with `pg_strom.enabled=off`. |
 | Drop GPUDirect Storage and `heterodb-extra` | Dropped. Storage is read through the CPU. |
-| Work lives on a new git branch `apple-silicon` | Created from `master` when implementation starts. **`master` stays the CUDA line (`cuda-legacy`) and is not touched by this work.** |
+| Work lives on a new git branch `vulkan-gpu` (created as `apple-silicon`) | Created from `master` when implementation starts. **`master` stays the CUDA line (`cuda-legacy`) and is not touched by this work.** |
 | Maintain `cuda-legacy` releases | The CUDA line continues on `master`; you do not test it (see next row). It is never ported or modified here. |
 | "I do not want to test NVIDIA / AMD / Intel hardware" | **Apple Silicon is the only validated platform.** The code stays Vulkan-portable by construction, but other vendors are labelled *unvalidated* in docs and `pgstrom.gpu_device_info`. The earlier request for Linux NVIDIA/AMD/Intel as CI platforms is reduced to "designed for, not tested". |
 | Scan up to 1.5x and aggregation up to 2x slower than CUDA is acceptable | Recorded as the acceptance criterion **if anyone later measures on NVIDIA**. It cannot be a gate on this branch, because it needs NVIDIA hardware. The gate here is PostgreSQL's own parallel scan on the same Mac. |
 | First Vulkan release scope: core (scan, aggregate, join), Arrow_Fdw and Parquet, jsonb, GpuSort/window and GPU-Cache | All four are in scope, sequenced by difficulty. jsonb comes last and is the most uncertain. |
 
 **Consequences of these choices (stated plainly)**
-- **This is a permanent hard fork** of the CUDA product for the `apple-silicon` branch. Upstream CUDA changes can still be merged into `master`, but not into the branch once CUDA files are deleted.
+- **This is a permanent hard fork** of the CUDA product for the `vulkan-gpu` branch. Upstream CUDA changes can still be merged into `master`, but not into the branch once CUDA files are deleted.
 - **Nothing in this plan proves performance or correctness on NVIDIA, AMD or Intel.** That risk is accepted and written down, not mitigated by hardware.
 - **PostGIS is dropped** (fp64 and about 6k lines; Apple has no fp64).
 
@@ -29,7 +31,7 @@ The goal changed from "add Vulkan next to CUDA" to "no longer depend on NVIDIA; 
 ## Target architecture
 
 ### Branch and repository policy
-- Create `apple-silicon` from `master` HEAD. `master` keeps CUDA.
+- Create `vulkan-gpu` (first named `apple-silicon`) from `master` HEAD. `master` keeps CUDA.
 - Delete CUDA, `heterodb-extra`, GPUDirect and PostGIS only on this branch (milestone A2).
 
 ### Platform scope and capability tiers
@@ -68,14 +70,14 @@ Every allocation becomes an explicit buffer (VMA) with a placement class; nothin
 - **Expected outputs:** about 4 files per PostgreSQL version (15-19) contain CUDA/GPU strings (`CUDA Stack Size` numbers, `GPU Cache: GPU0 ...`); edit mechanically.
 - **Build and packaging:** `src/Makefile` loses `-lcuda` and the nvcc rules and gains slangc, Vulkan loader and MoltenVK detection; spec and deb files drop the `heterodb-extra` Recommends and `CUDA_PATH`.
 
-## Milestones (all on branch `apple-silicon`; every gate runs on this Mac)
+## Milestones (all on branch `vulkan-gpu`; every gate runs on this Mac)
 
 | | Scope | Exit criteria |
 |---|---|---|
 | **A0** Branch and platform (**done**, see below) | Create the branch. macOS portability: event loop, `shm_open`+`ftruncate`, `F_NOCACHE`, `st_mtimespec`, `gettid`, byte swapping, runtime page size. A temporary no-CUDA stub so the host code builds without the CUDA toolkit. Linux check in an arm64 container. | Builds and loads on macOS and on arm64 Linux with no GPU; `pgstrom_guc` passes (with a no-GPU expected file); `pgstrom_init` completes and loads the dataset; the portability test passes on both. |
 | **A1** Service skeleton (**core done**, see below) | Exec'd `pgstrom-gpuserv`, launcher worker, control segment, ingest ring, `gpu_vk.c` (buffers, copy, dispatch, fence, pipeline), devcaps probe, VM scaffold. | Killing the service needs no PostgreSQL restart. Probe output matches the spike's findings. |
 | **A2** GpuScan on the VM, then remove CUDA (**in progress**, see below) | Heap `BLOCK`/`ROW` formats, quals, projection, error buffer, CPU fallback. Types: bool, int1-8, float2/4/8 (fp64 gated). **Then delete CUDA** as listed above; disable join, aggregate, sort and GPU-Cache planning with a one-time NOTICE; move their tests to a `pending_schedule`. | `dtype_int`, `dtype_float` and scan-only `dexpr_*` tests pass. Clean build with no CUDA. Expected files fixed for PostgreSQL 15-19 text. Scan 2.9x or better than 8-worker PostgreSQL on a 16.8M-row table. |
-| **A3** GpuPreAgg | NoGroups, then lock-free GroupBy, aggregate catalog with `required_caps`. | `gpupreagg` tests pass; aggregate queries match the CPU oracle; faster than parallel PostgreSQL on the same table. |
+| **A3** GpuPreAgg (**in progress**: aggregation without GROUP BY done, see "A3 status") | NoGroups, then lock-free GroupBy, aggregate catalog with `required_caps`. | `gpupreagg` tests pass; aggregate queries match the CPU oracle; faster than parallel PostgreSQL on the same table. |
 | **A3b** Desktop tier (experimental, decided) | `xpu_atomics.slang` and `xpu_fp64.slang` shims selected by `PGSTROM_CAP_*`; `float8` operators and `sum`/`min`/`max` on `int8` pushed down when the probed `devcaps` allow; buffers above `maxStorageBufferRange` through BDA (lavapipe reports only 128 MiB); no subgroup-size assumption (lavapipe reports 4). Nothing here changes the Apple path. | Kernel unit tests and a regression subset pass on lavapipe in the Linux container (fp64 results bit-exact against the CPU, 64-bit atomic aggregates exact), with the tier also forced to base on lavapipe; the Apple results are unchanged; `gpu_device_info` and the docs label the tier experimental and unvalidated; no performance claims. |
 | **A4** GpuJoin | Hash, nest-loop and outer joins; suspend/resume with state as offsets in `kern_gputask`; pinned inner buffer in shared memory. | `gpujoin` tests pass; join queries match the CPU oracle. |
 | **A5** Arrow_Fdw and Parquet | The arrow and parquet source formats in the scan kernel, ingest through the shared-memory ring or import of the mapped file. | `arrow_*` and `parquet_cache` tests pass. |
@@ -86,7 +88,7 @@ Every allocation becomes an explicit buffer (VMA) with a placement class; nothin
 
 ## A0 status (done)
 
-Branch `apple-silicon` created from `master`; nothing committed yet. Verified on this Mac (macOS 27, Apple Silicon, PostgreSQL 17.11 from Homebrew, Arrow 26.0.0) and in an arm64 Ubuntu 24.04 container (OrbStack, PostgreSQL 17.11, Arrow 26.0.0).
+Branch created from `master` (committed since; see `git log`). Verified on this Mac (macOS 27, Apple Silicon, PostgreSQL 17.11 from Homebrew, Arrow 26.0.0) and in an arm64 Ubuntu 24.04 container (OrbStack, PostgreSQL 17.11, Arrow 26.0.0).
 
 **What changed (about 48 files, 237 insertions)**
 - **Build:** `Makefile.common` escapes `#` so GNU make 3.81 (macOS) works; `src/Makefile.cuda` enters a no-CUDA mode when no toolkit is found; `src/Makefile` builds against the stub, keeps Arrow's include flags (`PG_CXXFLAGS` was reset with `:=`), links `libc++` on Darwin, adds `-mfp16-format` only when the compiler accepts it (GCC 13 on aarch64 does not), and detects libraries with `printf` instead of `echo -n` (macOS `/bin/sh` prints the `-n`).
@@ -227,6 +229,31 @@ What runs on the GPU: one workgroup per heap page, one thread per line pointer. 
 - `count(*)` queries carry a `groupby_actions` xpucode (`AggFuncs`): they are GpuPreAgg (A3), not GpuScan. Plain `SELECT ... WHERE` is the A2.3 target.
 - Leftover CUDA-era GUCs still register (`pg_strom.cuda_visible_devices`, `gpudirect_*`, `extra_ereport_level`); they go in A2.5.
 
+## A3 status (in progress)
+
+**Design: PostgreSQL finalizes, the service produces partial states.** The planner now always builds the two-phase shape the CUDA code used only when `pg_strom.cpu_fallback` was on: `Aggregate (CPU) -> Custom Scan (GpuPreAgg)`. The GpuPreAgg node returns PostgreSQL-format partial aggregate states (`kagg_state__*` in `bytea`, `int8` for counts), and PostgreSQL's own Agg node combines and finalizes them with the existing `pgstrom.fsum_int`, `fcount`, `favg_*`, `fminmax_*` functions. So the service needs no final buffer, no finalization and no `MERGE_FINAL_BUFFER`; the one-row-per-session partial result is returned in the reply to `XpuTaskFinal`, as the CUDA service did for this shape. (The planner's "complete aggregation" path, where the service finalizes, is not used.)
+
+**Done: aggregation without GROUP BY** (count(*), count(x), sum/avg/min/max of int1/2/4/8, including `FILTER (WHERE ...)` and expression arguments):
+- **Planner:** `pg_strom.enable_gpupreagg` is registered again; the aggregate catalog offers only the actions the service implements (`scan_vm_agg_action_supported()` in `scan_caps.c`: NROWS, PSUM/PAVG INT and INT64, PMIN/PMAX INT32 and INT64). float8, numeric, text and so on stay on the CPU.
+- **Kernel (`kernels_vm/agg.slang`)** shares the row evaluation with the scan kernel (`scan_common.slang`: page loads, deform, VM, `eval_row`). One workgroup runs over 32 pages; each thread accumulates the qualifying tuples of its line pointers in registers, the workgroup reduces in shared memory (no atomics, nothing shared between workgroups, nothing that needs the Vulkan memory model, so it is valid on the base tier) and writes one partial record per aggregate. Sums are carried as the sum of the low 32 bits and the sum of the high 32 bits, and the service adds them up in 128 bits, so `sum(int8)` is exact beyond 64 bits (checked against PostgreSQL's numeric).
+- **Service:** `scan_prog.c` has an aggregation mode (SaveExpr arguments compiled to registers, an aggregate table in the program); `scan_exec.c` runs the tasks, keeps a per-session `agg_state` (counts, `__int128` sums, min/max) and `scan_exec_agg_final()` builds the partial-state row for `XpuTaskFinal`; each parallel worker has its own session and PostgreSQL combines the workers' rows.
+- **Tests:** `scan_test.sh` has 28 aggregate checks per run: NULLs, empty input, NULL-only columns, expression arguments, FILTER, sums beyond 64 bits, float aggregates (stay on the CPU), parallel workers; all pass on the M1 Pro and on arm64 Linux with lavapipe.
+- **Performance (16.8M rows, server-side time of `EXPLAIN ANALYZE`, 8 CPU cores):**
+
+| Query | GPU | 8-process PostgreSQL |
+|---|---|---|
+| `count(*), sum(w), max(v), avg(v) ... WHERE v < 500` | **67 ms** | 172 ms |
+| `count(*), sum(id), min(w)` (no WHERE) | **40 ms** | 159 ms |
+| `count(*) ... WHERE v < 10` | **35 ms** | 115 ms |
+
+  That is 2.6x to 4.0x faster than parallel PostgreSQL; the A3 criterion ("faster than parallel PostgreSQL on the same table") holds for this shape. The GPU takes about 2 ms per 64 MB task. Two measured lessons: **the size of the per-thread accumulator arrays dominates** (12 entries 8.2 ms per task, 4 entries 4.3 ms; dynamically indexed arrays spill), so the kernel has variants by aggregate count (4, 8, 12) and register count (8, 16, 32), 9 SPIR-V modules; and **one workgroup per page is too small a unit** (the reduction cost about as much as the work), now 32 pages per workgroup.
+
+**Next: GROUP BY** (the main use of aggregation, e.g. the SSB queries). Design, following the "no inter-workgroup waits" rule and keeping everything valid on the base tier:
+- Each workgroup runs over a run of pages and builds a **shared-memory hash table** of its groups (key columns plus the same accumulators as above; capacity bounded by the 32 KiB of shared memory, a few hundred groups). Rows of a group that does not fit are marked **overflow**; the service aggregates those on the CPU from the source tuples.
+- The service merges the workgroups' (key, state) records into a per-session hash table keyed by the group key bytes (the same merge as for the no-group case, per group) and returns one partial row per group at `XpuTaskFinal`. PostgreSQL's Agg node still combines across workers.
+- Key types: bool and int1/2/4/8 first (hash of the key in the kernel), text and other varlena keys later (compare through the source tuple).
+- Open question: for high-cardinality keys (more groups than a workgroup's table) most rows overflow and the GPU adds little; the planner should then keep the aggregation on the CPU. The group-count estimate that the planner already has (`num_groups`) can gate it.
+
 ## Effort (an estimate, not measured)
 
 About **20-35 engineer-months** in total: the architect's 17-30 for a Vulkan-only product, minus vendor-hardware work, plus Arrow/Parquet and jsonb that were not in that figure. The largest uncertainties are the expression and type library, the lock-free PreAgg redesign, and jsonb. A rough split: A0-A2 about 5-7, A3 2-4, A4 3-5, A5 2-3, A6 3-6, A7 2-4, A8 2-4, A9 1-2.
@@ -266,7 +293,7 @@ Evidence from the Linux container: lavapipe (Mesa's CPU Vulkan, Vulkan 1.4) repo
 
 ## Assumptions to confirm (defaults used unless you object)
 
-1. `master` stays CUDA and untouched; all work is on `apple-silicon`.
+1. `master` stays CUDA and untouched; all work is on `vulkan-gpu`.
 2. Linux and non-Apple vendors are "designed for, not tested"; the optional lavapipe VM track is used for host-code portability.
 3. Desktop-tier shims are implemented after A3 (milestone A3b) as an experimental, unvalidated tier, tested on lavapipe only.
 4. `libslang` is an optional `dlopen`ed runtime dependency; servers without it run the VM only.

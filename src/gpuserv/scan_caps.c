@@ -173,3 +173,25 @@ scan_vm_func_supported(uint32_t opcode)
 {
 	return scan_vm_classify_func(opcode).cls != 0;
 }
+
+bool
+scan_vm_agg_action_supported(int action)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__NROWS_ANY:		/* count(*) */
+		case KAGG_ACTION__NROWS_COND:		/* count(x) */
+		case KAGG_ACTION__PMIN_INT32:		/* min(int1/2/4) */
+		case KAGG_ACTION__PMIN_INT64:		/* min(int8) */
+		case KAGG_ACTION__PMAX_INT32:
+		case KAGG_ACTION__PMAX_INT64:
+		case KAGG_ACTION__PSUM_INT:			/* sum(int1/2/4) */
+		case KAGG_ACTION__PSUM_INT64:		/* sum(int8) */
+		case KAGG_ACTION__PAVG_INT:			/* avg(int1/2/4) */
+		case KAGG_ACTION__PAVG_INT64:		/* avg(int8) */
+			return true;
+		default:
+			break;
+	}
+	return false;
+}

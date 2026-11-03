@@ -688,10 +688,11 @@ _PG_init(void)
 		pgstrom_init_gpu_client();
 		pgstrom_init_gpu_scan();
 		/*
-		 * The Vulkan service implements GpuScan only so far. GpuPreAgg (A3), GpuJoin (A4) and
-		 * GPU-Cache (A7) come back with their milestones: pgstrom_init_gpu_preagg(),
+		 * The Vulkan service implements GpuScan only so far. GpuJoin (A4) and
+		 * GPU-Cache (A7) come back with their milestones:
 		 * pgstrom_init_gpu_join().
 		 */
+		pgstrom_init_gpu_preagg();
 		pgstrom_init_gpu_cache();
 	}
 	/* callback for the extension checker */

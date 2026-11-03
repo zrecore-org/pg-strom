@@ -31,7 +31,8 @@ CFLAGS  += -std=gnu11
 endif
 
 SLANG_SRCS := $(sort $(wildcard kernels/*.slang))
-SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv
+AGG_SPV    := $(foreach r,8 16 32,$(foreach a,4 8 12,build/gpuagg$(r)_$(a).spv))
+SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV)
 # per-kernel extra slangc flags (the memory model kernel must declare the Vulkan memory model)
 SLANGFLAGS_memmodel := -capability vk_mem_model
 
@@ -72,12 +73,18 @@ build/vm_main.spv: kernels_vm/vm.slang kernels_vm/common.slang kernels_vm/common
 SCAN_SLANGFLAGS ?=
 # the GpuScan kernel (heap pages -> VM -> matches); its instruction numbers are shared with scan_prog.c
 # one variant per register-file size: the register count dominates the kernel's speed
-build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_vm_ops.inc | build
+build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/scan.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry scan_main -stage compute -o $@
 
 scan_caps.o: scan_caps.c scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
+
+# the aggregation kernel: variants by register count and by number of aggregates (the size of the
+# per-thread accumulator arrays matters a lot); the stem is <regs>_<aggs>
+build/gpuagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/agg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) -DSCAN_WG=128 $(SCAN_SLANGFLAGS) -target spirv -entry agg_main -stage compute -o $@
 
 scan_prog.o: scan_prog.c scan_prog.h kernels_vm/scan_vm_ops.inc ../xpu_common.h ../xpu_opcodes.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<

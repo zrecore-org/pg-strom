@@ -28,4 +28,10 @@ const char *scan_vm_opcode_name(uint32_t opcode);
 /* true if the VM implements this function opcode */
 bool	scan_vm_func_supported(uint32_t opcode);
 
+/*
+ * Aggregation (GpuPreAgg): which partial-aggregate actions (KAGG_ACTION__*, xpu_common.h)
+ * the service implements. The planner offers only these.
+ */
+bool	scan_vm_agg_action_supported(int action);
+
 #endif	/* GPUSERV_SCAN_CAPS_H */
