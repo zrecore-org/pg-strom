@@ -26,8 +26,8 @@ gcinfo() { # table, json key -> value
 }
 gcrun() { # table, label, query-with-%T [, settings]; the plan must read the GPU-Cache; the result equals the heap's
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); set_extra=${4:-}
-	plan=$($PSQL -d scantest -c "$GPU $set_extra explain $qry" 2>&1 | grep -c "GPU Cache:")
-	g=$(q "$GPU $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	plan=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; $set_extra explain $qry" 2>&1 | grep -c "GPU Cache:")
+	g=$(q "$GPU set enable_seqscan=off; $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
 	else echo "  FAIL  $tbl: $label (plan GPU Cache=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
@@ -60,6 +60,7 @@ txncmp() { # label, ending (commit|rollback), statements run first, query: the c
 begin;
 $stmts
 $GPU
+set enable_seqscan=off;
 explain $qry;
 select md5(coalesce(string_agg(x::text, E'\n' order by x::text), '')), count(*) from ($qry) x;
 $CPU
@@ -337,6 +338,15 @@ gcagg gcbig "GROUP BY over $NROWS rows" "select a % 10 as k, count(*), sum(b) fr
 sql "update gcbig set b = b + 1 where id % 3 = 0"
 sql "delete from gcbig where id % 7 = 0"
 gcrun gcbig "after bulk UPDATE and DELETE" "select id, b, f from %T where b < 1000"
-ms_gpu=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; explain analyze select count(*), sum(b), max(c) from gcbig where a > 0" | grep "Execution Time")
-ms_cpu=$($PSQL -d scantest -c "$CPU explain analyze select count(*), sum(b), max(c) from gcbig where a > 0" | grep "Execution Time")
+GCQ="select count(*), sum(b), max(c) from gcbig where a > 0"
+$PSQL -d scantest -c "$GPU $GCAGGSET $GCQ" >/dev/null
+ms_gpu=$($PSQL -d scantest -c "$GPU $GCAGGSET explain analyze $GCQ" | grep "Execution Time")
+$PSQL -d scantest -c "$CPU $GCQ" >/dev/null
+ms_cpu=$($PSQL -d scantest -c "$CPU explain analyze $GCQ" | grep "Execution Time")
 echo "  info  aggregate over $NROWS cached rows: GPU $ms_gpu; PostgreSQL $ms_cpu"
+GCQ="select id, a, f from gcbig where b < -49500"
+$PSQL -d scantest -c "$GPU set enable_seqscan=off; $GCQ" >/dev/null
+ms_gpu=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; explain analyze $GCQ" | grep "Execution Time")
+$PSQL -d scantest -c "$CPU $GCQ" >/dev/null
+ms_cpu=$($PSQL -d scantest -c "$CPU explain analyze $GCQ" | grep "Execution Time")
+echo "  info  selective scan over $NROWS cached rows: GPU $ms_gpu; PostgreSQL $ms_cpu"

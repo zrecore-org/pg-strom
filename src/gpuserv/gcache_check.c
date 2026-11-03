@@ -121,7 +121,7 @@ lb_insert(uint32_t blk, uint16_t off, uint32_t xmin, uint32_t xmax, int id, cons
 	unsigned char *tags = (unsigned char *)(ri + 1);
 	unsigned char *d = tags + 8;
 
-	memset(p, 0, 256 + (f ? strlen(f) : 0));
+	memset(p, 0, 256 + (f ? strlen(f) : 0) + 16);
 	h->type = GCREC_INSERT;
 	h->natts = 4;
 	ri->xmin = xmin; ri->xmax = xmax; ri->blkno = blk; ri->offnum = off;
@@ -131,12 +131,20 @@ lb_insert(uint32_t blk, uint16_t off, uint32_t xmin, uint32_t xmax, int id, cons
 	}
 	if (f)
 	{
-		uint32_t	vl = (uint32_t)(strlen(f) + 1);	/* a 1-byte header datum */
-		unsigned char hdr = (unsigned char)(((vl) << 1) | 1);
+		size_t		sl = strlen(f);
+		uint32_t	vl = (uint32_t)(sl < 127 ? sl + 1 : sl + 4);	/* a 1-byte or a 4-byte header */
 
 		tags[1] = 2;
 		memcpy(d, &vl, 4); d += 4;
-		*d++ = hdr; memcpy(d, f, vl - 1); d += vl - 1;
+		if (sl < 127)
+			*d++ = (unsigned char)((vl << 1) | 1);
+		else
+		{
+			uint32_t	h4 = vl << 2;
+
+			memcpy(d, &h4, 4); d += 4;
+		}
+		memcpy(d, f, sl); d += sl;
 	}
 	if (b >= 0)
 	{
@@ -431,6 +439,46 @@ main(void)
 	}
 	rpc(GCOP_ERASE, NULL, 0, 0);
 	CHECK(gcache_find(DB, REL, SIG) == NULL, "erased");
+
+	/* 8b. live strings beyond the first region size: the region grows, the other columns keep their data */
+	setup(2000, 64UL << 20);
+	g = gcache_find(DB, REL, SIG);
+	{
+		char		big[1001];
+		int			bad = 0;
+
+		memset(big, 'q', sizeof(big));
+		big[sizeof(big) - 1] = '\0';
+		for (int i = 0; i < 600; i++)
+			lb_insert(9, (uint16_t)(i + 1), 2, 0, i, big, 1, i + 0.5, 0);
+		CHECK(lb_send() == GCST_OK, "600 live strings of 1000 bytes (more than the first region holds)");
+		g = gcache_find(DB, REL, SIG);
+		if (g)
+		{
+			unsigned char tmp[8];
+			const unsigned char *ptr;
+			uint32_t	len;
+			char		err[64];
+
+			for (uint32_t r = 0; r < gcache_nrows(g); r++)
+			{
+				int			rv = gcache_fetch(g, C_F, r, tmp, &ptr, &len, err, sizeof(err));
+				double		w;
+
+				if (rv != GCF_RAW_VARLENA || len != 1004 || ptr[4] != 'q' || ptr[1003] != 'q')
+				{
+					if (bad < 3) printf("  bad string row %u rv=%d len=%u\n", r, rv, len);
+					bad++;
+				}
+				rv = gcache_fetch(g, C_W, r, tmp, &ptr, &len, err, sizeof(err));
+				memcpy(&w, ptr, 8);
+				if (rv != GCF_FIXED || w != (double) r + 0.5)
+					bad++;
+			}
+			CHECK(bad == 0, "after the growth every string and float8 is intact (%d bad)", bad);
+		}
+	}
+	rpc(GCOP_ERASE, NULL, 0, 0);
 
 	/* 9. compaction on a cache with released rows */
 	setup(1000, 64UL << 20);

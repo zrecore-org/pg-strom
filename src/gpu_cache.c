@@ -661,7 +661,7 @@ out:
 
 /* the same from the catalogs as of a snapshot (DDL callbacks) */
 static uint32_t
-__gpuCacheTableSignatureSnapshot(Form_pg_class pg_class, Snapshot snapshot, GpuCacheOptions *p_opts)
+__gpuCacheTableSignatureSnapshot(Form_pg_class pg_class, Snapshot snapshot, GpuCacheOptions *p_opts, int elevel)
 {
 	Oid			table_oid = pg_class->oid;
 	const char *trigger_config = NULL;
@@ -724,13 +724,13 @@ __gpuCacheTableSignatureSnapshot(Form_pg_class pg_class, Snapshot snapshot, GpuC
 	}
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
-	table_sig = gpuCacheTableSignatureCommon(WARNING, pg_class, tupdesc, trigger_config, p_opts);
+	table_sig = gpuCacheTableSignatureCommon(elevel, pg_class, tupdesc, trigger_config, p_opts);
 	FreeTupleDesc(tupdesc);
 	return table_sig;
 }
 
 static uint32_t
-gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot, GpuCacheOptions *p_opts)
+gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot, GpuCacheOptions *p_opts, int elevel)
 {
 	Relation	srel;
 	ScanKeyData	skey;
@@ -743,7 +743,7 @@ gpuCacheTableSignatureSnapshot(Oid table_oid, Snapshot snapshot, GpuCacheOptions
 	sscan = systable_beginscan(srel, ClassOidIndexId, true, snapshot, 1, &skey);
 	tuple = systable_getnext(sscan);
 	if (HeapTupleIsValid(tuple))
-		table_sig = __gpuCacheTableSignatureSnapshot((Form_pg_class) GETSTRUCT(tuple), snapshot, p_opts);
+		table_sig = __gpuCacheTableSignatureSnapshot((Form_pg_class) GETSTRUCT(tuple), snapshot, p_opts, elevel);
 	systable_endscan(sscan);
 	table_close(srel, AccessShareLock);
 	return table_sig;
@@ -2085,8 +2085,8 @@ __gpuCacheCallbackOnAlterTable(Oid table_oid)
 	GpuCacheOptions new_opts, old_opts;
 	uint32_t	new_signature, old_signature;
 
-	new_signature = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf, &new_opts);
-	old_signature = gpuCacheTableSignatureSnapshot(table_oid, NULL, &old_opts);
+	new_signature = gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf, &new_opts, WARNING);
+	old_signature = gpuCacheTableSignatureSnapshot(table_oid, NULL, &old_opts, WARNING);
 	if (old_signature != 0U && old_signature != new_signature)
 		__gpuCacheDropOnCommit(table_oid, old_signature, &old_opts, true);
 	if (new_signature != 0U && new_signature != old_signature)
@@ -2111,7 +2111,7 @@ __gpuCacheCallbackOnAlterTrigger(Oid trigger_oid, int elevel)
 		Relation	__rel = table_open(table_oid, NoLock);
 
 		/* validate the options now, and look for a second row-sync trigger */
-		(void) gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf, NULL);
+		(void) gpuCacheTableSignatureSnapshot(table_oid, SnapshotSelf, NULL, elevel);
 		if (is_gpucache_sync_trigger(pg_trig->tgtype, pg_trig->tgenabled, pg_trig->tgfoid, pg_trig->tgnargs) &&
 			__rel->trigdesc)
 		{
@@ -2139,7 +2139,7 @@ static void
 __gpuCacheOnDropRelation(Oid table_oid)
 {
 	GpuCacheOptions opts;
-	uint32_t	table_sig = gpuCacheTableSignatureSnapshot(table_oid, NULL, &opts);
+	uint32_t	table_sig = gpuCacheTableSignatureSnapshot(table_oid, NULL, &opts, WARNING);
 
 	__gpuCacheDropOnCommit(table_oid, table_sig, &opts, true);
 }

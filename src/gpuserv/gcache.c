@@ -92,12 +92,14 @@ struct gcache
 	gpu_vk_buffer bd;					/* the columns */
 	gpu_vk_buffer bvis;					/* the visibility bitmap */
 	uint64_t	bd_used;
+	uint64_t	budget;					/* cache_size */
 	gcache_xent *xtab[GC_XTAB_NSLOTS];
 	uint64_t	npending;				/* versions of transactions in flight */
 	uint64_t	nrecords;
 	uint64_t	last_used;
 };
 
+static char		gc_why[256];				/* why the last request failed (for the service's log) */
 static gpu_vk_ctx  *gc_vk = NULL;
 static gcache	   *gc_list = NULL;
 static uint64_t		gc_clock = 0;
@@ -426,6 +428,67 @@ gc_compact_col(gcache *g, gcache_col *col)
 	return 0;
 }
 
+/*
+ * Make the data region of column 'cidx' larger: a new device buffer, the old contents copied to it. The
+ * service runs one task at a time, so nothing on the GPU uses the old buffer. The total stays within the
+ * cache's budget (cache_size, or what the first layout needed if that was more) and the device's limit.
+ */
+static int
+gc_grow_col(gcache *g, uint32_t cidx, uint64_t need)
+{
+	gcache_col *col = &g->cols[cidx];
+	uint64_t	newcap = col->x_cap * 2;
+	uint64_t	limit = gc_vk->limits.maxStorageBufferRange;
+	uint64_t	budget = (g->budget > g->bd_used ? g->budget : g->bd_used);
+	uint64_t	shift, total;
+	gpu_vk_buffer nb;
+	uint8_t	   *ob, *nbp;
+
+	if (gc_vk->max_buffer_size != 0 && gc_vk->max_buffer_size < limit)
+		limit = gc_vk->max_buffer_size;
+	if (limit > 0xfffffff0ULL)
+		limit = 0xfffffff0ULL;
+	if (newcap < need + (need >> 2))
+		newcap = need + (need >> 2);
+	newcap = align_up(newcap, GC_BDALIGN);
+	shift = newcap - col->x_cap;
+	total = g->bd_used + shift;
+	if (total > limit || total > budget)
+	{
+		/* grow as far as the budget allows */
+		uint64_t	room = (limit < budget ? limit : budget);
+
+		if (room <= g->bd_used)
+			return -1;
+		shift = (room - g->bd_used) & ~(uint64_t)(GC_BDALIGN - 1);
+		newcap = col->x_cap + shift;
+		total = g->bd_used + shift;
+		if (newcap < need)
+			return -1;
+	}
+	if (gpu_vk_buffer_create(gc_vk, &nb, (size_t) total, 0) != 0)
+		return -1;
+	ob = (uint8_t *) g->bd.map;
+	nbp = (uint8_t *) nb.map;
+	/* everything up to the end of this column's region as it is; the later regions move up by 'shift' */
+	memcpy(nbp, ob, col->x_off + col->x_cap);
+	for (uint32_t c = cidx + 1; c < g->ncols; c++)
+	{
+		gcache_col *oc = &g->cols[c];
+
+		if (oc->kind == GCK_VAR)
+		{
+			memcpy(nbp + oc->x_off + shift, ob + oc->x_off, oc->x_cap);
+			oc->x_off += shift;
+		}
+	}
+	col->x_cap = newcap;
+	gpu_vk_buffer_destroy(gc_vk, &g->bd);
+	g->bd = nb;
+	g->bd_used = total;
+	return 0;
+}
+
 static int
 gc_x_alloc(gcache *g, gcache_col *col, uint32_t len, uint32_t *p_off)
 {
@@ -433,11 +496,20 @@ gc_x_alloc(gcache *g, gcache_col *col, uint32_t len, uint32_t *p_off)
 
 	if (pos + len > col->x_cap)
 	{
-		if (col->x_dead == 0 || gc_compact_col(g, col) != 0)
+		if (col->x_dead > 0 && gc_compact_col(g, col) != 0)
 			return -1;
 		pos = align_up(col->x_used, 4);
 		if (pos + len > col->x_cap)
-			return -1;
+		{
+			uint32_t	cidx = (uint32_t)(col - g->cols);
+
+			if (gc_grow_col(g, cidx, pos + len) != 0)
+			{
+				snprintf(gc_why, sizeof(gc_why), "the data region of column %u is full (%llu bytes) and the cache cannot grow",
+						 cidx + 1, (unsigned long long) col->x_cap);
+				return -1;
+			}
+		}
 	}
 	*p_off = (uint32_t) pos;
 	col->x_used = pos + len;
@@ -571,6 +643,7 @@ gcache_create(const kern_gcache_op *op, const gcache_setup_hdr *sh, const gcache
 		pos = col->x_off + col->x_cap;
 	}
 	g->bd_used = pos;
+	g->budget = cache_size;
 	limit = gc_vk->limits.maxStorageBufferRange;
 	if (gc_vk->max_buffer_size != 0 && gc_vk->max_buffer_size < limit)
 		limit = gc_vk->max_buffer_size;
@@ -634,7 +707,6 @@ gc_insert(gcache *g, const unsigned char *rec, uint32_t len, uint32_t natts)
 	const unsigned char *tags, *p, *end = rec + len;
 	uint64_t	key;
 	uint32_t	slot;
-	uint8_t	   *base = (uint8_t *) g->bd.map;
 	size_t		tagsz = (size_t)((natts + 7) & ~7U);
 
 	if (len < sizeof(gcache_rec_hdr) + sizeof(gcache_rec_insert) + tagsz || natts != g->ncols)
@@ -648,13 +720,19 @@ gc_insert(gcache *g, const unsigned char *rec, uint32_t len, uint32_t natts)
 	{
 		/* a version with this ctid is there: only an identical resend is harmless */
 		if (g->xmin[slot] != ri->xmin || g->xmax[slot] != ri->xmax)
+		{
+			snprintf(gc_why, sizeof(gc_why), "ctid (%u,%u) is inserted again with another version", ri->blkno, ri->offnum);
 			return GCST_INCONSISTENT;
+		}
 		/* overwrite it below */
 	}
 	else
 	{
 		if (gc_slot_alloc(g, &slot) != 0)
+		{
+			snprintf(gc_why, sizeof(gc_why), "more row versions than max_num_rows");
 			return GCST_OVERFLOW;
+		}
 		g->alloc[slot] = 1;
 		g->ctid[slot] = key;
 		{
@@ -715,10 +793,10 @@ gc_insert(gcache *g, const unsigned char *rec, uint32_t len, uint32_t natts)
 				return GCST_BAD_REQUEST;
 			if (gc_x_alloc(g, col, vl, &off) != 0)
 				return GCST_OVERFLOW;
-			memcpy(base + col->x_off + off, p, vl);
+			memcpy((uint8_t *) g->bd.map + col->x_off + off, p, vl);   /* the buffer may have moved */
 			p += vl;
 			pr = (uint64_t) off | ((uint64_t) vl << 32);
-			memcpy(base + col->v_off + 8 * (uint64_t) slot, &pr, 8);
+			memcpy((uint8_t *) g->bd.map + col->v_off + 8 * (uint64_t) slot, &pr, 8);
 		}
 		else
 		{
@@ -727,9 +805,9 @@ gc_insert(gcache *g, const unsigned char *rec, uint32_t len, uint32_t natts)
 			if (tag != 1 || p + w > end)
 				return GCST_BAD_REQUEST;
 			if (col->kind == GCK_BOOL)
-				gc_bit_set(base + col->v_off, slot, p[0] != 0);
+				gc_bit_set((uint8_t *) g->bd.map + col->v_off, slot, p[0] != 0);
 			else
-				memcpy(base + col->v_off + (uint64_t) w * slot, p, w);
+				memcpy((uint8_t *) g->bd.map + col->v_off + (uint64_t) w * slot, p, w);
 			p += w;
 		}
 		gc_bit_set(gc_col_nm(g, col), slot, 1);
@@ -746,7 +824,10 @@ gc_delete(gcache *g, const gcache_rec_delete *rd)
 	gcache_xent *x;
 
 	if (slot == GC_NO_SLOT)
+	{
+		snprintf(gc_why, sizeof(gc_why), "delete of an unknown ctid (%u,%u)", rd->blkno, rd->offnum);
 		return GCST_INCONSISTENT;
+	}
 	if (g->xmax[slot] == rd->xid)
 		return GCST_OK;
 	if (g->xmax[slot] != GC_INVALID_XID)
@@ -999,9 +1080,12 @@ gcache_handle_op(const XpuCommand *xcmd, size_t *p_len)
 			g = gcache_find(op->database_oid, op->table_oid, op->table_sig);
 			if (!g)
 				return gc_reply(GCST_NOT_FOUND, NULL, 0, 0, p_len);
+			gc_why[0] = '\0';
 			rv = gc_apply_log(g, data, datalen, op->nrecords);
 			if (rv == GCST_OVERFLOW || rv == GCST_INCONSISTENT || rv == GCST_BAD_REQUEST)
 			{
+				fprintf(stderr, "pgstrom-gpuserv: GPU-Cache of table %u dropped (status %d, %u rows in use of %u): %s\n",
+						g->table_oid, rv, g->nlive, g->max_rows, gc_why[0] ? gc_why : "see the request");
 				/* the cache no longer mirrors the table: drop it */
 				gcache_unlink(g);
 				gcache_destroy(g);
