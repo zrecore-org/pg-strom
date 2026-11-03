@@ -1437,6 +1437,7 @@ __gpuCacheInitialLoad(GpuCacheDesc *gc_desc, Relation rel)
 			if (!pg_atomic_compare_exchange_u32(&gc_sstate->phase, &expected, GPUCACHE_PHASE__NOW_LOADING))
 				continue;
 			pg_atomic_write_u32(&gc_sstate->loader_pid, (uint32_t) MyProcPid);
+			gpuCacheTouch(gc_desc);		/* the rows of this transaction that it loads are finalized at its end */
 			seq0 = pg_atomic_read_u32(&gc_sstate->invalidate_seq);
 			gen0 = gcache_service_generation();
 			PG_TRY();
