@@ -5875,8 +5875,8 @@ pgstromExplainArrowFdwFiles(ScanState *ss,
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	chunk_sz = alloca(sizeof(size_t) * tupdesc->natts);
-	memset(chunk_sz, 0, sizeof(size_t) * tupdesc->natts);
+	chunk_sz = alloca(sizeof(size_t) * (tupdesc->natts + 1));	/* indexed by attnum 1..natts */
+	memset(chunk_sz, 0, sizeof(size_t) * (tupdesc->natts + 1));
 	foreach (lc1, arrow_state_list)
 	{
 		ArrowFdwState *arrow_state = lfirst(lc1);

@@ -981,22 +981,40 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 						fail(&b, "computed column of an unsupported type (opcode type %u)", ksave->exptype);
 						goto error;
 					}
+					int		sv = (int) ksave->u.save.sv_slot_id;
+
 					r = expr_to_reg(&b, kin, &nx);
 					if (r < 0)
 						goto error;
-					if (r < (int) b.nslots)		/* a slot register: copy, results must be stable */
+					if (sv < (int) b.nslots && sv != r &&
+						b.slot_resno[sv] <= 0 && b.slot_iresno[sv] <= 0 && b.slot_sysattr[sv] == 0)
 					{
-						int		d = new_reg(&b, &nx);
-
-						if (d < 0 || emit(&b, SOP_MOV, d, r, 0, 0, 0) < 0)
+						/*
+						 * The SaveExpr's own slot register is free (nothing reads it as a
+						 * variable): keep the result there, so the computed columns do not
+						 * add to the registers above the slots and the temporaries can be
+						 * reused by the next column.
+						 */
+						if (emit(&b, SOP_MOV, sv, r, 0, 0, 0) < 0)
 							goto error;
-						r = d;
+						r = sv;
+					}
+					else
+					{
+						if (r < (int) b.nslots)		/* a slot register: copy, results must be stable */
+						{
+							int		d = new_reg(&b, &nx);
+
+							if (d < 0 || emit(&b, SOP_MOV, d, r, 0, 0, 0) < 0)
+								goto error;
+							r = d;
+						}
+						perm = r + 1;
 					}
 					pa->kind = SCAN_PROJ_COMP;
 					pa->comp = ncomp;
 					pa->comp_bytes = bytes;
 					comp_regs[ncomp++] = r;
-					perm = r + 1;
 				}
 			}
 		}

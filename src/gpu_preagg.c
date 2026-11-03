@@ -1379,6 +1379,13 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 
 					if (strcmp(buf, cat->aggfn_signature) == 0)
 					{
+						/*
+						 * min/max/sum(money) share the int8 actions, but the Vulkan
+						 * VM has no money type: the service would reject the query
+						 * at run time instead of leaving it to the CPU.
+						 */
+						if (strstr(cat->aggfn_signature, "(money)") != NULL)
+							break;
 						__setup_aggfunc_catalog_entry(entry, cat, proc);
 						break;
 					}
