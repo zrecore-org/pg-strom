@@ -70,8 +70,68 @@
 #    multiplication or the scale handling.
 #
 # ---------------------------------------------------------------------------------------------------------------
-# OPEN (not fixed): the planner does not know the service's limits and the service has no CPU fallback, so a query the
-# service cannot translate FAILS instead of running on the CPU.
+# FOUND BY THE DIFFERENTIAL FUZZER (test/gpuserv/fuzz.py), all fixed; regression tests in test/gpuserv/fuzz_regress.inc
 # ---------------------------------------------------------------------------------------------------------------
-# More than 32 variable slots ("too many kernel variables") in a scan program, and similar translation limits in
-# scan_prog.c. Bugs 1 and 2 above were instances. A planner-side check (or the CPU fallback of A2.x) is the real fix.
+# 5. char(n) LIKE: the GPU stripped the value's trailing blanks before matching ("abc   " LIKE 'abc' was true); PostgreSQL's
+#    bpcharlike matches them as characters (false), so `c LIKE 'abc'` and `c LIKE '%c'` returned rows. scan_caps.c.
+#      select count(*) from t where c like 'abc';   -- c char(6) = 'abc'
+# 6. A GpuJoin hash key whose two sides have different integer widths (int2 = int4, int8 = int4, the join key of
+#    `t.n2 IN (select k4 ...)`) hashed the stored bytes (2/4/8) of each side and never found a partner: the join returned no
+#    rows. gpu_join.c now offers the hash join only when both keys have the same device type (the CPU join does the rest).
+# 7. Parallel GpuJoin on macOS killed the parallel worker and restarted the server: pthread_cond_wait on the
+#    process-shared condition variable of the inner preload fails with EINVAL there. gpu_join.c polls under the mutex on
+#    macOS (innerPreloadWait).
+# 8. The aggregate of a constant (select sum(3) from t) crashed the backend: setrefs.c replaced the kernel parameter (the
+#    constant argument) by a reference to the equal entry of custom_scan_tlist, and executor.c evaluated that Var.
+#    __build_session_param_info now evaluates the tlist entry's expression.
+# 9. IS [NOT] NULL of an inner column inside a join qual (`... and (t.a > 0 or d.ts is null)`) failed in the service
+#    ("variable slot N is not loaded from the scan relation"). scan_prog.c.
+# 10. float4 comparison: Metal flushes denormals to zero, so 0 >= 1.4e-45 was true on the GPU. The VM compares the bit
+#    patterns now (f4cmpbits). float4 + - * / with a denormal operand, or whose result may be denormal or underflow, returns
+#    SCANVM_RECHECK_CODE: the backend evaluates the row (exact, including PostgreSQL's underflow error). In a GpuJoin
+#    program (no recheck path there) such a row fails the query instead (open, see below).
+# 11. float4 -> int2/int4/int8 casts rounded ties away from zero (2.5 -> 3): the kernel used round(), which Metal defines
+#    as half away from zero. It rounds half to even now, as PostgreSQL's rint().
+# 12. The computed projection of a GpuScan ran for rows a host-only qual would reject, so an expression that raises an error
+#    (overflow, division by zero) failed the query where PostgreSQL returned the rows' absence. A GpuScan with host quals
+#    projects columns only (gpu_scan.c).
+# 13. The argument of an aggregate with FILTER (count(a * 100000000) filter (where false)) was evaluated for rows the filter
+#    rejects and could raise an error PostgreSQL never raises. Such aggregates are offered only when the argument cannot
+#    fail (columns, constants, comparisons, widening casts): pgstrom_vulkan_expr_cannot_fail() in codegen.c.
+# 14. Unary minus of a computed operand (-(a + b)) overwrote the operand's register with the constant 0 (scan_prog.c).
+#
+# ---------------------------------------------------------------------------------------------------------------
+# TRANSLATION LIMITS: the planner now respects them (codegen.c pgstrom_vulkan_expr_limits, gpu_scan.c, gpu_join.c,
+# gpu_preagg.c; constants in src/gpuserv/scan_caps.h)
+# ---------------------------------------------------------------------------------------------------------------
+# A query the service cannot translate FAILS ("the expression needs more than 32 registers", "variable slot N is out of
+# range", ...): there is no CPU fallback for a refused program. The planner used to offer such plans. Now it keeps them on
+# the CPU when its (conservative) estimate says the program may not fit:
+#   - an expression needs more temporary registers than SCAN_VM_TEMP_BUDGET (6; the estimate follows expr_to_reg of
+#     scan_prog.c) or has more than SCAN_VM_EXPR_NODES (120) nodes: the expression stays on the host (qual, projection column,
+#     aggregate argument, key);
+#   - a GpuScan whose referenced columns plus computed values exceed SCAN_VM_SLOT_BUDGET (23) offers no device quals and no
+#     computed projection;
+#   - a GpuJoin / GpuPreAgg whose kernel variables (columns of every relation and computed values, each computed value also
+#     needing a permanent register) plus temporaries exceed the 32 registers is not offered; more than SCAN_AGG_MAX (12)
+#     output columns of a GpuPreAgg likewise;
+#   - more than SCAN_VM_BOOL_ARGS (60) quals in one AND (scan) or one join: the rest stays on the host.
+# OPEN: (a) the sum of the sizes of all expressions of one GpuJoin program must stay below 16384 words ("the join program is too
+# large"): only the per-expression node limit is checked; (b) the estimate is an upper bound for the shapes scan_prog.c
+# generates today, not derived from it: a change to the register allocation there must update the constants in scan_caps.h
+# (the fuzzer's wide/deep stress shapes check it); (c) a program the service still refuses (a bug in the estimate, a column
+# type that differs from its device type, an inner relation larger than maxStorageBufferRange, ...) fails the query: the
+# backend has no "service refused the program, run this task on the CPU" path. A scan task could return all of its tuples as
+# KDS_FORMAT_RECHECK items (the service already does that per row), but GpuJoin/GpuPreAgg tasks cannot (no recheck path for
+# join matches) and the backend would have to tell a refused program from a runtime error and re-run the task from its own copy of the pages (it does not hold the pages the service reads from the relation file), so it was not done; (d) GpuJoin
+# programs have no recheck path either: a float4 operation on a denormal value, which a scan hands to the backend, fails the
+# join query with an internal error code.
+#
+# ---------------------------------------------------------------------------------------------------------------
+# EVALUATION ORDER (not bugs; how the fuzzer tells them from bugs is described in fuzz.py)
+# ---------------------------------------------------------------------------------------------------------------
+# The device evaluates the quals of a scan in the order of its own cost estimate, PostgreSQL in its own, so `where a * b > 0 and
+# c` can raise an overflow on the GPU for a row that PostgreSQL filters by `c` first (and the reverse). The fuzzer counts these
+# as "asymmetric errors" (about 1% of the queries) and does not fail on them.
+
+# (the earlier "OPEN: the planner does not know the service's limits" is addressed above)

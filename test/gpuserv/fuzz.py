@@ -652,7 +652,7 @@ def gen_query(seed, index):
     if isjoin:
         jt = {"semi": r.choice(["exists", "not exists", "in", "not in"]),
               "join": r.choice(["inner", "inner", "left", "right", "full"]),
-              "joinagg": r.choice(["inner", "inner", "left", "inner"])}[kind]
+              "joinagg": r.choice(["inner", "inner", "left", "inner", "right", "full"])}[kind]
         kt = r.choice(["i4", "i4", "i8", "date", "i2", "ts", "i4"])
         gt = Gen(r, [("t.", COLS)])
         if kt in ("i4", "i2"):
