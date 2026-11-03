@@ -3535,6 +3535,8 @@ struct kern_multirels
 		bool		left_outer;		/* true, if JOIN_LEFT or JOIN_FULL */
 		bool		right_outer;	/* true, if JOIN_RIGHT or JOIN_FULL */
 		bool		pinned_buffer;	/* true, if it uses pinned-buffer */
+		bool		is_semi;		/* true, if JOIN_SEMI (Vulkan service) */
+		bool		is_anti;		/* true, if JOIN_ANTI (Vulkan service) */
 		uint64_t	buffer_id;		/* key to lookup pinned inner-buffer */
 	} chunks[1];
 };

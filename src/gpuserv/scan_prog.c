@@ -1228,6 +1228,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			dt[8] = rels[depth - 1].hslot_word;
 			dt[9] = rels[depth - 1].nslots;
 			dt[10] = rels[depth - 1].left_outer ? 1 : 0;
+			dt[11] = rels[depth - 1].semi ? 1 : rels[depth - 1].anti ? 2 : 0;
 			ibase += incols[depth];
 		}
 		for (int side = 0; side <= nrels; side++)

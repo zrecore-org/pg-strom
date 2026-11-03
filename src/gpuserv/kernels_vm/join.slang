@@ -14,7 +14,7 @@
 // The depth table has 12 words per relation: [0] hash begin, [1] hash end = join qual begin,
 // [2] join qual end, [3] hash register, [4] join qual register, [5] its column table, [6] its
 // columns, [7] byte offset of the end of its KDS in innerb, [8] word offset of its hash slots,
-// [9] number of hash slots, [10] LEFT OUTER.
+// [9] number of hash slots, [10] LEFT OUTER, [11] 1: SEMI, 2: ANTI.
 //
 // Output (outb): [0] number of matches (may exceed the capacity: the host retries), [1] first
 // error, [2],[3] page and line pointer; from word 4, per match { page, lp, byte offset of the inner
@@ -149,11 +149,18 @@ void join_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     {
                         mflag |= (1u << d);
                         cur[d] = it;
+                        if (prog[dt + 11] != 0)
+                        {
+                            // semi and anti joins: the first match decides, stop walking the chain
+                            nxt[d] = NO_ITEM;
+                            if (prog[dt + 11] == 2)
+                                ok = false;                     // anti: the outer row is dropped
+                        }
                     }
                 }
-                else if (prog[dt + 10] != 0 && ((mflag >> d) & 1u) == 0)
+                else if ((prog[dt + 10] != 0 || prog[dt + 11] == 2) && ((mflag >> d) & 1u) == 0)
                 {
-                    // LEFT OUTER: the chain is done and nothing matched: NULL inner columns
+                    // LEFT OUTER or ANTI: the chain is done and nothing matched: NULL inner columns
                     mflag |= (1u << d);
                     cur[d] = NO_ITEM;
                     null_slots(prog[dt + 5], prog[dt + 6], regs);

@@ -225,6 +225,58 @@ runjoin s1 "float key stays on the CPU" "select t.i, d.grp from %T t join %D d o
 ANYPLAN=0
 runjoin s1 "parallel workers" "select t.i, d.grp from %T t join %D d on t.b = d.k" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 
+# ---- semi and anti joins (EXISTS, NOT EXISTS, IN, NOT IN over non-null columns). The plan must show a GpuJoin
+# whose join label is "Semi Join" / "Anti Join" (SEMIANTI_PAT is set per group).
+echo "semi and anti joins"
+sql "create table sdn as select k, grp, pay, k8 from sd where k is not null"; sql "alter table sdn alter column k set not null"
+sql "alter table sdn alter column k8 set not null"; sql "analyze sdn"
+JOINSET_SAVE="$JOINSET"
+JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_mergejoin=off; set enable_nestloop=off;"
+for t in s1 s2 s3; do
+	ANYPLAN=0
+	JOINPAT='GPU Semi Join Quals \[1\]'
+	runjoin $t "EXISTS" "select t.i, t.a, t.f from %T t where exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "IN (subquery)" "select t.i, t.c from %T t where t.b in (select k from %D)"
+	runjoin $t "EXISTS with duplicate inner keys: an outer row is returned once" "select t.i, t.b from %T t where exists (select 1 from %D d where d.k = t.b and d.k % 10 = 0)"
+	runjoin $t "EXISTS, the match is not the first of its chain" "select t.i, t.b from %T t where exists (select 1 from %D d where d.k = t.b and d.grp >= 100)"
+	runjoin $t "EXISTS with correlated quals on both sides" "select t.i, t.a, t.b from %T t where exists (select 1 from %D d where d.k = t.b and d.grp < 8 and d.pay is not null and t.a > d.grp * 100 - 5000)"
+	runjoin $t "EXISTS with a qual on the outer side only inside the subquery" "select t.i, t.b from %T t where exists (select 1 from %D d where d.k = t.b and t.a > 0)"
+	runjoin $t "EXISTS, nothing matches" "select t.i from %T t where exists (select 1 from %D d where d.k = t.b + 1000000)"
+	runjoin $t "EXISTS, every non-NULL outer row matches" "select t.i, t.b from %T t where t.b between -9999 and 9999 and exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "EXISTS, int8 key, computed key expression" "select t.i, t.c from %T t where exists (select 1 from %D d where d.k8 = t.c % 20000)"
+	runjoin $t "EXISTS, computed projection and outer quals" "select t.i, t.a + t.b as x, t.c * 2 as y from %T t where t.a < 0 and exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "EXISTS, ctid of the outer side" "select t.ctid, t.i from %T t where t.i % 50 = 0 and exists (select 1 from %D d where d.k = t.b)"
+	JOINPAT='GPU Anti Join Quals \[1\]'
+	runjoin $t "NOT EXISTS (NULL keys are returned)" "select t.i, t.b, t.f from %T t where not exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "NOT EXISTS, nothing matches: every row is returned" "select t.i, t.b from %T t where not exists (select 1 from %D d where d.k = t.b + 1000000)"
+	runjoin $t "NOT EXISTS, every outer row matches: no row" "select t.i from %T t where t.b between -9999 and 9999 and not exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "NOT EXISTS with duplicate inner keys" "select t.i, t.b from %T t where not exists (select 1 from %D d where d.k = t.b and d.k % 10 = 0)"
+	runjoin $t "NOT EXISTS, the match is not the first of its chain" "select t.i, t.b from %T t where not exists (select 1 from %D d where d.k = t.b and d.grp >= 100)"
+	runjoin $t "NOT EXISTS with correlated quals on both sides" "select t.i, t.a, t.b from %T t where not exists (select 1 from %D d where d.k = t.b and d.grp < 8 and d.pay is not null and t.a > d.grp * 100 - 5000)"
+	runjoin $t "NOT EXISTS with a qual on the outer side only inside the subquery" "select t.i, t.b from %T t where not exists (select 1 from %D d where d.k = t.b and t.a > 0)"
+	runjoin $t "NOT EXISTS, computed projection" "select t.i, t.a * 3 + t.c % 11 as x from %T t where not exists (select 1 from %D d where d.k8 = t.c % 20000)"
+	ANYPLAN=1
+	# PostgreSQL 18 plans this as an anti join (both sides provably non-null), earlier majors as a hashed SubPlan
+	runjoin $t "NOT IN over non-null columns" "select t.i, t.b from %T t where t.b is not null and t.b not in (select k from sdn)"
+	runjoin $t "NOT IN over a nullable column (a hashed SubPlan, whatever the plan, the null semantics hold)" "select t.i from %T t where t.b not in (select k from %D) and t.i < 20000"
+done
+# stacked: the semi/anti join is the second depth of a GpuJoin (or the first, with an inner/LEFT join after it)
+for t in s1 s2 s3; do
+	ANYPLAN=0
+	JOINPAT='Join Quals \[2\]'
+	runjoin $t "inner join, then EXISTS" "select t.i, d.grp from %T t join %D d on t.b = d.k where exists (select 1 from sd2 e where e.k2 = t.a % 400)"
+	runjoin $t "inner join, then NOT EXISTS" "select t.i, d.grp from %T t join %D d on t.b = d.k where not exists (select 1 from sd2 e where e.k2 = t.a % 400)"
+	runjoin $t "EXISTS, then inner join with duplicate keys" "select t.i, e.g2, e.p2 from %T t join sd2 e on t.a % 400 = e.k2 where exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "NOT EXISTS, then LEFT join" "select t.i, e.g2 from %T t left join sd2 e on t.a % 400 = e.k2 + 200 where not exists (select 1 from %D d where d.k = t.b)"
+	runjoin $t "EXISTS and NOT EXISTS together" "select t.i, t.b from %T t where exists (select 1 from %D d where d.k = t.b) and not exists (select 1 from sd2 e where e.k2 = t.a % 400 and e.g2 > 2)"
+	runjoin $t "EXISTS, then inner join, then LEFT join" "select t.i, e.g2, f.g3 from %T t join sd2 e on t.a % 400 = e.k2 left join sd3 f on t.a + 20000 = f.k3 + 1 where exists (select 1 from %D d where d.k = t.b)"
+done
+JOINPAT="Custom Scan (GpuJoin)"
+ANYPLAN=0
+runjoin s1 "EXISTS, parallel workers" "select t.i, t.b from %T t where exists (select 1 from %D d where d.k = t.b)" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+runjoin s1 "NOT EXISTS, parallel workers" "select t.i, t.b from %T t where not exists (select 1 from %D d where d.k = t.b)" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+JOINSET="$JOINSET_SAVE"
+
 echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)

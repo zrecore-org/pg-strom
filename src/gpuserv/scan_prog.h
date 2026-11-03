@@ -69,6 +69,8 @@ typedef struct scan_join_rel
 	uint32_t	hslot_word;			/* word offset of its hash slots */
 	uint32_t	nslots;
 	int			left_outer;			/* unmatched outer rows are kept (NULL inner columns) */
+	int			semi;				/* semi join: the first match keeps the outer row, no inner columns */
+	int			anti;				/* anti join: only an outer row without a match is kept */
 } scan_join_rel;
 
 int		scan_prog_build_join(const struct kern_session_info *session,

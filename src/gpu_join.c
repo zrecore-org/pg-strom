@@ -214,7 +214,9 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 			__pp_inner->join_type == JOIN_FULL)
 			return NULL;
 		Assert(__pp_inner->join_type == JOIN_INNER ||
-			   __pp_inner->join_type == JOIN_LEFT);
+			   __pp_inner->join_type == JOIN_LEFT ||
+			   __pp_inner->join_type == JOIN_SEMI ||
+			   __pp_inner->join_type == JOIN_ANTI);
 	}
 	/*
 	 * GiST-index buffer must be built by CPU
@@ -514,9 +516,10 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 
 	/*
 	 * The Vulkan service returns an outer row without a match with NULL inner columns, but cannot
-	 * apply a WHERE-derived qual to the null-extended row (other_quals) yet.
+	 * apply a WHERE-derived qual to the null-extended row (other_quals) yet. The same holds for an
+	 * anti join (IS_OUTER_JOIN covers it): such a qual would apply to the surviving outer row.
 	 */
-	if (join_type == JOIN_LEFT && other_quals != NIL)
+	if ((join_type == JOIN_LEFT || join_type == JOIN_ANTI) && other_quals != NIL)
 		return NULL;
 
 	/*
@@ -945,10 +948,13 @@ GpuJoinAddCustomPath(PlannerInfo *root,
 		List	   *inner_pathlist = innerrel->pathlist;
 		ListCell   *lc;
 
-		/* quick bailout if unsupported join type (the Vulkan service runs inner and left joins) */
-		if (join_type != JOIN_INNER && join_type != JOIN_LEFT)
+		/*
+		 * quick bailout if unsupported join type (the Vulkan service runs inner, left, semi and anti
+		 * joins; JOIN_UNIQUE_INNER/OUTER and the right variants are not GpuJoin's)
+		 */
+		if (join_type != JOIN_INNER && join_type != JOIN_LEFT &&
+			join_type != JOIN_SEMI && join_type != JOIN_ANTI)
 			return;
-		//TODO: JOIN_SEMI and JOIN_ANTI
 		for (int try_parallel=0; try_parallel < 2; try_parallel++)
 		{
 			Path   *inner_path = NULL;
@@ -2040,6 +2046,10 @@ again:
 			if (h_kmrels)
 				h_kmrels->chunks[depth-1].left_outer = true;
         }
+		if (h_kmrels && istate->join_type == JOIN_SEMI)
+			h_kmrels->chunks[depth-1].is_semi = true;
+		if (h_kmrels && istate->join_type == JOIN_ANTI)
+			h_kmrels->chunks[depth-1].is_anti = true;
 	}
 	offset = PAGE_ALIGN(offset);
 

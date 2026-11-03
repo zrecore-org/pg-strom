@@ -2070,7 +2070,7 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		if (kmrels->chunks[i].is_nestloop || kmrels->chunks[i].right_outer ||
 			kmrels->chunks[i].pinned_buffer || kmrels->chunks[i].gist_offset != 0)
 		{
-			snprintf(err, errlen, "only plain inner and left hash joins are implemented by the Vulkan service");
+			snprintf(err, errlen, "only plain inner, left, semi and anti hash joins are implemented by the Vulkan service");
 			munmap(map, maplen);
 			return -1;
 		}
@@ -2087,6 +2087,8 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		ji->rels[i].hslot_word = (uint32_t)((kds_offset + KDS_HEAD_LENGTH(kds)) / 4);
 		ji->rels[i].nslots = kds->hash_nslots;
 		ji->rels[i].left_outer = kmrels->chunks[i].left_outer ? 1 : 0;
+		ji->rels[i].semi = kmrels->chunks[i].is_semi ? 1 : 0;
+		ji->rels[i].anti = kmrels->chunks[i].is_anti ? 1 : 0;
 	}
 	if (maplen > vk->limits.maxStorageBufferRange ||
 		gpu_vk_buffer_import_host(vk, &ji->buf, map, maplen) != 0)

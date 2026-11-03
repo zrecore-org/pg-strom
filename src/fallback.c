@@ -241,8 +241,9 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 		if (istate->join_quals == NULL ||
 			ExecQual(istate->join_quals, econtext))
 		{
-			if (istate->other_quals == NULL ||
-				ExecQual(istate->other_quals, econtext))
+			if (istate->join_type != JOIN_ANTI &&
+				(istate->other_quals == NULL ||
+				 ExecQual(istate->other_quals, econtext)))
 			{
 				/* Ok, go to the next depth */
 				__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
@@ -252,12 +253,17 @@ __execFallbackCpuNestLoop(pgstromTaskState *pts,
 				oj_map[index] = true;
 			/* mark as 'matched' in this depth */
 			matched = true;
+			/* semi and anti joins: the first match decides */
+			if (istate->join_type == JOIN_SEMI ||
+				istate->join_type == JOIN_ANTI)
+				break;
 		}
 	}
 
 	/* LEFT OUTER JOIN handling */
 	if (!matched && (istate->join_type == JOIN_LEFT ||
-					 istate->join_type == JOIN_FULL))
+					 istate->join_type == JOIN_FULL ||
+					 istate->join_type == JOIN_ANTI))
 	{
 		__execFallbackLoadVarsSlot(scan_slot,
 								   istate->inner_load_src,
@@ -333,8 +339,9 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 			if (istate->join_quals == NULL ||
 				ExecQual(istate->join_quals, econtext))
 			{
-				if (istate->other_quals == NULL ||
-					ExecQual(istate->other_quals, econtext))
+				if (istate->join_type != JOIN_ANTI &&
+					(istate->other_quals == NULL ||
+					 ExecQual(istate->other_quals, econtext)))
 				{
 					/* Ok, go to the next depth */
 					__execFallbackCpuJoinOneDepth(pts, depth+1, 0, false);
@@ -348,6 +355,10 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 				}
 				/* mark as 'matched' in this depth */
 				matched = true;
+				/* semi and anti joins: the first match decides */
+				if (istate->join_type == JOIN_SEMI ||
+					istate->join_type == JOIN_ANTI)
+					break;
 			}
 		}
 		hitem = KDS_HASH_NEXT_ITEM(kds_in, hitem->next);
@@ -355,7 +366,8 @@ __execFallbackCpuHashJoin(pgstromTaskState *pts,
 
 	/* LEFT OUTER JOIN handling */
 	if (!matched && (istate->join_type == JOIN_LEFT ||
-					 istate->join_type == JOIN_FULL))
+					 istate->join_type == JOIN_FULL ||
+					 istate->join_type == JOIN_ANTI))
 	{
 		__execFallbackLoadVarsSlot(scan_slot,
 								   istate->inner_load_src,
