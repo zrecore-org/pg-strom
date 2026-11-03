@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install a build tree into the Homebrew PostgreSQL and run a test script on it, one checkout at a time.
 # The installed module ($libdir/pg_strom, referenced by the SQL scripts) and the test cluster ports are
-# shared, so checkouts working in parallel (git worktrees) queue here.
+# shared, so checkouts working in parallel (worktrees) queue here.
 #
 #   sh test/gpuserv/locked_test.sh <tree> [scan_test.sh|service_test.sh]      (env of the test passes through)
 #
