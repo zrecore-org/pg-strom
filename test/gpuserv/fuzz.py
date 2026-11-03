@@ -427,6 +427,7 @@ class Q:
         self.settings = ""       # settings group name
         self.order_limit = None
         self.distinct = False
+        self.order = 0           # group queries: 1 = ORDER BY all keys (GPU-Sort), 2 = also LIMIT 5
         self.strict = False
 
     def clone(self):
@@ -471,6 +472,10 @@ class Q:
         s = "select " + ", ".join(parts) + " from " + frm + w
         if self.keys:
             s += " group by " + ", ".join(str(i + 1) for i in range(len(self.keys)))
+            if self.order:
+                s += " order by " + ", ".join(str(i + 1) for i in range(len(self.keys)))
+                if self.order == 2:
+                    s += " limit 5"
         return s
 
     def has_anything(self):
@@ -716,6 +721,8 @@ def gen_query(seed, index):
                 q.keys.append(kx)
         if kind == "group" and not q.keys:
             q.keys.append(g.expr(r.choice(["i2", "i4", "bool", "date"]), 1))
+    if q.keys and r.random() < 0.3:
+        q.order = r.choice([1, 1, 2])
     if kind in ("scan", "join") and r.random() < 0.08 and all(
             x.typ in ("i2", "i4", "i8", "date", "bool", "text", "time", "ts", "bpchar") for x in q.projs):
         q.distinct = True       # (float and numeric values that compare equal print differently: 0 and 0.00, -0)
