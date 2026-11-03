@@ -298,8 +298,9 @@ for t in s1 s2 s3; do
 	ANYPLAN=0
 	JOINPAT='Join Quals \[2\]'
 	runjoin $t "inner join, then RIGHT join" "select t.i, e.g2, d.k, d.grp from %T t join sd2 e on t.a % 400 = e.k2 right join %D d on t.b = d.k and t.a + d.grp > 9000"
-	runjoin $t "RIGHT join, then LEFT join on the inner side's column" "select t.i, d.k, d.grp, e.g2 from %T t right join %D d on t.b = d.k and t.a > 9000 left join sd2 e on d.grp = e.k2"
-	runjoin $t "RIGHT join, then inner join on the inner side's column" "select t.i, d.k, d.grp, e.g2 from %T t right join %D d on t.b = d.k and t.a > 9000 join sd2 e on d.grp = e.k2"
+	JOINPAT='Right Outer Join Quals \[1\]'
+	runjoin $t "RIGHT join, then LEFT join on the inner side's column" "select t.i, d.k, d.grp, e.g2 from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 left join sd2 e on d.grp = e.k2"
+	runjoin $t "RIGHT join, then inner join on the inner side's column (the inner side is a GpuJoin)" "select t.i, d.k, d.grp, e.g2 from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 join sd2 e on d.grp = e.k2"
 done
 ANYPLAN=1
 JOINPAT="Custom Scan (GpuJoin)"
