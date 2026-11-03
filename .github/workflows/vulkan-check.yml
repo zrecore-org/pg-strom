@@ -1,0 +1,199 @@
+name: Vulkan Check
+
+# CI for the Vulkan port (branch vulkan-gpu). The CUDA line has its own workflow,
+# build-check.yml, which only applies to master.
+#
+# What these jobs can and cannot show (read before trusting a green check):
+#   * linux-lavapipe: builds the module and pgstrom-gpuserv and runs the service lifecycle
+#     test and the GPU-versus-CPU differential test on lavapipe, Mesa's CPU implementation
+#     of Vulkan. There is NO GPU in a GitHub-hosted runner, so this checks the host code,
+#     the SPIR-V kernels' logic and the SQL results, not GPU behaviour or speed. Lavapipe
+#     reports the "desktop" capability tier, so the kernels run in a different tier than on
+#     Apple Silicon (the base tier).
+#   * macos-build: builds on an Apple Silicon runner and runs the portability test. It does
+#     not run the GPU tests: whether a GitHub-hosted macOS VM exposes a Metal device to
+#     MoltenVK is not known to us, so nothing here depends on it.
+#   * macos-gpu-test: the only job that runs the GPU tests on real Apple Silicon. It needs a
+#     self-hosted runner and runs on manual dispatch only.
+#
+# The arm64 Linux runner label (ubuntu-24.04-arm) is available for public repositories; a
+# private fork needs its own arm64 runner or must drop that matrix entry.
+#
+# None of this has been run by the author of the file (no CI run was possible from the
+# development machine); the first run will likely need adjustments.
+
+on:
+  push:
+    branches: [vulkan-gpu]
+  pull_request:
+    branches: [vulkan-gpu]
+  workflow_dispatch:
+    inputs:
+      run_apple_gpu_tests:
+        description: "Run the GPU tests on a self-hosted Apple Silicon runner"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  # Pinned Slang release; the sha256 values are the digests GitHub reports for the assets.
+  # (The Makefile in src/gpuserv looks for ~/tools/slang-2026.20/bin/slangc by itself.)
+  SLANG_VERSION: "2026.20"
+  PG_MAJOR: "17"
+
+jobs:
+  linux-lavapipe:
+    name: Linux ${{ matrix.arch }}, lavapipe (CPU Vulkan, no GPU), PostgreSQL 17
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            slang_asset: slang-2026.20-linux-x86_64.tar.gz
+            slang_sha256: e863e568c204810d6e8bc31852f056aef6763c55ea9925db2db7affa060347c9
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            slang_asset: slang-2026.20-linux-aarch64.tar.gz
+            slang_sha256: b0345743e2153d8c2bd33f56fb5696bcef63fc03513f054a1ae1b8d3dd0152a9
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build and runtime packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl wget lsb-release gnupg build-essential pkgconf \
+            libvulkan-dev mesa-vulkan-drivers vulkan-tools \
+            libnuma-dev libkrb5-dev libicu-dev postgresql-common
+
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
+          # the build installs into the PostgreSQL tree: let the runner user write there
+          sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
+
+      - name: Install Apache Arrow and Parquet (Apache apt repository)
+        run: |
+          wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
+          sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
+          sudo apt-get update
+          sudo apt-get install -y libarrow-dev libparquet-dev
+
+      - name: Install Slang ${{ env.SLANG_VERSION }}
+        run: |
+          D="$HOME/tools/slang-${SLANG_VERSION}"
+          mkdir -p "$D"
+          curl -fsSL -o /tmp/slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/${{ matrix.slang_asset }}"
+          echo "${{ matrix.slang_sha256 }}  /tmp/slang.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/slang.tar.gz -C "$D"
+          SLANGC=$(find "$D" -type f -name slangc | head -n 1)
+          test -x "$SLANGC"
+          echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
+          "$SLANGC" -v
+
+      - name: Show the Vulkan devices (informational)
+        continue-on-error: true
+        run: vulkaninfo --summary | head -40
+
+      - name: Build and install
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+          make -C src PG_CONFIG=$PG_CONFIG WITH_GPUSERV=1 -j"$(nproc)" install
+
+      - name: Portability layer test
+        run: make -C test/port check
+
+      - name: Service lifecycle test (lavapipe)
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "on"
+        run: sh test/gpuserv/service_test.sh
+
+      - name: GPU-versus-CPU differential test (lavapipe)
+        # How long this takes on a runner is not known; the first dispatch of each kernel
+        # is compiled by lavapipe's JIT, and the service allows 300 s for a dispatch on a
+        # CPU device (PGSTROM_GPUSERV_TIMEOUT_MS overrides).
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "on"
+        run: sh test/gpuserv/scan_test.sh
+
+      - name: Upload the PostgreSQL log of the failed test
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgstrom-test-logs-${{ matrix.arch }}
+          path: /tmp/pgstrom_scan_test/log
+          if-no-files-found: ignore
+
+  macos-build:
+    name: macOS Apple Silicon, build only (no GPU test), PostgreSQL 17
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install packages (Homebrew)
+        run: brew install postgresql@17 apache-arrow pkgconf molten-vk vulkan-loader vulkan-headers
+
+      - name: Install Slang ${{ env.SLANG_VERSION }}
+        run: |
+          D="$HOME/tools/slang-${SLANG_VERSION}"
+          mkdir -p "$D"
+          curl -fsSL -o /tmp/slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-aarch64.tar.gz"
+          echo "07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4  /tmp/slang.tar.gz" | shasum -a 256 -c -
+          tar -xzf /tmp/slang.tar.gz -C "$D"
+          SLANGC=$(find "$D" -type f -name slangc | head -n 1)
+          test -x "$SLANGC"
+          echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
+          "$SLANGC" -v
+
+      - name: Build and install
+        # src/gpuserv/Makefile defaults to the Vulkan SDK in /usr/local on macOS; with
+        # Homebrew the headers and the loader are elsewhere, so name them.
+        run: |
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config"
+          VKH="$(brew --prefix vulkan-headers)"
+          VKL="$(brew --prefix vulkan-loader)"
+          make -C src PG_CONFIG="$PG_CONFIG" WITH_GPUSERV=1 \
+            VK_CFLAGS="-I$VKH/include" \
+            VK_LIBS="-L$VKL/lib -lvulkan -Wl,-rpath,$VKL/lib" \
+            -j"$(sysctl -n hw.ncpu)" install
+
+      - name: Portability layer test
+        run: make -C test/port check
+
+      - name: Probe the Vulkan devices (informational)
+        # The result decides nothing: a hosted macOS VM may have no usable Metal device.
+        continue-on-error: true
+        run: |
+          PKGLIB="$("$(brew --prefix postgresql@17)/bin/pg_config" --pkglibdir)"
+          "$PKGLIB/pgstrom-gpuserv" --probe
+
+  macos-gpu-test:
+    name: Apple Silicon GPU tests (self-hosted runner, manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.run_apple_gpu_tests
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install into the runner's PostgreSQL and run the tests
+        # needs PostgreSQL 17 from Homebrew, Slang and a Vulkan loader with MoltenVK installed
+        # on the runner as in CLAUDE.md; locked_test.sh builds, installs and runs the test.
+        run: |
+          sh test/gpuserv/locked_test.sh "$PWD" service_test.sh
+          sh test/gpuserv/locked_test.sh "$PWD" scan_test.sh

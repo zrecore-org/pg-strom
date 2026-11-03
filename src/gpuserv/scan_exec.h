@@ -38,6 +38,10 @@ typedef struct scan_engine
 	int				join_pipe_ready[3];
 	gpu_vk_pipeline	gagg_pipe[2][3];		/* GROUP BY: [registers 16/32][aggregates 4/8/12] */
 	int				gagg_pipe_ready[2][3];
+	gpu_vk_pipeline	jagg_pipe[2][3];		/* aggregation over a join: [registers 16/32][aggregates 4/8/12] */
+	int				jagg_pipe_ready[2][3];
+	gpu_vk_pipeline	jgagg_pipe[2][3];		/* GROUP BY over a join: the same */
+	int				jgagg_pipe_ready[2][3];
 	gpu_vk_pipeline	arrow_pipe[3];			/* the Arrow scan kernel: registers 8/16/32 */
 	int				arrow_pipe_ready[3];
 	int				trace;
@@ -129,6 +133,13 @@ typedef struct join_inner
 int		scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner *ji,
 							char *err, size_t errlen);
 void	join_inner_free(scan_engine *eng, join_inner *ji);
+/*
+ * GpuPreAgg on top of GpuJoin: the join kernel aggregates the joined rows on the device (with or
+ * without GROUP BY, as the program says); the results are added to st. 0 on success.
+ */
+int		scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
+							   join_inner *ji, agg_state *st, const XpuCommand *task,
+							   char *err, size_t errlen);
 XpuCommand *scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 								join_inner *ji, const XpuCommand *task,
 								size_t *p_len, char *err, size_t errlen);

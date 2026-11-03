@@ -273,6 +273,116 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 			}
 			return 0;
 		}
+		case SOP_NUMCONST:
+			regs[dst].v = (int64_t)((uint64_t) k0 | ((uint64_t) k1 << 32));
+			regs[dst].sc = rb;
+			regs[dst].isnull = ra;
+			return 0;
+		case SOP_NUMCMP:
+		{
+			vm_reg		x = regs[ra], y = regs[rb];
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			regs[dst].isnull = 0;
+			regs[dst].v = cmp_result(scan_vm_num_cmp(x.v, x.sc, y.v, y.sc), k0);
+			return 0;
+		}
+		case SOP_NUMARITH:
+		{
+			vm_reg		x = regs[ra], y;
+			int64_t		a, b, r;
+			uint32_t	sc;
+
+			if (k0 == SOP_NUMOP_NEG || k0 == SOP_NUMOP_ABS)
+			{
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+				{
+					regs[dst].v = (k0 == SOP_NUMOP_NEG || x.v < 0) ? -x.v : x.v;
+					regs[dst].sc = x.sc;
+				}
+				return 0;
+			}
+			y = regs[rb];
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			a = x.v;
+			b = y.v;
+			if (k0 == SOP_ARITH_MUL)
+			{
+				sc = x.sc + y.sc;
+				if (__builtin_mul_overflow(a, b, &r))
+					return SOP_RECHECK_CODE;
+			}
+			else
+			{
+				sc = x.sc > y.sc ? x.sc : y.sc;
+				if (!scan_vm_num_up(&a, sc - x.sc) || !scan_vm_num_up(&b, sc - y.sc))
+					return SOP_RECHECK_CODE;
+				if (k0 == SOP_ARITH_PL ? __builtin_add_overflow(a, b, &r) : __builtin_sub_overflow(a, b, &r))
+					return SOP_RECHECK_CODE;
+			}
+			if (r == INT64_MIN || sc > 255)
+				return SOP_RECHECK_CODE;
+			regs[dst].v = r;
+			regs[dst].sc = sc;
+			regs[dst].isnull = 0;
+			return 0;
+		}
+		case SOP_I2N:
+		{
+			vm_reg		x = regs[ra];
+
+			regs[dst].isnull = x.isnull;
+			if (!x.isnull)
+			{
+				if (x.v == INT64_MIN)
+					return SOP_RECHECK_CODE;
+				regs[dst].v = x.v;
+				regs[dst].sc = 0;
+			}
+			return 0;
+		}
+		case SOP_N2I:
+		{
+			vm_reg		x = regs[ra];
+
+			regs[dst].isnull = x.isnull;
+			if (!x.isnull)
+			{
+				static const int64_t p10[19] = {
+					1LL, 10LL, 100LL, 1000LL, 10000LL, 100000LL, 1000000LL, 10000000LL, 100000000LL,
+					1000000000LL, 10000000000LL, 100000000000LL, 1000000000000LL, 10000000000000LL,
+					100000000000000LL, 1000000000000000LL, 10000000000000000LL, 100000000000000000LL,
+					1000000000000000000LL};
+				int64_t		m = x.v < 0 ? -x.v : x.v, q, r;
+
+				if (x.sc == 0)
+					q = m;
+				else if (x.sc >= 20)
+					q = 0;
+				else if (x.sc == 19)
+					q = (m >= 5000000000000000000LL) ? 1 : 0;
+				else
+				{
+					q = m / p10[x.sc];
+					if (m - q * p10[x.sc] >= p10[x.sc] - (m - q * p10[x.sc]))
+						q++;
+				}
+				r = x.v < 0 ? -q : q;
+				if (out_of_range(r, k0))
+					return SOP_RECHECK_CODE;
+				regs[dst].v = r;
+			}
+			return 0;
+		}
 		default:
 			break;
 	}
@@ -546,6 +656,7 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 	{
 		regs[i].v = 0;
 		regs[i].isnull = 1;
+		regs[i].sc = 0;
 	}
 	for (uint32_t c = 0; c < ncols; c++)
 	{
@@ -574,7 +685,31 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 			{
 				regs[slot].v = 0;
 				regs[slot].isnull = 0;
-				if (vt == SOP_VT_STR)
+				if (vt == SOP_VT_NUM)
+				{
+					uint32_t	hl = 4, nsc;
+					int64_t		nv;
+
+					if (htup[off] & 1)
+					{
+						hl = 1;
+						if (htup[off] == 1)
+							recheck = 1;
+					}
+					else if ((htup[off] & 3) == 2)
+						recheck = 1;
+					if (!recheck)
+					{
+						if (scan_vm_numeric_payload_decode(htup + off + hl, sz - hl, &nv, &nsc))
+						{
+							regs[slot].v = nv;
+							regs[slot].sc = nsc;
+						}
+						else
+							recheck = 1;
+					}
+				}
+				else if (vt == SOP_VT_STR)
 				{
 					uint32_t	hl = 4;
 

@@ -45,7 +45,7 @@ void scan_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 for (uint k = 0; k < ncomp; k++)
                 {
                     Reg r = regs[prog[compoff + k]];
-                    outb[vb + 3 * k + 0] = r.isnull;
+                    outb[vb + 3 * k + 0] = r.isnull | (r.sc << 8);  // numeric: the scale rides above the NULL flag
                     outb[vb + 3 * k + 1] = uint(uint64_t(r.v) & 0xffffffffu);
                     outb[vb + 3 * k + 2] = uint(uint64_t(r.v) >> 32);
                 }

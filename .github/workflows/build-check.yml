@@ -1,5 +1,10 @@
 name: Build Check
 
+# This workflow builds the CUDA product (master) on a self-hosted CUDA runner. It does
+# not apply to the vulkan-gpu branch, which has vulkan-check.yml instead: the push trigger
+# is limited to master, and the pull_request_review path below is limited to pull
+# requests whose base is master (a review event cannot be filtered by branch in 'on').
+
 # Run build verification after PR approval.
 # Temporary: also run on PR creation/update.
 on:
@@ -23,6 +28,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
+       github.event.pull_request.base.ref == 'master' &&
        github.event.review.state == 'approved' &&
        (github.event.review.author_association == 'OWNER' ||
         github.event.review.author_association == 'MEMBER'))
@@ -109,6 +115,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.actor == 'kaigai') ||
       (github.event_name == 'pull_request_review' &&
+       github.event.pull_request.base.ref == 'master' &&
        github.event.review.state == 'approved' &&
        (github.event.review.author_association == 'OWNER' ||
         github.event.review.author_association == 'MEMBER'))

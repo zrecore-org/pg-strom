@@ -354,10 +354,26 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 	{
 		uint64_t	raw0 = wc->agg.nitems_raw, in0 = wc->agg.nitems_in;
 		uint32_t	vfs0 = wc->agg.npages_vfs_read;
+		int			failed;
 
-		if ((wc->session->u.session.xpucode_groupby_keyhash
-			 ? scan_exec_group_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg))
-			 : scan_exec_agg_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg))) != 0)
+		if (wc->session->u.session.join_inner_handle != 0)
+		{
+			/* aggregation over a join: the join kernel aggregates the joined rows */
+			if (!wc->join.ready &&
+				scan_exec_join_open(&ws->scan, wc->session, &wc->join, msg, sizeof(msg)) != 0)
+			{
+				wlog(ws, 1, "task failed: %s", msg);
+				reply_error(wc, "XpuTaskExec", "%s", msg);
+				return;
+			}
+			failed = scan_exec_joinagg_task(&ws->scan, wc->session, &wc->prog, &wc->join, &wc->agg,
+											xcmd, msg, sizeof(msg));
+		}
+		else if (wc->session->u.session.xpucode_groupby_keyhash)
+			failed = scan_exec_group_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg));
+		else
+			failed = scan_exec_agg_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg));
+		if (failed != 0)
 		{
 			wlog(ws, 1, "task failed: %s", msg);
 			reply_error(wc, "XpuTaskExec", "%s", msg);

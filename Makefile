@@ -66,7 +66,7 @@ tarball:
 	            --prefix=$(__PGSTROM_TGZ)/		\
 	            -o $(PGSTROM_TAR) $(GITHASH)	\
 	            LICENSE README.md Makefile		\
-	            src arrow-tools test/ssbm
+	            doc src arrow-tools test/ssbm
 	TARFILE=`realpath $(PGSTROM_TAR)` && 		\
 	TEMP=`mktemp -d` &&				\
 	mkdir -p $${TEMP}/$(__PGSTROM_TGZ) &&		\
@@ -88,9 +88,20 @@ rpm-pg_strom: tarball
 		    -e "s/@@STROM_RELEASE@@/$(RELEASE)/g"		\
 		    -e "s/@@STROM_TARBALL@@/$(__PGSTROM_TGZ)/g"		\
 		    -e "s/@@PGSTROM_GITHASH@@/$(GITHASH)/g" > $(__SPECFILE)
-	# rpmbuild in RHEL10 checks 'rpath', so suggest to ignore our rpath
-	# configuration with symbolic link (/usr/local/cuda)
+	# rpmbuild in RHEL10 checks 'rpath', so suggest to ignore the rpath that
+	# src/Makefile adds for libarrow / libparquet (QA_RPATHS=7).
+	# slangc is not an RPM: give its path as 'SLANGC=/path/to/slangc make rpm'
+	# if it is neither in PATH nor in a place src/gpuserv/Makefile looks at.
 	env QA_RPATHS=7 rpmbuild -ba $(__SPECFILE)
+
+# Debian package of the module built for the PostgreSQL given by PG_CONFIG:
+#   make deb PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+# Needs slangc (SLANGC=/path/to/slangc, PATH, or see src/gpuserv/Makefile), the Vulkan
+# headers (libvulkan-dev), libarrow-dev and libparquet-dev. Not built or tested on a
+# Debian machine by the Vulkan port yet.
+DEB_ARCH     = $(shell dpkg --print-architecture)
+ARROW_MAJOR  = $(shell $(PKGCONF) --modversion arrow   | cut -d. -f1)
+PARQUET_MAJOR= $(shell $(PKGCONF) --modversion parquet | cut -d. -f1)
 
 deb:
 	@which fakeroot >&/dev/null || (echo "Run, sudo dnf install fakeroot"; exit 1)
@@ -100,8 +111,11 @@ deb:
 	 sed -e 's/@@PG_MAJORVERSION@@/$(PG_MAJORVERSION)/g'	\
 	     -e 's/@@PG_MINORVERSION@@/$(PG_MINORVERSION)/g'	\
 	     -e 's/@@PGSTROM_VERSION@@/$(PGSTROM_VERSION)/g'	\
+	     -e 's/@@DEB_ARCH@@/$(DEB_ARCH)/g'			\
+	     -e 's/@@ARROW_MAJOR@@/$(ARROW_MAJOR)/g'		\
+	     -e 's/@@PARQUET_MAJOR@@/$(PARQUET_MAJOR)/g'	\
 	) > $${WORK}/DEBIAN/control &&				\
-	make -C src DEST=$${WORK} clean &&			\
-	make -C src DEST=$${WORK} -j 8  &&			\
-	make -C src DEST=$${WORK} install &&			\
+	make -C src PG_CONFIG=$(PG_CONFIG) DESTDIR=$${WORK} WITH_GPUSERV=1 clean && \
+	make -C src PG_CONFIG=$(PG_CONFIG) DESTDIR=$${WORK} WITH_GPUSERV=1 -j 8  && \
+	make -C src PG_CONFIG=$(PG_CONFIG) DESTDIR=$${WORK} WITH_GPUSERV=1 install && \
 	fakeroot dpkg-deb --build $${WORK} .

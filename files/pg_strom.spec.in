@@ -27,11 +27,25 @@ AutoReqProv: no
 %define __PARQUET_VERSION %(pkgconf --exists parquet && pkgconf --modversion parquet | awk -F. '{printf "%02u", $1}' || echo -n 00)
 %define __ARROW_PARQUET_MIN_VERSION 23
 
-%define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot}
+# WITH_GPUSERV=1: the GPU service (pgstrom-gpuserv) is part of the package, so a build
+# machine without slangc or the Vulkan headers must fail instead of producing a package
+# that silently runs without GPU (the Makefile default, WITH_GPUSERV=auto, only warns).
+%define __make_options_common VERSION=%{version} RELEASE=%{release} GITHASH=%{__githash} DESTDIR=%{buildroot} WITH_GPUSERV=1
+
+# Build requirements that are not RPM packages:
+#   slangc (the Slang shader compiler, https://github.com/shader-slang/slang/releases).
+#   The build finds it through the SLANGC environment variable, PATH, or
+#   ~/tools/slang-2026.20/bin/slangc and /opt/slang/bin/slangc (src/gpuserv/Makefile).
+#   Example:  SLANGC=/opt/slang/bin/slangc make rpm
+# The SPIR-V kernels are compiled into the pgstrom-gpuserv executable (kernels_spv.c),
+# so no .spv file is installed.
 
 %description
 PG-Strom is an extension for PostgreSQL, to accelerate large data processing
-queries using the capability of GPU and NVME devices.
+queries (scan, join and aggregation) using GPUs through Vulkan compute, and to
+read Apache Arrow and Parquet files through a foreign data wrapper (Arrow_Fdw).
+This is the Vulkan build: it does not use CUDA or NVIDIA-only software.
+Validated on Apple Silicon only; other Vulkan devices are not tested.
 
 # ----------------------------------------------------------------
 #  PostgreSQL 15 subpackage
@@ -45,11 +59,21 @@ BuildRequires: postgresql15-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
+BuildRequires: gcc
+BuildRequires: gcc-c++
+BuildRequires: make
+BuildRequires: pkgconf
+BuildRequires: vulkan-headers
+BuildRequires: vulkan-loader-devel
 Requires: postgresql15-server
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
-Requires: numactl-devel
+Requires: numactl-libs
+Requires: vulkan-loader
+# a Vulkan driver (Mesa: RADV, ANV, NVK; or the vendor's) must also be installed;
+# without a usable device PG-Strom loads and PostgreSQL runs without GPU offload
+Recommends: mesa-vulkan-drivers
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -75,11 +99,21 @@ BuildRequires: postgresql16-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
+BuildRequires: gcc
+BuildRequires: gcc-c++
+BuildRequires: make
+BuildRequires: pkgconf
+BuildRequires: vulkan-headers
+BuildRequires: vulkan-loader-devel
 Requires: postgresql16-server
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
-Requires: numactl-devel
+Requires: numactl-libs
+Requires: vulkan-loader
+# a Vulkan driver (Mesa: RADV, ANV, NVK; or the vendor's) must also be installed;
+# without a usable device PG-Strom loads and PostgreSQL runs without GPU offload
+Recommends: mesa-vulkan-drivers
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -105,11 +139,21 @@ BuildRequires: postgresql17-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
+BuildRequires: gcc
+BuildRequires: gcc-c++
+BuildRequires: make
+BuildRequires: pkgconf
+BuildRequires: vulkan-headers
+BuildRequires: vulkan-loader-devel
 Requires: postgresql17-server
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
-Requires: numactl-devel
+Requires: numactl-libs
+Requires: vulkan-loader
+# a Vulkan driver (Mesa: RADV, ANV, NVK; or the vendor's) must also be installed;
+# without a usable device PG-Strom loads and PostgreSQL runs without GPU offload
+Recommends: mesa-vulkan-drivers
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -135,11 +179,21 @@ BuildRequires: postgresql18-devel
 BuildRequires: arrow-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: parquet-devel >= %{__ARROW_PARQUET_MIN_VERSION}
 BuildRequires: numactl-devel
+BuildRequires: gcc
+BuildRequires: gcc-c++
+BuildRequires: make
+BuildRequires: pkgconf
+BuildRequires: vulkan-headers
+BuildRequires: vulkan-loader-devel
 Requires: postgresql18-server
 Requires: %{name}
 Requires: arrow%{__ARROW_VERSION}00-libs
 Requires: parquet%{__PARQUET_VERSION}00-libs
-Requires: numactl-devel
+Requires: numactl-libs
+Requires: vulkan-loader
+# a Vulkan driver (Mesa: RADV, ANV, NVK; or the vendor's) must also be installed;
+# without a usable device PG-Strom loads and PostgreSQL runs without GPU offload
+Recommends: mesa-vulkan-drivers
 Requires(post): %{_sbindir}/update-alternatives
 Requires(postun): %{_sbindir}/update-alternatives
 
@@ -319,11 +373,12 @@ fi
 
 %files
 %defattr(-,root,root,-)
-%doc LICENSE README.md
+%doc LICENSE README.md doc
 
 %if %{__HAS_PG15}
 %files PG15
 %{__pkglibdir_15}/pg_strom.so
+%{__pkglibdir_15}/pgstrom-gpuserv
 %{__pkgbindir_15}/pg2arrow
 %{__pkgbindir_15}/arrow2csv
 %{__pkgbindir_15}/tsv2arrow
@@ -336,6 +391,7 @@ fi
 %if %{__HAS_PG16}
 %files PG16
 %{__pkglibdir_16}/pg_strom.so
+%{__pkglibdir_16}/pgstrom-gpuserv
 %{__pkgbindir_16}/pg2arrow
 %{__pkgbindir_16}/arrow2csv
 %{__pkgbindir_16}/tsv2arrow
@@ -348,6 +404,7 @@ fi
 %if %{__HAS_PG17}
 %files PG17
 %{__pkglibdir_17}/pg_strom.so
+%{__pkglibdir_17}/pgstrom-gpuserv
 %{__pkgbindir_17}/pg2arrow
 %{__pkgbindir_17}/arrow2csv
 %{__pkgbindir_17}/tsv2arrow
@@ -360,6 +417,7 @@ fi
 %if %{__HAS_PG18}
 %files PG18
 %{__pkglibdir_18}/pg_strom.so
+%{__pkglibdir_18}/pgstrom-gpuserv
 %{__pkgbindir_18}/pg2arrow
 %{__pkgbindir_18}/arrow2csv
 %{__pkgbindir_18}/tsv2arrow
@@ -370,6 +428,13 @@ fi
 %endif
 
 %changelog
+* Mon Nov 2 2026 Alejandro Albino <dev@alexventure.com> - 7.0-0
+- Vulkan build (branch vulkan-gpu): CUDA, GPUDirect Storage, heterodb-extra and
+  PostGIS support removed; GPU work runs in the pgstrom-gpuserv process through
+  Vulkan compute (SPIR-V kernels built with Slang)
+- new requirements: vulkan-loader at runtime; slangc and the Vulkan headers to build
+- experimental; validated on Apple Silicon only
+
 * Fri Oct 31 2025 KaiGai Kohei <kaigai@heterodb.com> - 6.1-1
 - Add support of Apache Paqeut file format in arrow_fdw
 - pg2arrow was refactored using libarrow/libparquet

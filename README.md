@@ -41,7 +41,14 @@ GPUSERV_BIN=<installed pgstrom-gpuserv> sh test/gpuserv/scan_test.sh   # GPU vs 
 ```
 
 Without a usable Vulkan device the extension loads and PostgreSQL runs normally,
-with no GPU offload. `CLAUDE.md` describes the code layout and test workflow;
+with no GPU offload.
+
+**User documentation for this branch is in [`doc/`](doc/)**: [install](doc/install.md)
+(platforms, prerequisites, build, first checks), [parameters](doc/parameters.md) (every
+configuration parameter, with what is new, renamed or removed since the CUDA product),
+[features](doc/features.md) (what runs on the GPU and what does not; the table above can
+lag behind it) and [troubleshooting](doc/troubleshooting.md) (service state, probe logs,
+`EXPLAIN` labels). `CLAUDE.md` describes the code layout and test workflow;
 `.claude/hw-acceleration.md` is the plan, the measured findings and the milestone
 status. The documentation site linked above describes the CUDA product and has
 not been updated for this branch.

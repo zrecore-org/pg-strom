@@ -35,6 +35,17 @@
  *   STRLIKE  dst = a matches the literal b; k0 = SCANVM_LIKE_* | negate << 8 | bpchar << 9
  *   STRLEN   dst = number of characters of a (UTF-8; k0 = 1) or bytes (k0 = 0)
  *
+ * numeric (A6): a numeric register is an exact decimal { unscaled int64 v, scale sc } (value = v / 10^sc,
+ * |v| <= INT64_MAX, sc <= 255; sc is the PostgreSQL dscale, so a result prints as PostgreSQL would print
+ * it). NaN, +-Infinity and values that do not fit (or an intermediate result that overflows) mark the row
+ * for re-evaluation by the backend (the instruction returns SCANVM_RECHECK_CODE).
+ *
+ *   NUMCONST dst = constant numeric; a = isnull, b = scale, k0 | k1 << 32 = unscaled value
+ *   NUMCMP   dst = cmp(a, b) of two numerics; k0 = SCANVM_CMP_*
+ *   NUMARITH dst = a op b (k0 = SCANVM_ARITH_PL / MI / MUL) or, with k0 = SCANVM_NUMOP_NEG / ABS, op a
+ *   I2N      dst = (numeric) a, scale 0
+ *   N2I      dst = a rounded half away from zero to an integer of k0 bits (a row that does not fit is rechecked)
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -61,6 +72,16 @@ SCANVM_OP(CONSTSTR, 60)
 SCANVM_OP(STRCMP,   61)
 SCANVM_OP(STRLIKE,  62)
 SCANVM_OP(STRLEN,   63)
+SCANVM_OP(NUMCONST, 80)
+SCANVM_OP(NUMCMP,   81)
+SCANVM_OP(NUMARITH, 82)
+SCANVM_OP(I2N,      83)
+SCANVM_OP(N2I,      84)
+/* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
+SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
+/* unary numeric operations (NUMARITH k0) */
+SCANVM_OP(NUMOP_NEG, 16)
+SCANVM_OP(NUMOP_ABS, 17)
 /* reasons of an error */
 SCANVM_OP(ERR_ZERODIV,  1)
 SCANVM_OP(ERR_INTRANGE, 2)
@@ -97,3 +118,4 @@ SCANVM_OP(VT_INT,   2)
 SCANVM_OP(VT_FLOAT4,3)
 SCANVM_OP(VT_NULLONLY,4)   /* any type: only NULL-ness is loaded (IS [NOT] NULL) */
 SCANVM_OP(VT_STR,   5)     /* text/varchar/bpchar: a string register (see above) */
+SCANVM_OP(VT_NUM,   6)     /* numeric: { unscaled, scale } (see above); not readable -> row rechecked */
