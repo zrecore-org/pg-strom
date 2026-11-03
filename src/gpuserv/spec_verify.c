@@ -61,6 +61,63 @@ multiset_equal(const uint32_t *p, const uint32_t *q, size_t n, size_t rw)
 }
 
 /*
+ * The match records of a join: { page, lp, item offsets..., (isnull, lo, hi) * ncomp }. The value words of a
+ * computed value that is NULL are whatever the register held (a stale value of the lane's previous row, which
+ * the two kernels need not agree on and the backend ignores), so they are zeroed before the records are sorted
+ * and compared. On a difference msg tells the first record that is not in the other set.
+ */
+static int
+join_records_equal(const uint32_t *p, const uint32_t *q, size_t n, size_t rw, size_t nd, size_t ncomp,
+				   char *msg, size_t msglen)
+{
+	uint32_t   *cp = malloc(sizeof(uint32_t) * (n * rw + 1));
+	uint32_t   *cq = malloc(sizeof(uint32_t) * (n * rw + 1));
+	int			same = 1;
+
+	if (!cp || !cq)
+	{
+		free(cp);
+		free(cq);
+		return 1;
+	}
+	memcpy(cp, p, sizeof(uint32_t) * n * rw);
+	memcpy(cq, q, sizeof(uint32_t) * n * rw);
+	for (size_t i = 0; i < n; i++)
+		for (size_t k = 0; k < ncomp; k++)
+		{
+			size_t		o = i * rw + 2 + nd + 3 * k;
+
+			if (cp[o] != 0)
+				cp[o + 1] = cp[o + 2] = 0;
+			if (cq[o] != 0)
+				cq[o + 1] = cq[o + 2] = 0;
+		}
+	sort_words = rw;
+	qsort(cp, n, sizeof(uint32_t) * rw, cmp_rec);
+	qsort(cq, n, sizeof(uint32_t) * rw, cmp_rec);
+	for (size_t i = 0; i < n && same; i++)
+		if (memcmp(cp + i * rw, cq + i * rw, sizeof(uint32_t) * rw) != 0)
+		{
+			size_t		w = 0, len;
+
+			while (cp[i * rw + w] == cq[i * rw + w])
+				w++;
+			len = snprintf(msg, msglen, "the %zu match records differ: sorted record %zu word %zu (page, lp, items, values): VM",
+						   n, i, w);
+			for (size_t j = 0; j < rw && len < msglen; j++)
+				len += snprintf(msg + len, msglen - len, " %x", cp[i * rw + j]);
+			if (len < msglen)
+				len += snprintf(msg + len, msglen - len, "; specialized");
+			for (size_t j = 0; j < rw && len < msglen; j++)
+				len += snprintf(msg + len, msglen - len, " %x", cq[i * rw + j]);
+			same = 0;
+		}
+	free(cp);
+	free(cq);
+	return same;
+}
+
+/*
  * 0: equal, 1: different (msg says where), 2: not comparable (a group table overflowed)
  * kind may carry SPEC_ARROW: the group kernels' overflow list then follows the tables at pc[3], as for a join
  * pc: the push constants of the dispatch; groups: its workgroup count
@@ -75,6 +132,17 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 	kind &= ~SPEC_ARROW;
 	if (arrow && kind == SPEC_GAGG)
 		kind = SPEC_JGAGG;		/* the same layout: tables, then an overflow list at pc[3] */
+	if (a[1] != 0 || b[1] != 0)
+	{
+		/* a kernel error: which row reports first depends on the race, and the rest of the output is
+		 * whatever had been written by then; both kernels must report the same error */
+		if (a[1] != b[1])
+		{
+			snprintf(msg, msglen, "first error %08x (VM) vs %08x (specialized)", a[1], b[1]);
+			return 1;
+		}
+		return 0;
+	}
 	switch (kind)
 	{
 		case SPEC_SCAN:
@@ -192,11 +260,9 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 				}
 			if (na > cap)
 				na = cap;
-			if (!multiset_equal(a + 4 + ojw, b + 4 + ojw, na, rw))
-			{
-				snprintf(msg, msglen, "the %zu match records differ", na);
+			if (!join_records_equal(a + 4 + ojw, b + 4 + ojw, na, rw, (size_t) prog->ndepth, (size_t) prog->ncomp,
+									msg, msglen))
 				return 1;
-			}
 			return 0;
 		}
 	}
@@ -216,7 +282,7 @@ spec_dispatch(scan_engine *eng, scan_prog *prog, int kind, const spec_shape *sh,
 		gpu_vk_buffer *ob = bufs[1];			/* the kernels write only their output buffer */
 		size_t		words = ob->size / 4;
 		uint32_t   *snap = malloc(ob->size), *res = malloc(ob->size);
-		char		msg[200];
+		char		msg[500];
 		int			rc, cmp;
 
 		if (!snap || !res)
