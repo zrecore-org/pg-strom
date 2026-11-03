@@ -567,6 +567,29 @@ arrow_data_open(scan_engine *eng, arrow_data *ad, const kern_data_store *kds, co
 	ad->as.kds = kds;
 	ad->as.head = head;
 	ad->as.iovec = iovec;
+	if (!iovec && !pathname)
+	{
+		/* the buffers are in the task (a Parquet row-group the backend decoded): copy the whole store */
+		len = (size_t) kds->length;
+		if (len < 16)
+			len = 16;
+		if ((uint64_t) len > vk->limits.maxStorageBufferRange)
+		{
+			snprintf(err, errlen, "the row group (%zu bytes) is larger than the device's storage buffer limit (%llu)",
+					 len, (unsigned long long) vk->limits.maxStorageBufferRange);
+			return -1;
+		}
+		if (gpu_vk_buffer_create(vk, &ad->buf, len, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate %zu bytes of device memory: %s", len, vk->err);
+			return -1;
+		}
+		ad->own = 1;
+		memcpy(ad->buf.map, kds, kds->length);
+		ad->as.head = 0;
+		ad->as.base = (const unsigned char *) ad->buf.map;
+		return 0;
+	}
 	if (!iovec || iovec->nr_chunks == 0)
 	{
 		/* nothing to load: every column the task needs is virtual or has no buffer */
@@ -864,10 +887,18 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		snprintf(err, errlen, "source format '%c' is not implemented by the Vulkan GpuScan yet", kds_src->format);
 		return NULL;
 	}
-	if (task->u.task.kds_src_pathname)
-		pathname = (const char *) task + task->u.task.kds_src_pathname;
 	if (task->u.task.kds_src_iovec)
+	{
+		/* the file's pages (Arrow IPC) */
+		if (task->u.task.kds_src_pathname)
+			pathname = (const char *) task + task->u.task.kds_src_pathname;
 		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
+	}
+	else if (task->u.task.kds_src_offset + kds_src->length > task->length)
+	{
+		snprintf(err, errlen, "corrupted Arrow data store");
+		return NULL;
+	}
 	nrows = kds_src->nitems;
 	if (!kds_dst_head)
 	{

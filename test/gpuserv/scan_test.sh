@@ -225,6 +225,68 @@ runjoin s1 "float key stays on the CPU" "select t.i, d.grp from %T t join %D d o
 ANYPLAN=0
 runjoin s1 "parallel workers" "select t.i, d.grp from %T t join %D d on t.b = d.k" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 
+echo "arrow (Arrow_Fdw)"
+# The foreign tables read Arrow IPC files written by arrow_gen.cpp (the arrow-tools do not build on macOS).
+ARROWDIR="$ROOT/arrow"; mkdir -p "$ARROWDIR"
+ARROW_CFLAGS=$(pkg-config --cflags arrow parquet 2>/dev/null); ARROW_LIBS=$(pkg-config --libs arrow parquet 2>/dev/null)
+if [ -z "$ARROW_LIBS" ] && command -v brew >/dev/null 2>&1; then
+	AP=$(brew --prefix apache-arrow 2>/dev/null); ARROW_CFLAGS="-I$AP/include"; ARROW_LIBS="-L$AP/lib -lparquet -larrow -Wl,-rpath,$AP/lib"
+fi
+c++ -std=c++20 -O2 -DWITH_PARQUET "$(dirname "$0")/arrow_gen.cpp" -o "$ARROWDIR/arrow_gen" $ARROW_CFLAGS $ARROW_LIBS >"$ARROWDIR/gen.log" 2>&1
+check "the Arrow test data generator builds" $?
+ARROWROWS=${ARROWROWS:-$NROWS}
+"$ARROWDIR/arrow_gen" "$ARROWDIR/a1.arrow" "$ARROWROWS" 100000 1                 # several record batches, the last one short
+"$ARROWDIR/arrow_gen" "$ARROWDIR/a2.arrow" 1003 1003 1                            # one small batch (not a multiple of 8 or 64 rows)
+"$ARROWDIR/arrow_gen" "$ARROWDIR/a3a.arrow" 70001 33333 1                         # two files, odd batch sizes
+"$ARROWDIR/arrow_gen" "$ARROWDIR/a3b.arrow" 50000 50000 70002
+"$ARROWDIR/arrow_gen" "$ARROWDIR/p1.parquet" "$ARROWROWS" 100000 1               # Parquet: row groups decoded by the backend
+FTDEF="(i int8, a int2, b int4, c int8, d float4, e bool, f text, dt date, ts timestamp)"
+sql "create foreign table a1 $FTDEF server arrow_fdw options (file '$ARROWDIR/a1.arrow')"
+sql "create foreign table a2 $FTDEF server arrow_fdw options (file '$ARROWDIR/a2.arrow')"
+sql "create foreign table a3 $FTDEF server arrow_fdw options (files '$ARROWDIR/a3a.arrow,$ARROWDIR/a3b.arrow')"
+sql "create foreign table p1 $FTDEF server arrow_fdw options (file '$ARROWDIR/p1.parquet')"
+sql "analyze a1"; sql "analyze a2"; sql "analyze a3"; sql "analyze p1"
+for t in a1 a2 a3 p1; do
+	echo "table $t"
+	run $t "trivial qual, mixed projection" "select a, f, c from %T where i > 0"
+	run $t "select * with int4 qual (date, timestamp, text pass-through)" "select * from %T where b < 100"
+	run $t "int2/int8 qual" "select a, c from %T where a > 0 and c < 0"
+	run $t "int2*int4 arithmetic, NULLs" "select a + b, c from %T where b is not null and a * 2 < b"
+	run $t "float4 compare incl. NaN/Infinity" "select i, d from %T where d > 100.5::float4"
+	run $t "float4 arithmetic" "select i, d * 2::float4 + 1::float4 from %T where d < 50::float4"
+	run $t "bool column and OR" "select i, e from %T where e and (b > 0 or c > 0)"
+	run $t "division and modulo" "select b, c / 3, c % 7 from %T where c > 1000"
+	run $t "IS NULL on several columns" "select i from %T where b is null or f is null"
+	run $t "casts" "select a::int4 + b, c::int4 from %T where c between -1000000 and 1000000"
+	run $t "unary minus/plus, NOT" "select -a, +b from %T where not (a < 0 or b > 0)"
+	run $t "varlena pass-through with qual on other column" "select f from %T where a = 123"
+	run $t "10 computed columns (16-register kernel)" "select a+1, a+2, a+3, a+4, a+5, b+1, b+2, b+3, b+4, b+5 from %T where a > 9000"
+	run $t "24 computed columns (32-register kernel)" "select a+1,a+2,a+3,a+4,a+5,a+6,a+7,a+8,a+9,a+10,a+11,a+12, b-1,b-2,b-3,b-4,b-5,b-6,b-7,b-8,b-9,b-10,b-11,b-12 from %T where a > 9500"
+	run $t "int -> float4 -> int casts" "select b, (b::float4 / 2::float4)::int4, b::float4 * 3::float4 from %T where b between -100 and 100"
+	runprep $t "query parameters (generic plan)" "select a, b from %T where b < \$1 and a > \$2" "500, -100"
+	run $t "IS NULL on a text column" "select i from %T where f is null and a > 0"
+	run $t "IS NOT NULL on a text column" "select f from %T where f is not null and b > 49000"
+	run $t "IS NULL on date and timestamp columns" "select i, dt, ts from %T where (dt is null or ts is null) and a < -9000"
+	run $t "date and timestamp pass-through" "select dt, ts, f from %T where a > 9990"
+	run $t "no row qualifies" "select i, f from %T where a > 100000"
+	run $t "every row qualifies" "select i, a, f from %T where a > -100000"
+	run_any $t "float8 comparison stays on the CPU" "select i, d from %T where d > 100.5"
+	run_any $t "text equality stays on the CPU" "select i from %T where f = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"
+	run_any $t "text function in projection" "select i, upper(f) from %T where a > 9990"
+	run_any $t "date qual stays on the CPU" "select i, dt from %T where dt > '2000-01-01'::date and a > 9990"
+done
+ANYPLAN=1
+runagg_any a1 "aggregate over an Arrow table" "select count(*), sum(a), max(c), min(b) from %T where a > 0"
+runagg_any a1 "GROUP BY over an Arrow table" "select a % 10 as k, count(*), sum(b) from %T group by 1 order by 1"
+runjoin a1 "join with a heap table (Arrow side stays a GpuScan)" "select t.i, d.grp from %T t join %D d on t.b = d.k where t.a > 9000"
+runjoin a1 "Arrow table as the inner relation" "select t.i, x.i from s1 t join %T x on t.b = x.b where t.a > 9900 and x.a > 9900"
+ANYPLAN=0
+g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0; set parallel_leader_participation=off;" "select a, c, f from a1 where b < 1000")
+c=$(q "$CPU" "select a, c, f from a1 where b < 1000")
+[ "$g" = "$c" ]; check "parallel GpuScan on an Arrow table matches the CPU" $?
+g=$($PSQL -d scantest -c "$GPU select c / a from a1 where b < 0" 2>&1 | head -1)
+echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported on the GPU" $?
+
 echo "errors"
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)

@@ -4,16 +4,23 @@
 //
 //   arrow_gen <out.arrow> <nrows> <rows-per-batch> [first-i]
 //
-// Build: c++ -std=c++20 -O2 arrow_gen.cpp -o arrow_gen $(pkg-config --cflags --libs arrow)
+// A path ending in ".parquet" writes a Parquet file (one row group per batch) instead; that needs
+// -DWITH_PARQUET and libparquet.
+//
+// Build: c++ -std=c++20 -O2 arrow_gen.cpp -o arrow_gen $(pkg-config --cflags --libs arrow parquet)
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/api.h>
+#ifdef WITH_PARQUET
+#include <parquet/arrow/writer.h>
+#endif
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <vector>
 #include <string>
 
 #define OK(expr)                                                        \
@@ -49,13 +56,20 @@ main(int argc, char **argv)
 		arrow::field("dt", arrow::date32()),
 		arrow::field("ts", arrow::timestamp(arrow::TimeUnit::MICRO)),
 	});
+	bool		parquet = false;
+	{
+		std::string p(path);
+		parquet = (p.size() > 8 && p.compare(p.size() - 8, 8, ".parquet") == 0);
+	}
 	std::shared_ptr<arrow::io::FileOutputStream> out;
+	std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
 	{
 		auto r = arrow::io::FileOutputStream::Open(path);
 		OK(r.status());
 		out = *r;
 	}
 	std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
+	if (!parquet)
 	{
 		auto r = arrow::ipc::MakeFileWriter(out, schema);
 		OK(r.status());
@@ -119,9 +133,24 @@ main(int argc, char **argv)
 		auto batch = arrow::RecordBatch::Make(schema, n,
 											  {arrs[0], arrs[1], arrs[2], arrs[3], arrs[4],
 											   arrs[5], arrs[6], arrs[7], arrs[8]});
-		OK(writer->WriteRecordBatch(*batch));
+		if (parquet)
+			batches.push_back(batch);
+		else
+			OK(writer->WriteRecordBatch(*batch));
 	}
-	OK(writer->Close());
+	if (parquet)
+	{
+#ifdef WITH_PARQUET
+		auto table = arrow::Table::FromRecordBatches(schema, batches);
+		OK(table.status());
+		OK(parquet::arrow::WriteTable(**table, arrow::default_memory_pool(), out, per_batch));
+#else
+		fprintf(stderr, "arrow_gen: built without -DWITH_PARQUET\n");
+		return 2;
+#endif
+	}
+	else
+		OK(writer->Close());
 	OK(out->Close());
 	return 0;
 }

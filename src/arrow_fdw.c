@@ -3245,8 +3245,8 @@ baseRelIsArrowFdw(RelOptInfo *baserel)
  * The Vulkan service reads Arrow record batches itself (arrow_exec.c) and forms the result tuples
  * from the columnar buffers. It supports the Arrow types of the columns that are referenced by the
  * query, if they are: Int (1-8 bytes), FloatingPoint, Bool, Utf8/LargeUtf8, Binary/LargeBinary,
- * Date[day], Time, Timestamp, FixedSizeBinary mapped to bpchar, and virtual columns. Parquet files,
- * numeric (Decimal), interval, list, struct and the rest stay on the CPU path.
+ * Date[day], Time, Timestamp, FixedSizeBinary mapped to bpchar, and virtual columns (Parquet row-groups are decoded by the backend and sent inline). Decimal,
+ * interval, list, struct and the rest stay on the CPU path.
  */
 static bool
 __arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
@@ -3296,8 +3296,6 @@ arrowFdwGpuScanSupported(RelOptInfo *baserel)
 		ArrowFileState *af_state = lfirst(lc);
 		RecordBatchState *rb_state;
 
-		if (ArrowMetadataVersionIsParquet(af_state->version))
-			return false;
 		if (af_state->rb_list == NIL)
 			continue;
 		rb_state = linitial(af_state->rb_list);
@@ -5435,7 +5433,42 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	}
 	else
 	{
+		/*
+		 * A Parquet row-group is decoded here (libparquet) into an Arrow-style
+		 * store that carries its column buffers; the service reads it from the
+		 * task itself (no i/o vector).
+		 */
+		kern_data_store *kds_head;
+		kern_data_store *kds_rg;
+		uint32_t	npages_direct_read = 0;
+		uint32_t	npages_vfs_read = 0;
+		uint32_t	nchunks_parquet_read = 0;
+		uint32_t	ncaches_parquet_load = 0;
+		char		error_message[320];
+		size_t		head_len = chunk_buffer->len - kds_src_offset;
+
 		Assert(kds_src->format == KDS_FORMAT_PARQUET);
+		kds_head = alloca(head_len);
+		memcpy(kds_head, (char *)kds_src, head_len);
+		Assert(kds_head->format == KDS_FORMAT_PARQUET);
+		chunk_buffer->len = kds_src_offset;
+		kds_rg = parquetReadOneRowGroup(af_state->filename,
+										kds_head,
+										__parquetFillupAllocBuffer,
+										(void *)chunk_buffer,
+										&npages_direct_read,
+										&npages_vfs_read,
+										&nchunks_parquet_read,
+										&ncaches_parquet_load,
+										error_message,
+										sizeof(error_message));
+		if (!kds_rg)
+			elog(ERROR, "Unable to load row-group %d of the parquet file '%s': %s",
+				 rb_state->rb_index, af_state->filename, error_message);
+		Assert((char *)kds_rg == chunk_buffer->data + kds_src_offset);
+		chunk_buffer->len = kds_src_offset + kds_rg->length;
+		pg_atomic_fetch_add_u32(arrow_state->nchunks_parquet_read, nchunks_parquet_read);
+		pg_atomic_fetch_add_u32(arrow_state->ncaches_parquet_load, ncaches_parquet_load);
 	}
 	/* arrow/parquet filename */
 	kds_src_pathname = chunk_buffer->len;
