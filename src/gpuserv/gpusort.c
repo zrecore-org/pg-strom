@@ -25,7 +25,7 @@
 #include "kernels_spv.h"
 
 #define GS_TILE					512
-#define GPUSORT_MIN_ROWS_DEFAULT	2048
+#define GPUSORT_MIN_ROWS_DEFAULT	16384
 #define GPUSORT_MAX_ROWS		(1U << 22)
 #define GPUSORT_MAX_KEY_BYTES	((size_t) 512 << 20)
 
