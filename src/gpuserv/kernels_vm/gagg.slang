@@ -28,6 +28,9 @@
 // followed (at kparam.total_lps's pc word: flags_base) by one word per line pointer: 1 if the row
 // overflowed. The aggregate words are those of agg.slang.
 #include "scan_common.slang"
+#ifdef ARROW_SRC
+#include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
+#endif
 
 #ifndef GA_NA
 #define GA_NA 4
@@ -37,6 +40,7 @@
 #define GA_C 128
 #endif
 #define GA_REC (2 + 2 * GA_NK + 6 * GA_NA)
+#define OV_REC (1 + 2 * GA_NK + 3 * GA_NA)
 #define GA_MAXPROBE 8
 
 static const uint AC_COUNT_ANY  = 1;
@@ -98,7 +102,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint aggoff  = prog[11];
     uint nkeys   = prog[12];
     uint keyoff  = prog[13];
-    uint flags_base = kparam.total_lps;
+    uint flags_base = kparam.total_lps;             // ARROW_SRC: the overflow list { count, records } instead
     uint a_cls[GA_NA];
     for (uint k = 0; k < GA_NA; k++)
         a_cls[k] = (k < naggs) ? prog[aggoff + 4 * k] : 0;
@@ -125,12 +129,17 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
     for (uint page = first_page; page < last_page; page++)
     {
+#ifdef ARROW_SRC
+        uint nlp      = arrow_page_rows(page, ncols);
+        uint row0     = arrow_page_row0(page, ncols);
+#else
         uint pte      = ptab[2 * page];
         uint lp_base  = ptab[2 * page + 1];
         g_src         = (pte & 0x80000000u) != 0 ? 1u : 0u;
         uint pbase    = pte & 0x7fffffffu;
         uint pd_lower = ld16(pbase + 12);
         uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);
+#endif
 
         for (uint base = 0; base < nlp; base += SCAN_WG)
         {
@@ -139,8 +148,13 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             bool hit = false;
 
             // A: evaluate and stage
+#ifdef ARROW_SRC
+            if (lp < nlp)
+                hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#else
             if (lp < nlp)
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#endif
             st_slot[tid] = NO_SLOT;
             if (hit)
             {
@@ -238,8 +252,35 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 }
             }
             st_slot[tid] = slot;
+#ifdef ARROW_SRC
+            if (hit && slot == NO_SLOT)
+            {
+                // no room in the table: hand the staged row to the service (as jgagg.slang does)
+                uint idx;
+                InterlockedAdd(outb[flags_base], 1, idx);
+                if (idx < kparam.extra)
+                {
+                    uint rb = flags_base + 1 + idx * OV_REC;
+                    outb[rb + 0] = st_kn[tid] & 3u;
+                    for (uint i = 0; i < GA_NK; i++)
+                    {
+                        uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                        outb[rb + 1 + 2 * i] = uint(kv & 0xffffffffu);
+                        outb[rb + 2 + 2 * i] = uint(kv >> 32);
+                    }
+                    for (uint k = 0; k < naggs; k++)
+                    {
+                        uint64_t vv = uint64_t(st_val[tid * GA_NA + k]);
+                        outb[rb + 1 + 2 * GA_NK + 3 * k + 0] = st_ok[tid * GA_NA + k];
+                        outb[rb + 1 + 2 * GA_NK + 3 * k + 1] = uint(vv & 0xffffffffu);
+                        outb[rb + 1 + 2 * GA_NK + 3 * k + 2] = uint(vv >> 32);
+                    }
+                }
+            }
+#else
             if (lp < nlp)
                 outb[flags_base + lp_base + lp] = (hit && slot == NO_SLOT) ? 1u : (g_recheck != 0 ? 2u : 0u);   // 2: the backend evaluates the row
+#endif
             GroupMemoryBarrierWithGroupSync();
 
             // C: this row's values into its slot, and fresh slots turn committed

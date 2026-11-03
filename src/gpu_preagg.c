@@ -2697,8 +2697,7 @@ tryGpuPreAggAddCustomPath(PlannerInfo *root,
 											  try_parallel > 0);
 		if (!input_path)
 			continue;
-		if (pgstromPathScansArrowFdw(root, input_path))
-			continue;	/* the Vulkan service aggregates heap pages only */
+		/* an Arrow_Fdw / Parquet input is aggregated by the service as well (arrow_exec.c) */
 		/*
 		 * unless pg_strom.enable_partitionwise_gpupreagg is enabled,
 		 * we don't make a path for partitioned outer relation.

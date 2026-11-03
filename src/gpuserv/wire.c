@@ -329,6 +329,18 @@ handle_open_session(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 	reply_success(wc, 0);
 }
 
+/* does the task read an Arrow record batch (Arrow_Fdw, Parquet row group)? */
+static int
+task_is_arrow(const XpuCommand *xcmd)
+{
+	const kern_data_store *kds;
+
+	if (!xcmd->u.task.kds_src_offset || xcmd->u.task.kds_src_offset + sizeof(kern_data_store) > xcmd->length)
+		return 0;
+	kds = (const kern_data_store *)((const char *) xcmd + xcmd->u.task.kds_src_offset);
+	return kds->format == KDS_FORMAT_ARROW;
+}
+
 static void
 handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 {
@@ -366,9 +378,15 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 				reply_error(wc, "XpuTaskExec", "%s", msg);
 				return;
 			}
-			failed = scan_exec_joinagg_task(&ws->scan, wc->session, &wc->prog, &wc->join, &wc->agg,
-											xcmd, msg, sizeof(msg));
+			if (task_is_arrow(xcmd))
+				failed = scan_exec_arrow_joinagg_task(&ws->scan, wc->session, &wc->prog, &wc->join, &wc->agg,
+													  xcmd, msg, sizeof(msg));
+			else
+				failed = scan_exec_joinagg_task(&ws->scan, wc->session, &wc->prog, &wc->join, &wc->agg,
+												xcmd, msg, sizeof(msg));
 		}
+		else if (task_is_arrow(xcmd))
+			failed = scan_exec_arrow_agg_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg));
 		else if (wc->session->u.session.xpucode_groupby_keyhash)
 			failed = scan_exec_group_task(&ws->scan, wc->session, &wc->prog, &wc->agg, xcmd, msg, sizeof(msg));
 		else
@@ -393,8 +411,12 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			reply_error(wc, "XpuTaskExec", "%s", msg);
 			return;
 		}
-		resp = scan_exec_join_task(&ws->scan, wc->session, &wc->prog, &wc->join, xcmd, &resp_len,
-								   msg, sizeof(msg));
+		if (task_is_arrow(xcmd))
+			resp = scan_exec_arrow_join_task(&ws->scan, wc->session, &wc->prog, &wc->join, xcmd, &resp_len,
+											 msg, sizeof(msg));
+		else
+			resp = scan_exec_join_task(&ws->scan, wc->session, &wc->prog, &wc->join, xcmd, &resp_len,
+									   msg, sizeof(msg));
 	}
 	else
 		resp = scan_exec_task(&ws->scan, wc->session, &wc->prog, xcmd, &resp_len, msg, sizeof(msg));

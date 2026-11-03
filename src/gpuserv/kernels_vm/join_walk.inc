@@ -11,12 +11,19 @@
 // Included inside the kernel's page loop. The kernel provides: page, lid, the program header words
 // (coloff, insnoff, ncols, nq, nins, qreg, nd, dtab, proj_begin) and the per-mode state.
 {
+#ifdef ARROW_SRC
+    // the outer relation is an Arrow record batch: a virtual page is AR_VP consecutive rows
+    uint outer_src = 0u;
+    uint nlp      = arrow_page_rows(page, ncols);
+    uint row0     = arrow_page_row0(page, ncols);
+#else
     uint pte      = ptab[2 * page];
     uint outer_src = (pte & 0x80000000u) != 0 ? 1u : 0u;
     uint pbase    = pte & 0x7fffffffu;
     g_src         = outer_src;
     uint pd_lower = ld16(pbase + 12);
     uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);
+#endif
 
     for (uint base = 0; base < nlp; base += SCAN_WG)
     {
@@ -37,8 +44,13 @@
 
         g_src = outer_src;
         // the outer row: deform and scan quals only (nins = nq)
+#ifdef ARROW_SRC
+        if (lp < nlp)
+            hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
+#else
         if (lp < nlp)
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
+#endif
         if (hit)
         {
             uint dt = dtab;

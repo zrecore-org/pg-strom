@@ -45,6 +45,13 @@ LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.
 # Arrow_Fdw scans (A5)
 ARROW_SPV  := $(foreach r,8 16 32,build/gpuarrow$(r).spv)
 SPV_FILES  += $(ARROW_SPV)
+# Arrow record batches as the outer relation of aggregations and joins (-DARROW_SRC; 16 and 32 registers)
+AAGG_SPV   := $(foreach r,16 32,$(foreach a,4 8 12,build/aagg$(r)_$(a).spv))
+AGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 8 12,build/agagg$(r)_$(a).spv))
+AJOIN_SPV  := $(foreach r,16 32,build/ajoin$(r).spv)
+AJAGG_SPV  := $(foreach r,16 32,$(foreach a,4 8 12,build/ajagg$(r)_$(a).spv))
+AJGAGG_SPV := $(foreach r,16 32,$(foreach a,4 8 12,build/ajgagg$(r)_$(a).spv))
+SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 LIB_OBJS   += arrow_exec.o
 
 all: libgpuserv.a gpuserv-probe pgstrom-gpuserv
@@ -121,9 +128,30 @@ build/jgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm
 	$(SLANGC) kernels_vm/jgagg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(SCAN_SLANGFLAGS) -target spirv -entry jgagg_main -stage compute -o $@
 
 # the Arrow scan kernel: one variant per register count
-build/gpuarrow%.spv: kernels_vm/arrow.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+build/gpuarrow%.spv: kernels_vm/arrow.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc kernels_vm/arrow_load.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/arrow.slang -I kernels_vm -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry arrow_main -stage compute -o $@
+
+ARROW_INCS := kernels_vm/arrow_load.inc
+build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/agg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) -DSCAN_WG=128 $(SCAN_SLANGFLAGS) -target spirv -entry agg_main -stage compute -o $@
+
+build/agagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/gagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
+
+build/ajoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/join.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$* $(SCAN_SLANGFLAGS) -target spirv -entry join_main -stage compute -o $@
+
+build/ajagg%.spv: kernels_vm/jagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/jagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) $(SCAN_SLANGFLAGS) -target spirv -entry jagg_main -stage compute -o $@
+
+build/ajgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/jgagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(SCAN_SLANGFLAGS) -target spirv -entry jgagg_main -stage compute -o $@
 
 arrow_exec.o: arrow_exec.c scan_exec.h scan_prog.h scan_caps.h kernels_spv.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -c -o $@ $<
