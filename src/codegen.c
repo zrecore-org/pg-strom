@@ -1665,6 +1665,16 @@ codegen_const_expression(codegen_context *context,
 	if (!dtype)
 		__Ereport("type %s is not device supported",
 				  format_type_be(con->consttype));
+	/* Vulkan service: a numeric constant must fit { int64, scale } (no NaN/Infinity) */
+	if (con->consttype == NUMERICOID && !con->constisnull)
+	{
+		int64_t		nv;
+		uint32_t	nsc;
+
+		if (VARATT_IS_EXTERNAL(DatumGetPointer(con->constvalue)) ||
+			!scan_vm_numeric_datum_decode((const unsigned char *) DatumGetPointer(con->constvalue), &nv, &nsc))
+			__Ereport("numeric constant is not representable on the Vulkan service");
+	}
 	if (buf)
 	{
 		kern_expression kexp;
@@ -1720,6 +1730,8 @@ codegen_pseudo_const_expression(codegen_context *context,
 	dtype = pgstrom_devtype_lookup(type_oid);
 	if (!dtype)
 		__Ereport("type %s is not device supported", format_type_be(type_oid));
+	if (type_oid == NUMERICOID)		/* the program builder must know the value fits: refuse */
+		__Ereport("numeric parameters are not supported by the Vulkan service");
 	/* assign param_id */
 	foreach (lc, context->used_params)
 	{
@@ -1763,6 +1775,8 @@ codegen_param_expression(codegen_context *context,
 	if (!dtype)
 		__Ereport("type %s is not device supported",
 				  format_type_be(param->paramtype));
+	if (param->paramtype == NUMERICOID)
+		__Ereport("numeric parameters are not supported by the Vulkan service");
 	/* assign param_id */
 	foreach (lc, context->used_params)
 	{
@@ -1852,6 +1866,17 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 {
 	scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
+	/* numeric: not in a join program (its registers are not loaded there) */
+	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	{
+		ListCell   *lc;
+
+		if (dfunc->func_rettype && dfunc->func_rettype->type_code == TypeOpCode__numeric)
+			return false;
+		foreach (lc, func_args)
+			if (exprType((Node *) lfirst(lc)) == NUMERICOID)
+				return false;
+	}
 	if (fc.cls != SOP_STRCMP && fc.cls != SOP_STRLIKE && fc.cls != SOP_STRLEN)
 		return true;
 	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)

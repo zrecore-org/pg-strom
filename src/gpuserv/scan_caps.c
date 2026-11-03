@@ -236,6 +236,238 @@ scan_vm_like_shape(const unsigned char *pat, int plen, unsigned char *lit, int *
 	return trail ? SOP_LIKE_CONTAINS : SOP_LIKE_SUFFIX;
 }
 
+/* ----------------------------------------------------------------
+ * A6: numeric. A numeric register is { unscaled int64, scale } (see scan_vm_ops.inc).
+ * numeric_eq .. numeric_ge, numeric_add/sub/mul, numeric_uminus/uplus/abs (and the abs() alias),
+ * intN_to_numeric, numeric_to_intN. Division, remainder, float casts etc. stay on the CPU.
+ * ----------------------------------------------------------------
+ */
+static scan_func_class
+classify_numeric(const char *name)
+{
+	scan_func_class fc = {0, 0, 0};
+	int			k;
+
+	if (!strncmp(name, "numeric_", 8))
+	{
+		const char *rest = name + 8;
+
+		if ((k = cmp_kind_of(rest)) >= 0)
+		{
+			fc.cls = SOP_NUMCMP; fc.kind = k;
+		}
+		else if (!strcmp(rest, "add")) { fc.cls = SOP_NUMARITH; fc.kind = SOP_ARITH_PL; }
+		else if (!strcmp(rest, "sub")) { fc.cls = SOP_NUMARITH; fc.kind = SOP_ARITH_MI; }
+		else if (!strcmp(rest, "mul")) { fc.cls = SOP_NUMARITH; fc.kind = SOP_ARITH_MUL; }
+		else if (!strcmp(rest, "uminus")) { fc.cls = SOP_NUMARITH; fc.kind = SOP_NUMOP_NEG; }
+		else if (!strcmp(rest, "abs")) { fc.cls = SOP_NUMARITH; fc.kind = SOP_NUMOP_ABS; }
+		else if (!strcmp(rest, "uplus")) { fc.cls = SOP_MOV; }
+		else if (!strncmp(rest, "to_int", 6) && (k = int_width_of_digit(rest[6])) != 0 && rest[7] == '\0')
+		{
+			fc.cls = SOP_N2I; fc.width = k;
+		}
+	}
+	else if (!strncmp(name, "int", 3) && int_width_of_digit(name[3]) != 0 && !strcmp(name + 4, "_to_numeric"))
+	{
+		fc.cls = SOP_I2N;
+	}
+	return fc;
+}
+
+/* value * 10^d without overflow of int64 (|value| <= INT64_MAX); 0 if it overflows */
+int
+scan_vm_num_up(int64_t *v, uint32_t d)
+{
+	static const int64_t p10[19] = {
+		1LL, 10LL, 100LL, 1000LL, 10000LL, 100000LL, 1000000LL, 10000000LL, 100000000LL,
+		1000000000LL, 10000000000LL, 100000000000LL, 1000000000000LL, 10000000000000LL,
+		100000000000000LL, 1000000000000000LL, 10000000000000000LL, 100000000000000000LL,
+		1000000000000000000LL};
+	int64_t		lim;
+
+	if (*v == 0)
+		return 1;
+	if (d > 18)
+		return 0;
+	lim = INT64_MAX / p10[d];
+	if (*v > lim || *v < -lim)
+		return 0;
+	*v *= p10[d];
+	return 1;
+}
+
+/* -1, 0, +1: exact comparison of two { unscaled, scale } values */
+int
+scan_vm_num_cmp(int64_t va, uint32_t sa, int64_t vb, uint32_t sb)
+{
+	if (sa < sb)
+	{
+		if (!scan_vm_num_up(&va, sb - sa))
+			return va > 0 ? 1 : -1;
+	}
+	else if (sb < sa)
+	{
+		if (!scan_vm_num_up(&vb, sa - sb))
+			return vb > 0 ? -1 : 1;
+	}
+	return va < vb ? -1 : (va > vb ? 1 : 0);
+}
+
+/*
+ * Decode the payload of a numeric varlena (plen bytes, after the varlena header; see numeric.c) into
+ * { *v, *sc }. Returns 0 for NaN, +-Infinity and for a value that does not fit (|v| <= INT64_MAX,
+ * scale <= 255): such rows are evaluated by the backend.
+ */
+int
+scan_vm_numeric_payload_decode(const unsigned char *p, uint32_t plen, int64_t *v, uint32_t *sc)
+{
+	uint16_t	hdr;
+	int			neg, weight;
+	uint32_t	dscale, ndig, hl;
+	int64_t		acc = 0;
+	int			e;
+
+	*v = 0;
+	*sc = 0;
+	if (plen < 2)
+		return 0;
+	memcpy(&hdr, p, 2);
+	if ((hdr & 0xc000) == 0xc000)
+		return 0;
+	if (hdr & 0x8000)
+	{
+		neg = (hdr & 0x2000) != 0;
+		dscale = (hdr >> 7) & 0x3f;
+		weight = (int)(hdr & 0x3f) - ((hdr & 0x40) ? 64 : 0);
+		hl = 2;
+	}
+	else
+	{
+		int16_t		w;
+
+		if (plen < 4)
+			return 0;
+		neg = (hdr & 0x4000) != 0;
+		dscale = hdr & 0x3fff;
+		memcpy(&w, p + 2, 2);
+		weight = w;
+		hl = 4;
+	}
+	ndig = (plen - hl) / 2;
+	if (dscale > 255 || ndig > 5)
+		return 0;
+	for (uint32_t i = 0; i < ndig; i++)
+	{
+		uint16_t	d;
+
+		memcpy(&d, p + hl + 2 * i, 2);
+		if (acc > (INT64_MAX - (int64_t) d) / 10000)
+			return 0;
+		acc = acc * 10000 + d;
+	}
+	e = 4 * (weight - (int) ndig + 1) + (int) dscale;
+	if (acc != 0)
+	{
+		if (e >= 0)
+		{
+			if (!scan_vm_num_up(&acc, (uint32_t) e))
+				return 0;
+		}
+		else
+		{
+			static const int64_t p10[19] = {
+				1LL, 10LL, 100LL, 1000LL, 10000LL, 100000LL, 1000000LL, 10000000LL, 100000000LL,
+				1000000000LL, 10000000000LL, 100000000000LL, 1000000000000LL, 10000000000000LL,
+				100000000000000LL, 1000000000000000LL, 10000000000000000LL, 100000000000000000LL,
+				1000000000000000000LL};
+
+			if (-e > 18 || acc % p10[-e] != 0)
+				return 0;
+			acc /= p10[-e];
+		}
+	}
+	*v = neg ? -acc : acc;
+	*sc = dscale;
+	return 1;
+}
+
+/* the same for a whole varlena datum (1-byte or 4-byte header; compressed and external ones fail) */
+int
+scan_vm_numeric_datum_decode(const unsigned char *d, int64_t *v, uint32_t *sc)
+{
+	if (d[0] & 1)
+	{
+		if (d[0] == 1)
+			return 0;
+		return scan_vm_numeric_payload_decode(d + 1, ((d[0] >> 1) & 0x7f) - 1, v, sc);
+	}
+	if ((d[0] & 3) == 2)
+		return 0;
+	{
+		uint32_t	h;
+
+		memcpy(&h, d, 4);
+		return scan_vm_numeric_payload_decode(d + 4, ((h >> 2) & 0x3fffffffU) - 4, v, sc);
+	}
+}
+
+/*
+ * Form the numeric varlena (a 1-byte header, as heap_form_tuple would store it) of { v, sc } into buf
+ * (at least SCAN_NUMERIC_MAXLEN bytes) exactly as numeric.c's make_result() does: digits in base 10000
+ * aligned to the decimal point, leading and trailing zero digits stripped, dscale = sc. Returns its length.
+ */
+uint32_t
+scan_vm_numeric_encode(int64_t v, uint32_t sc, unsigned char *buf)
+{
+	unsigned __int128 x;
+	uint16_t	digs[8];			/* least significant first */
+	int			nd = 0, f = (int)((sc + 3) / 4), lo = 0, weight;
+	int			neg = (v < 0);
+	uint32_t	hl, len;
+	uint16_t	hdr;
+
+	x = (unsigned __int128)(neg ? -(unsigned __int128)(int64_t) v : (unsigned __int128)(uint64_t) v);
+	for (uint32_t i = 0; i < 4 * (uint32_t) f - sc; i++)
+		x *= 10;
+	while (x != 0)
+	{
+		digs[nd++] = (uint16_t)(x % 10000);
+		x /= 10000;
+	}
+	/* digs[i] has the weight i - f */
+	while (lo < nd && digs[lo] == 0)
+		lo++;
+	if (nd == 0)
+	{
+		weight = 0;
+		neg = 0;
+	}
+	else
+		weight = nd - 1 - f;
+	if (sc <= 63 && weight <= 63 && weight >= -64)
+	{
+		hdr = 0x8000 | (neg ? 0x2000 : 0) | (uint16_t)(sc << 7) | (weight < 0 ? 0x40 : 0) | (uint16_t)(weight & 0x3f);
+		hl = 2;
+	}
+	else
+	{
+		hdr = (neg ? 0x4000 : 0) | (uint16_t) sc;
+		hl = 4;
+	}
+	len = 1 + hl + 2 * (uint32_t)(nd - lo);
+	buf[0] = (unsigned char)((len << 1) | 1);
+	memcpy(buf + 1, &hdr, 2);
+	if (hl == 4)
+	{
+		int16_t		w = (int16_t) weight;
+
+		memcpy(buf + 3, &w, 2);
+	}
+	for (int i = nd - 1, k = 0; i >= lo; i--, k++)
+		memcpy(buf + 1 + hl + 2 * k, &digs[i], 2);
+	return len;
+}
+
 /* "int4lt", "int48pl", "float4mul", "int4_to_int8", "booleq", "int4um" ... */
 scan_func_class
 scan_vm_classify_func(uint32_t opcode)
@@ -245,6 +477,8 @@ scan_vm_classify_func(uint32_t opcode)
 	int			w1, w2, k;
 
 	if (!name)
+		return fc;
+	if ((fc = classify_numeric(name)).cls != 0)
 		return fc;
 	if ((fc = classify_temporal(name)).cls != 0)
 		return fc;

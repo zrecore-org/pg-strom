@@ -26,6 +26,7 @@ typedef struct scan_proj_attr
 	int			depth;				/* SCAN_PROJ_INNER: which inner relation (1 ...) */
 	int			comp;				/* SCAN_PROJ_COMP: index in the per-row results */
 	int			comp_bytes;			/* SCAN_PROJ_COMP: size of the datum (1, 2, 4 or 8) */
+	int			comp_numeric;		/* SCAN_PROJ_COMP: a numeric { unscaled, scale }; the NULL word carries the scale */
 } scan_proj_attr;
 
 typedef struct scan_prog

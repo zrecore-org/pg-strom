@@ -429,7 +429,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		 * Is the JOIN-clause executable on the target device?
 		 */
 		if (!pgstrom_xpu_expression(rinfo->clause,
-									pp_prev->xpu_task_flags,
+									(pp_prev->xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
 									pp_prev->base_relid,
 									inner_target_list,
 									NULL))
@@ -521,6 +521,22 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	 */
 	if (other_quals != NIL)
 		return NULL;
+
+	/*
+	 * The outer scan qualifiers run in the join program: the Vulkan VM refuses some of them there
+	 * (text, numeric), although the plain GpuScan of the outer relation accepted them.
+	 */
+	foreach (lc, pp_prev->scan_quals)
+	{
+		Expr	   *qual = (Expr *) lfirst(lc);
+
+		if (!pgstrom_xpu_expression(qual,
+									(pp_prev->xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
+									pp_prev->base_relid,
+									inner_target_list,
+									NULL))
+			return NULL;
+	}
 
 	/*
 	 * Setup pgstromPlanInfo

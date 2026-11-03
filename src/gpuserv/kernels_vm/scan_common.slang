@@ -54,6 +54,7 @@ struct Reg
 {
     int64_t v;
     uint    isnull;
+    uint    sc;         // numeric: the scale of v (value = v / 10^sc); unused by the other types
 };
 
 // Loads from the page buffers. Tuples start on 8-byte boundaries and a column is aligned
@@ -213,6 +214,247 @@ int str_memcmp(uint sa, uint oa, uint sb, uint ob, uint n)
         uint cb = ldb_s(sb, ob + i);
         if (ca != cb)
             return ca < cb ? -1 : 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// A6: numeric. A register holds { unscaled value v, scale sc } with |v| <= INT64_MAX and sc <= 255.
+// Everything that does not fit (NaN, Infinity, more than 18-19 digits, an overflowing intermediate
+// result) makes the instruction return SOP_RECHECK_CODE: the backend evaluates the row.
+// ---------------------------------------------------------------------------------------------
+// 10^d for d <= 18 (a computed loop: a constant int64 array does not survive MoltenVK/Metal)
+int64_t num_p10(uint d)
+{
+    int64_t p = 1;
+    for (uint i = 0; i < d; i++)
+        p = p * 10;
+    return p;
+}
+static const int64_t NUM_MAX = 9223372036854775807;
+
+// v = v * 10^d; false on overflow
+bool num_up(inout int64_t v, uint d)
+{
+    if (v == 0)
+        return true;
+    if (d > 18u)
+        return false;
+    int64_t p = num_p10(d);
+    int64_t lim = NUM_MAX / p;
+    if (v > lim || v < -lim)
+        return false;
+    v = v * p;
+    return true;
+}
+
+// 16 bits at any byte offset (the payload of a 1-byte-header varlena is at an odd offset; ld16 needs 2-byte alignment)
+uint ld16u(uint o) { return ld8(o) | (ld8(o + 1) << 8); }
+
+// Decode the numeric varlena payload (plen bytes at byte offset o of the current source): false if it is
+// NaN / Infinity or does not fit in { int64, scale }. Layout: see numeric.c (short and long header).
+bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
+{
+    v = 0;
+    sc = 0;
+    if (plen < 2)
+        return false;
+    uint hdr = ld16u(o);
+    bool neg;
+    int  weight;
+    uint dscale, doff, ndig;
+    if ((hdr & 0xc000u) == 0xc000u)
+        return false;                               // NaN or Infinity
+    if ((hdr & 0x8000u) != 0)
+    {
+        neg = (hdr & 0x2000u) != 0;
+        dscale = (hdr >> 7) & 0x3fu;
+        weight = int(hdr & 0x3fu) - (((hdr & 0x40u) != 0) ? 64 : 0);
+        doff = o + 2;
+        ndig = (plen - 2) / 2;
+    }
+    else
+    {
+        if (plen < 4)
+            return false;
+        neg = (hdr & 0x4000u) != 0;
+        dscale = hdr & 0x3fffu;
+        weight = int(ld16u(o + 2) ^ 0x8000u) - 32768;
+        doff = o + 4;
+        ndig = (plen - 4) / 2;
+    }
+    if (dscale > 255u || ndig > 5u)
+        return false;
+    int64_t acc = 0;
+    for (uint i = 0; i < ndig; i++)
+    {
+        int64_t d = int64_t(ld16u(doff + 2u * i));
+        if (acc > (NUM_MAX - d) / 10000)
+            return false;
+        acc = acc * 10000 + d;
+    }
+    int e = 4 * (weight - int(ndig) + 1) + int(dscale);
+    if (acc != 0)
+    {
+        if (e >= 0)
+        {
+            if (!num_up(acc, uint(e)))
+                return false;
+        }
+        else
+        {
+            uint m = uint(-e);
+            if (m > 18u)
+                return false;
+            int64_t p = num_p10(m);
+            if (acc % p != 0)
+                return false;
+            acc = acc / p;
+        }
+    }
+    v = neg ? -acc : acc;
+    sc = dscale;
+    return true;
+}
+
+int num_cmp(int64_t va, uint sa, int64_t vb, uint sb)
+{
+    // the one with the smaller scale is scaled up; if that overflows its magnitude is larger
+    if (sa < sb)
+    {
+        if (!num_up(va, sb - sa))
+            return va > 0 ? 1 : -1;
+    }
+    else if (sb < sa)
+    {
+        if (!num_up(vb, sa - sb))
+            return vb > 0 ? -1 : 1;
+    }
+    return va < vb ? -1 : (va > vb ? 1 : 0);
+}
+
+// The numeric instructions. Returns 0, or SOP_RECHECK_CODE.
+uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    switch (op)
+    {
+    case SOP_NUMCONST:
+        regs[dst].v = int64_t(uint64_t(k0) | (uint64_t(k1) << 32));
+        regs[dst].sc = rb;
+        regs[dst].isnull = ra;
+        break;
+    case SOP_NUMCMP:
+    {
+        Reg x = regs[ra];
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        regs[dst].isnull = 0;
+        regs[dst].v = b2l(cmp_result(num_cmp(x.v, x.sc, y.v, y.sc), k0));
+        break;
+    }
+    case SOP_NUMARITH:
+    {
+        Reg x = regs[ra];
+        if (k0 == SOP_NUMOP_NEG || k0 == SOP_NUMOP_ABS)
+        {
+            regs[dst].isnull = x.isnull;
+            if (x.isnull == 0)
+            {
+                regs[dst].v = (k0 == SOP_NUMOP_NEG || x.v < 0) ? -x.v : x.v;
+                regs[dst].sc = x.sc;
+            }
+            break;
+        }
+        Reg y = regs[rb];
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            break;
+        }
+        int64_t a = x.v;
+        int64_t b = y.v;
+        int64_t r;
+        uint    sc;
+        if (k0 == SOP_ARITH_MUL)
+        {
+            sc = x.sc + y.sc;
+            r = a * b;
+            // a == -1: r = -b cannot overflow because |b| <= INT64_MAX
+            if (a != -1 && a != 0 && r / a != b)
+                return SOP_RECHECK_CODE;
+        }
+        else
+        {
+            sc = max(x.sc, y.sc);
+            if (!num_up(a, sc - x.sc) || !num_up(b, sc - y.sc))
+                return SOP_RECHECK_CODE;
+            if (k0 == SOP_ARITH_PL)
+            {
+                r = a + b;
+                if (((a ^ r) & (b ^ r)) < 0)
+                    return SOP_RECHECK_CODE;
+            }
+            else
+            {
+                r = a - b;
+                if (((a ^ b) & (a ^ r)) < 0)
+                    return SOP_RECHECK_CODE;
+            }
+        }
+        if (r == (-9223372036854775807 - 1) || sc > 255u)
+            return SOP_RECHECK_CODE;
+        regs[dst].v = r;
+        regs[dst].sc = sc;
+        regs[dst].isnull = 0;
+        break;
+    }
+    case SOP_I2N:
+    {
+        Reg x = regs[ra];
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            if (x.v == (-9223372036854775807 - 1))
+                return SOP_RECHECK_CODE;
+            regs[dst].v = x.v;
+            regs[dst].sc = 0;
+        }
+        break;
+    }
+    case SOP_N2I:
+    {
+        Reg x = regs[ra];
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            int64_t m = x.v < 0 ? -x.v : x.v;
+            int64_t q;
+            if (x.sc == 0)
+                q = m;
+            else if (x.sc >= 20u)
+                q = 0;
+            else if (x.sc == 19u)
+                q = (m >= 5000000000000000000) ? 1 : 0;
+            else
+            {
+                int64_t p = num_p10(x.sc);
+                q = m / p;
+                if (m - q * p >= p - (m - q * p))
+                    q += 1;                         // round half away from zero
+            }
+            int64_t r = x.v < 0 ? -q : q;
+            if (out_of_range(r, k0))
+                return SOP_RECHECK_CODE;            // PostgreSQL's range error: the backend raises it
+            regs[dst].v = r;
+        }
+        break;
+    }
+    default:
+        return op | 0x80000000u;
     }
     return 0;
 }
@@ -396,6 +638,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         break;
     }
     default:
+        if (op >= SOP_NUMCONST && op <= SOP_N2I)
+            return vm_num(op, dst, ra, rb, k0, k1, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;
@@ -732,7 +976,33 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
             {
                 regs[slot].v = 0;
                 regs[slot].isnull = 0;
-                if (vt == SOP_VT_STR)
+                if (vt == SOP_VT_NUM)
+                {
+                    // numeric: decode to { unscaled, scale }; compressed, external, NaN/Infinity or too
+                    // large values are evaluated by the backend
+                    uint hl = 4;
+                    if ((b0 & 1u) != 0)
+                    {
+                        hl = 1;
+                        if (b0 == 1u)
+                            g_recheck = 1;
+                    }
+                    else if ((b0 & 3u) == 2u)
+                        g_recheck = 1;
+                    if (g_recheck == 0)
+                    {
+                        int64_t nv;
+                        uint    nsc;
+                        if (num_decode(tbase + off + hl, sz - hl, nv, nsc))
+                        {
+                            regs[slot].v = nv;
+                            regs[slot].sc = nsc;
+                        }
+                        else
+                            g_recheck = 1;
+                    }
+                }
+                else if (vt == SOP_VT_STR)
                 {
                     // a string register: where the payload is (see above); a value stored out of line
                     // (b0 == 1) or compressed (4-byte header with the compression flag) is not readable
@@ -829,6 +1099,7 @@ bool eval_row(uint pbase, uint page, uint lp,
     {
         regs[i].v = 0;
         regs[i].isnull = 1;
+        regs[i].sc = 0;
     }
     if (!deform_tuple(pbase + lp_off, page, lp, coloff, ncols, regs))
         return false;
@@ -845,6 +1116,11 @@ bool eval_row(uint pbase, uint page, uint lp,
     }
     if (err == 0 && hit && nins > nq)
         err = vm_run(insnoff, nq, nins, regs);
+    if (err == SOP_RECHECK_CODE)
+    {
+        g_recheck = 1;          // an instruction could not evaluate this row (numeric): the backend does
+        return false;
+    }
     if (err != 0)
     {
         report_error(page, lp, err);
