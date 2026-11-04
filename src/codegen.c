@@ -4677,6 +4677,184 @@ codegen_build_gpusort_keydesc(codegen_context *context,
 }
 
 /*
+ * pgstrom_vulkan_expr_limits
+ *
+ * The Vulkan service translates an expression into a VM program that has SCAN_MAX_REGS registers: the
+ * first nslots (kernel variables) are the variable slots, the temporaries of an expression sit above them.
+ * A program the service cannot translate fails the query ("the expression needs more than 32 registers"),
+ * so the planner must keep such an expression on the CPU. This is a conservative estimate of the temporary
+ * registers scan_prog.c's expr_to_reg() allocates (the same recursion: a variable argument costs nothing,
+ * any other argument is held in a register while the next one is computed; unknown nodes are treated alike),
+ * and of the number of nodes (the program size of a join is limited).
+ */
+typedef struct
+{
+	int			held;			/* arguments that hold a register while the next one is computed */
+	int			maxneed;
+	int			nodes;
+} vulkan_est_state;
+
+static int vulkan_expr_regs(Node *node, int *p_nodes);
+
+static bool
+vulkan_est_child(Node *child, vulkan_est_state *st)
+{
+	int			need;
+
+	if (child == NULL)
+		return false;
+	if (IsA(child, List))
+	{
+		ListCell   *lc;
+
+		foreach (lc, (List *) child)
+			(void) vulkan_est_child(lfirst(lc), st);
+		return false;
+	}
+	need = vulkan_expr_regs(child, &st->nodes);
+	if (st->held + need > st->maxneed)
+		st->maxneed = st->held + need;
+	if (!IsA(child, Var))
+		st->held++;
+	return false;			/* the children of the child are handled by the recursion */
+}
+
+static int
+vulkan_expr_regs(Node *node, int *p_nodes)
+{
+	vulkan_est_state st;
+
+	if (node == NULL)
+		return 0;
+	check_stack_depth();
+	(*p_nodes)++;
+	switch (nodeTag(node))
+	{
+		case T_Var:
+			return 0;
+		case T_Const:
+		case T_Param:
+			return 1;
+		case T_RelabelType:
+			return vulkan_expr_regs((Node *)((RelabelType *) node)->arg, p_nodes);
+		case T_BoolExpr:
+			{
+				BoolExpr   *b = (BoolExpr *) node;
+				int			mx = 0;
+				ListCell   *lc;
+
+				if (list_length(b->args) > SCAN_VM_BOOL_ARGS)
+					return SCAN_MAX_REGS;		/* scan_prog.c: "too many arguments in AND/OR" */
+				/* AND/OR: the accumulator register, every argument computed above it */
+				foreach (lc, b->args)
+				{
+					int		need = vulkan_expr_regs(lfirst(lc), p_nodes);
+
+					if (need > mx)
+						mx = need;
+				}
+				return Max(1, (b->boolop == NOT_EXPR ? mx : 1 + mx));
+			}
+		case T_NullTest:
+			{
+				int		need = vulkan_expr_regs((Node *)((NullTest *) node)->arg, p_nodes);
+
+				return Max(1, need);
+			}
+		default:
+			break;
+	}
+	memset(&st, 0, sizeof(st));
+	st.maxneed = 3;			/* result, a conversion temporary, the pattern of a LIKE */
+	(void) expression_tree_walker(node, vulkan_est_child, &st);
+	*p_nodes += st.nodes;
+	return st.maxneed;
+}
+
+bool
+pgstrom_vulkan_expr_limits(Expr *expr)
+{
+	int			nodes = 0;
+	int			regs = vulkan_expr_regs((Node *) expr, &nodes);
+
+	/* one register less: a list of quals is one AND whose accumulator takes a register */
+	if (regs > SCAN_VM_TEMP_BUDGET - 1 || nodes > SCAN_VM_EXPR_NODES)
+	{
+		elog(DEBUG2, "expression is too deep for the Vulkan service (%d registers, %d nodes): %s",
+			 regs, nodes, nodeToString(expr));
+		return false;
+	}
+	return true;
+}
+
+/*
+ * pgstrom_vulkan_expr_cannot_fail
+ *
+ * An aggregate argument is evaluated by the device for every row that passes the scan quals, before the
+ * aggregate's FILTER is applied, while PostgreSQL does not evaluate the argument of a row the filter
+ * rejects. So with a FILTER the argument must be an expression that cannot raise an error: columns,
+ * constants, comparisons, boolean operators, NULL tests and widening integer casts.
+ */
+bool
+pgstrom_vulkan_expr_cannot_fail(Node *node)
+{
+	ListCell   *lc;
+
+	if (node == NULL)
+		return true;
+	check_stack_depth();
+	switch (nodeTag(node))
+	{
+		case T_Var:
+		case T_Const:
+		case T_Param:
+			return true;
+		case T_RelabelType:
+			return pgstrom_vulkan_expr_cannot_fail((Node *)((RelabelType *) node)->arg);
+		case T_NullTest:
+			return pgstrom_vulkan_expr_cannot_fail((Node *)((NullTest *) node)->arg);
+		case T_BoolExpr:
+			foreach (lc, ((BoolExpr *) node)->args)
+				if (!pgstrom_vulkan_expr_cannot_fail(lfirst(lc)))
+					return false;
+			return true;
+		case T_FuncExpr:
+			{
+				FuncExpr   *f = (FuncExpr *) node;
+				Oid			src, dst = f->funcresulttype;
+
+				if ((f->funcformat != COERCE_IMPLICIT_CAST && f->funcformat != COERCE_EXPLICIT_CAST) ||
+					list_length(f->args) != 1)
+					return false;
+				src = exprType((Node *) linitial(f->args));
+				if (!((src == INT2OID && (dst == INT4OID || dst == INT8OID)) ||
+					  (src == INT4OID && dst == INT8OID)))
+					return false;
+				return pgstrom_vulkan_expr_cannot_fail((Node *) linitial(f->args));
+			}
+		case T_OpExpr:
+			{
+				OpExpr	   *op = (OpExpr *) node;
+				char	   *name = get_opname(op->opno);
+				bool		cmp;
+
+				cmp = (name != NULL &&
+					   (strcmp(name, "=") == 0 || strcmp(name, "<>") == 0 || strcmp(name, "<") == 0 ||
+						strcmp(name, "<=") == 0 || strcmp(name, ">") == 0 || strcmp(name, ">=") == 0));
+				if (!cmp || op->opresulttype != BOOLOID)
+					return false;
+				foreach (lc, op->args)
+					if (!pgstrom_vulkan_expr_cannot_fail(lfirst(lc)))
+						return false;
+				return true;
+			}
+		default:
+			break;
+	}
+	return false;
+}
+
+/*
  * pgstrom_numeric_static_dscale
  *
  * The display scale (dscale) that every non-NULL value of a numeric expression has, when it does not depend on
@@ -4855,6 +5033,8 @@ pgstrom_xpu_expression(Expr *expr,
 		default:
 			break;
 	}
+	if (!pgstrom_vulkan_expr_limits(expr))
+		return false;
 	if (p_devcost)
 		*p_devcost = context->device_cost;
 	return true;

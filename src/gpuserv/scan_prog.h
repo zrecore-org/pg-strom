@@ -10,8 +10,7 @@
 #include <stdint.h>
 
 #include "scan_caps.h"
-#define SCAN_MAX_REGS		32		/* must equal VM_MAX_REGS of scan_common.slang */
-#define SCAN_AGG_MAX		12		/* must equal AGG_MAX of agg.slang */
+/* SCAN_MAX_REGS and SCAN_AGG_MAX are in scan_caps.h (the planner checks them too) */
 
 /* where an output column of the scan comes from */
 #define SCAN_PROJ_SRC		1		/* copy of the source column 'resno' (any type) */

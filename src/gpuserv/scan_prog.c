@@ -552,9 +552,13 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				/* IS [NOT] NULL of a column of any type needs only its NULL-ness */
 				uint32_t	slot = kin->u.v.var_slot_id;
 
-				if (slot >= b->nslots || slot >= SCAN_MAX_REGS || b->slot_resno[slot] <= 0)
+				if (slot >= b->nslots || slot >= SCAN_MAX_REGS ||
+					(b->slot_resno[slot] <= 0 && b->slot_iresno[slot] <= 0))
 					return fail(b, "variable slot %u is not loaded from the scan relation", slot);
-				b->slot_used[slot] = 1;
+				if (b->slot_resno[slot] > 0)
+					b->slot_used[slot] = 1;
+				else
+					b->slot_iused[slot] = 1;		/* a column of an inner relation (a join) */
 				b->slot_nullonly[slot] = 1;
 				ra = (int) slot;
 			}
@@ -597,12 +601,15 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			return -1;
 		if (fc.cls == -SOP_ARITH)
 		{
-			/* unary minus: 0 - x */
+			/*
+			 * unary minus: 0 - x. The operand may be a computed value in register 'mark' (not a slot):
+			 * the zero must not overwrite it, so it goes above; the result replaces the operand.
+			 */
 			int		zero;
 
 			*next = mark;
-			zero = new_reg(b, next);
 			dst = new_reg(b, next);
+			zero = (ra >= mark) ? new_reg(b, next) : dst;
 			if (zero < 0 || dst < 0 ||
 				emit(b, SOP_CONST, zero, 0, 0, 0, 0) < 0 ||
 				emit(b, SOP_ARITH, dst, zero, ra, SOP_ARITH_MI | (fc.width << 8), kexp->opcode) < 0)

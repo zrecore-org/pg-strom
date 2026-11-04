@@ -1686,6 +1686,17 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	/* last argument for filtering */
 	if (aggref->aggfilter)
 	{
+		/* the device evaluates the arguments of rows the FILTER rejects: they must not be able to raise an error */
+		foreach (lc, partfn_args)
+		{
+			if (!pgstrom_vulkan_expr_cannot_fail((Node *) lfirst(lc)))
+			{
+				elog(DEBUG2, "Aggregate argument with a FILTER-clause may raise an error: %s",
+					 nodeToString(lfirst(lc)));
+				ReleaseSysCache(htup);
+				return NULL;
+			}
+		}
 		if (!pgstrom_xpu_expression(aggref->aggfilter,
 									pp_info->xpu_task_flags,
 									pp_info->base_relid,
@@ -2646,6 +2657,79 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
 		return;
+	/*
+	 * Limits of the Vulkan service (scan_caps.h): a program it cannot translate fails the query.
+	 * The partial result has at most SCAN_AGG_MAX columns (keys and partial aggregates), and the
+	 * kernel variables (referenced columns of the outer side and of every inner relation, plus the
+	 * computed arguments and keys) must fit its registers.
+	 */
+	{
+		/*
+		 * kernel variables: the referenced columns of every relation, and one slot per computed
+		 * argument or filter of a partial aggregate (a plain column argument uses its column's slot)
+		 */
+		List	   *pvars = list_concat_unique(NIL, pull_var_clause((Node *) con.target_partial->exprs, 0));
+		int			nslots = list_length(pvars);	/* columns the aggregates and keys read */
+		int			nexprs = 0;		/* computed arguments/filters/keys: a slot each, and a register that stays */
+		List	   *seen = NIL;
+		ListCell   *lc3;
+		int			bit = -1;
+
+		/* plus the columns only the lower node's quals and join keys read (not listed in pvars) */
+		while ((bit = bms_next_member(pp_input->outer_refs, bit)) >= 0)
+		{
+			AttrNumber	attno = bit + FirstLowInvalidHeapAttributeNumber;
+			bool		found = false;
+
+			foreach (lc, pvars)
+			{
+				Var	   *v = lfirst(lc);
+
+				if (v->varno == pp_input->base_relid && v->varattno == attno)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				nslots++;
+		}
+		foreach (lc, inner_target_list)
+		{
+			ListCell   *lc5;
+
+			foreach (lc5, ((PathTarget *) lfirst(lc))->exprs)
+				if (!list_member(pvars, lfirst(lc5)))
+					nslots++;
+		}
+		foreach (lc3, con.target_partial->exprs)
+		{
+			Node   *e = lfirst(lc3);
+			List   *cands = (IsA(e, FuncExpr) ? ((FuncExpr *) e)->args : list_make1(e));
+			ListCell *lc4;
+
+			/* equal expressions share one slot and one register (codegen reuses them) */
+			foreach (lc4, cands)
+			{
+				Node   *a = lfirst(lc4);
+
+				if (IsA(a, Var) || list_member(seen, a))
+					continue;
+				seen = lappend(seen, a);
+				nexprs++;
+			}
+		}
+		/* registers: the slots, one more per computed value (scan_prog.c keeps them above the slots), temporaries */
+		nslots += nexprs;
+		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
+			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
+			nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
+		{
+			elog(DEBUG2, "GpuPreAgg: too many columns for the Vulkan service (%d output columns, %d kernel variables)",
+				 list_length(con.target_partial->exprs), nslots);
+			return;
+		}
+	}
 	/* build GpuPreAgg path */
 	cpath = __buildXpuPreAggCustomPath(&con);
 	elog(DEBUG2, "GpuPreAgg: path built, startup %.2f total %.2f rows %.0f",

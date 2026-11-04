@@ -10,6 +10,9 @@
  * it under the terms of the PostgreSQL License.
  */
 #include "pg_strom.h"
+#include "gpuserv/scan_caps.h"
+
+static int gpuscan_slots_upperbound(RelOptInfo *baserel, const Bitmapset *outer_refs);
 
 /* static variables */
 static set_rel_pathlist_hook_type set_rel_pathlist_next = NULL;
@@ -493,6 +496,25 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 			pull_varattnos((Node *)rinfo->clause, baserel->relid, &outer_refs);
 		}
 	}
+	/*
+	 * The service keeps every referenced column in a VM register (kernel variable). A relation that
+	 * needs more than SCAN_VM_SLOT_BUDGET of them (wide select list) cannot run device expressions:
+	 * the quals stay on the CPU, as the service would refuse the program.
+	 */
+	if (dev_quals != NIL &&
+		gpuscan_slots_upperbound(baserel, outer_refs) > SCAN_VM_SLOT_BUDGET)
+	{
+		host_quals = list_concat(host_quals, dev_quals);
+		dev_quals = NIL;
+		dev_costs = NIL;
+	}
+	/* the VM's AND takes up to SCAN_VM_BOOL_ARGS operands: the quals beyond that stay on the host */
+	while (list_length(dev_quals) > SCAN_VM_BOOL_ARGS)
+	{
+		host_quals = lappend(host_quals, llast(dev_quals));
+		dev_quals = list_delete_last(dev_quals);
+		dev_costs = list_delete_last(dev_costs);
+	}
 	sort_device_qualifiers(dev_quals, dev_costs);
 
 	/*
@@ -682,7 +704,29 @@ try_fetch_xpuscan_planinfo(const Path *__path)
 
 /*
  * gpuscan_build_projection - make custom_scan_tlist
+ *
+ * gpuscan_computed_ok: false if the plan has too many kernel variables for the Vulkan service to keep
+ * a computed value in a register (SCAN_VM_SLOT_BUDGET); then only plain Vars are projected on the device.
  */
+static bool gpuscan_computed_ok = true;
+
+/* kernel variables (slots) a GpuScan of the relation needs at most: every referenced column and every computed value */
+static int
+gpuscan_slots_upperbound(RelOptInfo *baserel, const Bitmapset *outer_refs)
+{
+	int			nslots = bms_num_members(outer_refs);
+	ListCell   *lc;
+
+	foreach (lc, baserel->reltarget->exprs)
+	{
+		Node   *node = lfirst(lc);
+
+		if (!IsA(node, Var) && !IsA(node, Const) && !IsA(node, Param))
+			nslots++;
+	}
+	return nslots;
+}
+
 static List *
 __gpuscan_build_projection_expr(List *tlist_dev,
 								Node *node,
@@ -696,11 +740,12 @@ __gpuscan_build_projection_expr(List *tlist_dev,
 		return tlist_dev;
 
 	if (IsA(node, Var) ||
-		pgstrom_xpu_expression((Expr *)node,
-							   xpu_task_flags,
-							   scan_relid,
-							   NIL,
-							   NULL))
+		(gpuscan_computed_ok &&
+		 pgstrom_xpu_expression((Expr *)node,
+								xpu_task_flags,
+								scan_relid,
+								NIL,
+								NULL)))
 	{
 		AttrNumber	resno = list_length(tlist_dev) + 1;
 
@@ -733,6 +778,14 @@ gpuscan_build_projection(RelOptInfo *baserel,
 	List	   *vars_list;
 	ListCell   *lc;
 
+	/*
+	 * Computed values are evaluated by the device for every row its own quals accept. If host quals
+	 * remain, PostgreSQL would test them before computing the target list: an expression that raises
+	 * an error (overflow, division by zero) on a row the host qual rejects must not run, so only plain
+	 * columns are projected then.
+	 */
+	gpuscan_computed_ok = (pp_info->host_quals == NIL &&
+						   gpuscan_slots_upperbound(baserel, pp_info->outer_refs) <= SCAN_VM_SLOT_BUDGET);
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)

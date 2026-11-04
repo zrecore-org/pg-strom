@@ -403,6 +403,31 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		Path   *i_path = lfirst(lc);
 		inner_target_list = lappend(inner_target_list, i_path->pathtarget);
 	}
+	/*
+	 * The service keeps every referenced column of the outer side and of the inner relations, and every
+	 * computed value, in a VM register; more kernel variables than SCAN_VM_SLOT_BUDGET would make it refuse
+	 * the program (and fail the query).
+	 */
+	{
+		int		nslots = bms_num_members(pp_prev->outer_refs);
+		int		nexprs = 0;
+
+		foreach (lc, inner_target_list)
+			nslots += list_length(((PathTarget *) lfirst(lc))->exprs);
+		foreach (lc, joinrel->reltarget->exprs)
+		{
+			Node   *e = lfirst(lc);
+
+			if (!IsA(e, Var) && !IsA(e, Const) && !IsA(e, Param))
+				nexprs++;
+		}
+		/* a computed value has a slot and a register of its own above the slots (scan_prog.c), plus temporaries */
+		if (nslots + 2 * nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
+		{
+			elog(DEBUG2, "GpuJoin: %d kernel variables exceed the Vulkan service's registers", nslots);
+			return NULL;
+		}
+	}
 
 	/*
 	 * All the join-clauses must be executable on GPU device.
@@ -483,10 +508,19 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			if (!dtype || !dtype->type_hashfunc ||
 				!scan_vm_groupkey_type_supported(dtype->type_code))
 				continue;
-			dtype = pgstrom_devtype_lookup(exprType(arg2));
-			if (!dtype || !dtype->type_hashfunc ||
-				!scan_vm_groupkey_type_supported(dtype->type_code))
-				continue;
+			{
+				/*
+				 * Both sides must have the same device type: the kernel hashes the stored bytes
+				 * (int2: 2 bytes, int4: 4, int8: 8), so a cross-type key (int2 = int4, int8 = int4)
+				 * would not meet its partner in the hash table (found by the fuzzer: no rows).
+				 */
+				devtype_info *dtype2 = pgstrom_devtype_lookup(exprType(arg2));
+
+				if (!dtype2 || !dtype2->type_hashfunc ||
+					!scan_vm_groupkey_type_supported(dtype2->type_code) ||
+					dtype2->type_code != dtype->type_code)
+					continue;
+			}
 			if (bms_is_subset(relids1, outer_rel->relids) &&
 				bms_is_subset(relids2, inner_rel->relids))
 			{
@@ -504,6 +538,9 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		}
 	}
 
+	/* the VM's AND takes a limited number of operands (scan_caps.h) */
+	if (list_length(join_quals) + list_length(other_quals) > SCAN_VM_BOOL_ARGS)
+		return NULL;
 	if (clauses_are_immutable)
 	{
 		elog(DEBUG2, "immutable join-clause is not supported: %s",
@@ -1888,6 +1925,26 @@ innerPreloadSetupPinnedInnerBufferPartitions(kern_multirels *h_kmrels,
 }
 
 /*
+ * innerPreloadWait - wait until another worker changes the preload state
+ *
+ * Called with preload_mutex locked, returns with it locked. On macOS a process-shared condition
+ * variable cannot be waited on from processes that map the segment at different addresses
+ * (pthread_cond_wait fails with EINVAL, which killed the parallel worker and restarted the server),
+ * so there the state is polled.
+ */
+static void
+innerPreloadWait(pgstromSharedState *ps_state)
+{
+#ifdef __APPLE__
+	pthreadMutexUnlock(&ps_state->preload_mutex);
+	pg_usleep(500);
+	pthreadMutexLock(&ps_state->preload_mutex);
+#else
+	pthreadCondWait(&ps_state->preload_cond, &ps_state->preload_mutex);
+#endif
+}
+
+/*
  * innerPreloadAllocHostBuffer
  *
  * NOTE: This function is called with preload_mutex locked
@@ -2258,8 +2315,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 			while (ps_state->preload_phase == INNER_PHASE__SCAN_RELATIONS ||
 				   ps_state->preload_nr_scanning > 0)
 			{
-				pthreadCondWait(&ps_state->preload_cond,
-								&ps_state->preload_mutex);
+				innerPreloadWait(ps_state);
 			}
 
 			/*
@@ -2351,8 +2407,7 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				while (ps_state->preload_nr_scanning > 0 ||
 					   ps_state->preload_nr_setup > 0)
 				{
-					pthreadCondWait(&ps_state->preload_cond,
-									&ps_state->preload_mutex);
+					innerPreloadWait(ps_state);
 				}
             }
 			__attribute__((fallthrough));

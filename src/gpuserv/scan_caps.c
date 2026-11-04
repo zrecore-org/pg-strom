@@ -164,7 +164,8 @@ classify_string(const char *name)
 		}
 		else if (!strcmp(rest, "like") || !strcmp(rest, "nlike"))
 		{
-			fc.cls = SOP_STRLIKE; fc.kind = (rest[0] == 'n'); fc.width = 1;
+			/* PostgreSQL's bpcharlike does NOT strip the value's trailing blanks: they are matched as characters */
+			fc.cls = SOP_STRLIKE; fc.kind = (rest[0] == 'n'); fc.width = 0;
 		}
 		return fc;
 	}

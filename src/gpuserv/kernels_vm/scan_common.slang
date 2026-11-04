@@ -110,6 +110,23 @@ int f4cmp(float a, float b)
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+// the same on the bit patterns: Metal flushes denormal floats to zero in a float comparison (1.4e-45 >= 0 was true),
+// so a float4 is ordered through its bits (sign-magnitude as a signed integer; -0 and +0 are equal)
+int f4cmpbits(uint a, uint b)
+{
+    uint ma = a & 0x7fffffffu;
+    uint mb = b & 0x7fffffffu;
+    bool na = ma > 0x7f800000u;
+    bool nb = mb > 0x7f800000u;
+    if (na)
+        return nb ? 0 : 1;
+    if (nb)
+        return -1;
+    int ka = ((a & 0x80000000u) != 0u) ? -int(ma) : int(ma);
+    int kb = ((b & 0x80000000u) != 0u) ? -int(mb) : int(mb);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+}
+
 bool cmp_result(int c, uint kind)
 {
     switch (kind)
@@ -1553,7 +1570,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             else
             {
                 regs[dst].isnull = 0;
-                regs[dst].v = b2l(cmp_result(f4cmp(asfloat(uint(x.v)), asfloat(uint(y.v))), k0));
+                regs[dst].v = b2l(cmp_result(f4cmpbits(uint(x.v), uint(y.v)), k0));
             }
             break;
         }
@@ -1661,22 +1678,35 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 regs[dst].isnull = 1;
                 break;
             }
-            float a = asfloat(uint(x.v));
-            float b = asfloat(uint(y.v));
+            // Metal flushes denormal floats to zero (operands and results), PostgreSQL does not: a row with a denormal
+            // operand, or whose result may be denormal or underflow, is evaluated by the backend (exact, including
+            // PostgreSQL's underflow error)
+            uint  ua = uint(x.v), ub = uint(y.v);
+            if ((((ua & 0x7f800000u) == 0u) && ((ua & 0x7fffffu) != 0u)) ||
+                (((ub & 0x7f800000u) == 0u) && ((ub & 0x7fffffu) != 0u)))
+                return SOP_RECHECK_CODE;
+            float a = asfloat(ua);
+            float b = asfloat(ub);
             float r = 0;
             bool  bad = false;
             uint  why = SOP_ERR_FLTOVER;
             bool  inf_in = isinf(a) || isinf(b);
+            bool  tiny = false;
 
             switch (k0)
             {
-            case SOP_ARITH_PL: r = a + b; bad = isinf(r) && !inf_in; break;
-            case SOP_ARITH_MI: r = a - b; bad = isinf(r) && !inf_in; break;
+            case SOP_ARITH_PL:
+                r = a + b; bad = isinf(r) && !inf_in;
+                tiny = (abs(r) < 1.17549435e-38) && !(r == 0 && a == -b);
+                break;
+            case SOP_ARITH_MI:
+                r = a - b; bad = isinf(r) && !inf_in;
+                tiny = (abs(r) < 1.17549435e-38) && !(r == 0 && a == b);
+                break;
             case SOP_ARITH_MUL:
                 r = a * b;
-                bad = (isinf(r) && !inf_in) || (r == 0 && a != 0 && b != 0);
-                if (!isinf(r))
-                    why = SOP_ERR_FLTUNDER;
+                bad = (isinf(r) && !inf_in);
+                tiny = (abs(r) < 1.17549435e-38) && a != 0 && b != 0;
                 break;
             default:    // SOP_ARITH_DIV
                 if (b == 0)
@@ -1687,12 +1717,13 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 else
                 {
                     r = a / b;
-                    bad = (isinf(r) && !inf_in) || (r == 0 && a != 0 && !isinf(b));
-                    if (!isinf(r))
-                        why = SOP_ERR_FLTUNDER;
+                    bad = (isinf(r) && !inf_in);
+                    tiny = (abs(r) < 1.17549435e-38) && a != 0 && !isinf(b);
                 }
                 break;
             }
+            if (!bad && tiny && !isnan(r))
+                return SOP_RECHECK_CODE;
             if (bad)
                 return k1 | (why << 16);
             regs[dst].v = int64_t(asuint(r));
@@ -1735,7 +1766,13 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 float f = asfloat(uint(x.v));
                 if (isnan(f) || isinf(f) || f >= 9.2233720368547758e18 || f < -9.2233720368547758e18)
                     return k1 | (SOP_ERR_INTRANGE << 16);
-                int64_t r = int64_t(round(f));      // round to nearest even, as rint()
+                // round to nearest, ties to even (PostgreSQL's rint()). Not round(): Metal's round() is half away
+                // from zero (2.5 -> 3), which the SPIR-V translation keeps.
+                float fl = floor(f);
+                float fd = f - fl;
+                int64_t r = int64_t(fl);
+                if (fd > 0.5 || (fd == 0.5 && (r & 1) != 0))
+                    r += 1;
                 if (out_of_range(r, k0))
                     return k1 | (SOP_ERR_INTRANGE << 16);
                 regs[dst].v = r;

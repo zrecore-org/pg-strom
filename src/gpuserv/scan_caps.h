@@ -94,6 +94,29 @@ int		scan_vm_jsonb_pattern(const unsigned char *jb, uint32_t len, unsigned char 
  */
 bool	scan_vm_agg_action_supported(int action);
 
+/*
+ * Translation limits of the service. scan_prog.c fails a program that exceeds them, and a failed program
+ * fails the query (there is no CPU fallback for a refused program), so the planner must not offer what
+ * does not fit: codegen.c refuses (conservatively) every expression / plan whose estimate is above them.
+ *
+ *  SCAN_MAX_REGS     registers of the VM (VM_MAX_REGS of scan_common.slang). Register i < nslots is the
+ *                    kernel variable of slot i; temporaries of expressions start at nslots.
+ *  SCAN_AGG_MAX      output columns of a GpuPreAgg (agg.slang AGG_MAX): keys + partial aggregate columns.
+ *  SCAN_VM_TEMP_BUDGET   registers one expression may need above the slots (planner's estimate, see
+ *                    pgstrom_vulkan_expr_limits in codegen.c)
+ *  SCAN_VM_PERM_RESERVE  registers kept for values that must survive the next expression (GROUP BY keys,
+ *                    aggregate arguments, computed columns that cannot use their own slot)
+ *  SCAN_VM_SLOT_BUDGET   kernel variables (slots) a plan may use: SCAN_MAX_REGS - temps - reserve.
+ *  SCAN_VM_EXPR_NODES    nodes of one expression (the program buffer of a join is limited to 16384 words)
+ */
+#define SCAN_MAX_REGS			32		/* must equal VM_MAX_REGS of scan_common.slang */
+#define SCAN_AGG_MAX			12		/* must equal AGG_MAX of agg.slang */
+#define SCAN_VM_TEMP_BUDGET		6
+#define SCAN_VM_PERM_RESERVE	3
+#define SCAN_VM_SLOT_BUDGET		(SCAN_MAX_REGS - SCAN_VM_TEMP_BUDGET - SCAN_VM_PERM_RESERVE)
+#define SCAN_VM_EXPR_NODES		120
+#define SCAN_VM_BOOL_ARGS		60		/* operands of one AND/OR (scan_prog.c: 64) */
+
 /* GROUP BY: up to this many key columns (gagg.slang's GA_NK), of these types */
 #define SCAN_GROUP_KEYS		2
 #define SCAN_JOIN_MAXDEPTH	4		/* inner relations of one GpuJoin; must equal JOIN_MAXD of join.slang */
