@@ -20,12 +20,26 @@ done, which is why a trivial qual costs more than it would in generated code.
 
 | | On the GPU | Stays on the CPU |
 |---|---|---|
-| Sources | Heap tables (page by page); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, GpuPreAgg and GpuJoin as the outer relation, and as the inner side of a GpuJoin) | GPU-Cache (a stub). BRIN-index assisted scans: not tested on this branch |
+| Sources | Heap tables (page by page); a table's GPU-Cache (see below); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, GpuPreAgg and GpuJoin as the outer relation, and as the inner side of a GpuJoin) | BRIN-index assisted scans: not tested on this branch |
 | Scan (`GpuScan`) | Quals and computed projections over the types below; pass-through columns of any type; UPDATE and DELETE scans; query parameters | See "types" |
 | Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float and text aggregates, `min`/`max` of numeric, `sum`/`avg` of numerics whose scale is not fixed by the plan; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
 | Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
 | Sorting (`GPU-Sort`, off by default: `pg_strom.enable_gpusort`) | The groups of a non-parallel GpuPreAgg: `GROUP BY ... ORDER BY` on group keys, `count`, integer `sum`/`min`/`max`, ASC/DESC, NULLS FIRST/LAST, up to 8 keys, `LIMIT` pushed into the sort, `rank()`/`dense_rank()`/`row_number()` below N per partition | Sorting of scan/join results, `avg`, float/numeric keys, parallel plans, `cpu_fallback = on` |
-| Other | | GPU-Cache, PostGIS (dropped), SELECT INTO direct (dropped) |
+| Other | GPU-Cache (below) | PostGIS (dropped), SELECT INTO direct (dropped) |
+
+## GPU-Cache
+
+A table with a row trigger `CREATE TRIGGER ... AFTER INSERT OR UPDATE OR DELETE ON t FOR EACH ROW EXECUTE FUNCTION pgstrom.gpucache_sync_trigger('options')` has a copy that the GPU service keeps in device memory and current, so that a scan, aggregate or join of the table needs no page transfer (plan A7 part 2; design in the plan). The cache is built the first time a backend writes or reads the table (`pgstrom.gpucache_info('t')` shows the phase: `not_built`, `loading`, `ready`, `corrupted`), and `EXPLAIN` shows `GPU Cache: GPU0 [phase: ready, max_num_rows: N]` under the node that uses it.
+
+| | |
+|---|---|
+| Options of the trigger | `max_num_rows` (default 10485760: row versions the cache holds, including versions of transactions in flight), `cache_size` (default 512 MB, minimum 64 MB: the device buffer; `max_num_rows` is clamped to what fits), `gpu_device_id` (only 0), `gpumask` (compatibility). `redo_buffer_size`, `gpu_sync_interval` and `gpu_sync_threshold` are validated and shown but have no effect |
+| What a scan sees | **The latest committed state plus the session's own changes**, as in the CUDA product (not a snapshot: a REPEATABLE READ transaction sees rows committed after its snapshot). A transaction's changes become visible to others atomically at its commit |
+| Types | Every column type is cached. The GPU computes with bool, int1-8, float4, date/time/timestamp(tz), text/varchar/bpchar; the others (numeric, float2, float8, uuid, arrays, jsonb, ...) are passed through. A query that needs the VM to read a **numeric** value from the cache (a qual, projection or aggregate on a numeric column) reads the table instead; `cstring` and fixed types longer than 1024 bytes cannot be cached (an error at the initial load; the table is read) |
+| Changes | The trigger logs every inserted and removed row version in the backend; the log is sent to the service (synchronously) before the transaction commits and before the same backend scans the cache, so a commit of a transaction that wrote a cached table costs one round trip to the service. INSERT, UPDATE, DELETE, `COPY`, `ON CONFLICT`, subtransactions (SAVEPOINT) and rollbacks are handled; `TRUNCATE`, `ALTER TABLE`, `VACUUM FULL`, `DROP` and trigger changes drop the cache, which is rebuilt on next use. `PREPARE TRANSACTION` of a transaction that wrote a cached table is refused |
+| Failures | If the cache may not mirror the table (the GPU service restarted, a request failed) it is rebuilt from the table at the next use, and queries read the table meanwhile. If the row versions exceed `max_num_rows` (or the table is larger at the initial load) the cache is `corrupted`: a WARNING, queries read the table, and `SELECT pgstrom.gpucache_recovery('t')` rebuilds it |
+| SQL | `pgstrom.gpucache_info()` and `pgstrom.gpucache_info(regclass)` (json), `pgstrom.gpucache_compaction(regclass)` (compact the string regions), `pgstrom.gpucache_recovery(regclass)`, `pgstrom.gpucache_apply_redo()` (sends the backend's pending log; nothing else is pending). Parameters: `pg_strom.enable_gpucache`, `pg_strom.gpucache_max_relation_entries` |
+| Not done | Applying the log with GPU kernels (the service applies it on the CPU into the shared buffer), a shared-memory redo buffer, several GPUs, replication slaves (`ALWAYS` triggers are honoured but untested), caches larger than the device's storage buffer limit |
 
 ## Types
 
@@ -122,7 +136,7 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 | Feature | State |
 |---|---|
 | GPU-Sort of scan / join results, window functions other than the rank filter | Not implemented (plan A7 status); GPU-Sort of GpuPreAgg groups works, see the table above |
-| GPU-Cache | A stub (plan A7); the SQL functions exist so that older upgrade scripts load |
+| GPU-Cache | Works, see the section above; differences from the CUDA product are listed there |
 | Specialized kernels, fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
 | jsonb | Quals, aggregate arguments and number extraction run on the GPU; computed jsonb/text results in the target list, equality, `#>` and the other operators stay on the CPU (plan A8 status) |
 | GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |

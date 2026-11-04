@@ -75,3 +75,13 @@
 # ---------------------------------------------------------------------------------------------------------------
 # More than 32 variable slots ("too many kernel variables") in a scan program, and similar translation limits in
 # scan_prog.c. Bugs 1 and 2 above were instances. A planner-side check (or the CPU fallback of A2.x) is the real fix.
+
+gpu_cache (A7 part 2)
+  test/sql/gpu_cache.sql is upstream's, changed for the v6.2 SQL surface (the older view pgstrom.gpucache_info no longer exists:
+  pgstrom.gpucache_info(regclass) returns json, pgstrom.gpucache_apply_redo() takes no argument) and for one planner limit: the final
+  comparison joins two 35-column temporary tables, which GpuJoin refuses in the service ("unsupported join session (slots 70)", an
+  error rather than a CPU plan), so that statement runs with pg_strom.enable_gpujoin = off. Plans differ from the CUDA-era file in the
+  GPU Scan Quals / Projection text; the rows equal the CPU run. gpu_cache_9.out also shows: after pgstrom.gpucache_recovery() the phase
+  is "not_built" (the cache is rebuilt at its next use), and PREPARE of a writing transaction is refused (tested in gpucache_tests.inc).
+  Found, not cache related: a whole-row reference ("select t from tbl t where ...") through a GpuScan fails with "cache lookup failed
+  for attribute 0 of relation N" in the planner, with or without a GPU-Cache.

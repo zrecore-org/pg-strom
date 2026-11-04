@@ -1756,6 +1756,28 @@ pgstromExecScanReCheck(pgstromTaskState *pts, EPQState *epqstate)
 }
 
 /*
+ * __pgstromGpuCacheFallback - the GPU-Cache cannot serve this plan (the program reads a value that the
+ * cache only passes through): read the tables instead
+ */
+static void
+__pgstromGpuCacheFallback(pgstromTaskState *pts)
+{
+	for (int k=0; k < pts->num_scan_rels; k++)
+	{
+		pgstromTaskScanState *ptss = &pts->scan_rels[k];
+		Relation	scan_rel = ptss->scan_rel;
+
+		if (!ptss->gpucache_desc)
+			continue;
+		ptss->gpucache_desc = NULL;
+		ptss->kds_head = NULL;
+		ptss->optimal_gpus = GetOptimalGpuForRelation(scan_rel);
+		ptss->heap_pathname = smgr_relpath(RelationGetSmgr(scan_rel), MAIN_FORKNUM);
+	}
+	pts->xpu_task_flags &= ~DEVTASK__USED_GPUCACHE;
+}
+
+/*
  * __pgstromExecTaskOpenConnection
  */
 static bool
@@ -1802,6 +1824,13 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	}
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);
+	if ((pts->xpu_task_flags & DEVTASK__USED_GPUCACHE) != 0 &&
+		!pgstromGpuCacheProgramOk(pts, session))
+	{
+		__pgstromGpuCacheFallback(pts);
+		pfree((void *) session);
+		session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);
+	}
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);

@@ -9,13 +9,15 @@
 //            [2] values byte offset   [3] width of a value in bytes (0: bool, a bit per value);
 //                string columns: the width of an offset (4, 8) or, for a fixed-size string, of the value
 //            [4] mode: 0 normal, 1 all NULL, 2 constant (a virtual column), 3 string with offsets,
-//                4 fixed-size string
+//                4 fixed-size string, 5 string as { offset, length } pairs (GPU-Cache: the datum, header included,
+//                at byte offset [5] + offset, at most [6] bytes of data in all; the width [3] is 8)
 //            [5] normal: the conversion to the PostgreSQL representation (ACV_*);
 //                mode 2: the constant's low word, 3: byte offset of the string bytes
 //            [6] mode 2: the constant's high word, 3: length of the string bytes
 //            [7] length of the values in bytes (a row beyond it reads as NULL)
 //          after the table, at word 8 * ncols: [0] rows in this pass  [1] first row of the pass
-//   pagel  unused (a placeholder)
+//            [2] nonzero: row filter (GPU-Cache): pagel holds one bit per row, a row whose bit is 0 does not exist
+//   pagel  the row filter if ptab[8 * ncols + 2] is nonzero, else unused (a placeholder)
 // A string register is { byte offset in pagef | length << 32 } (the source bits are 0).
 //
 // Conversions of a normal column (the same arithmetic as arrow_fetch() in arrow_exec.c, which the
@@ -107,6 +109,24 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
             regs[slot].isnull = 0;
             continue;
         }
+        if (mode == 5)
+        {
+            // GPU-Cache string: { offset | length << 32 } per row, the complete datum behind it
+            if ((uint64_t(row) + 1) * 8 > uint64_t(vlen))
+                continue;
+            uint64_t pr = ar_ld64(voff + row * 8);
+            uint soff = uint(pr & 0xffffffffu);
+            uint slen = uint(pr >> 32);
+            if (slen == 0 || uint64_t(soff) + uint64_t(slen) > uint64_t(ptab[t + 6]))
+                continue;                           // corrupted: NULL
+            uint sbase = ptab[t + 5] + soff;
+            uint hdr = ((ar_ld8(sbase) & 1u) != 0u) ? 1u : 4u;     // a 1-byte (short) or a 4-byte header
+            if (slen < hdr)
+                continue;
+            regs[slot].v = int64_t(uint64_t(sbase + hdr) | (uint64_t(slen - hdr) << 32));
+            regs[slot].isnull = 0;
+            continue;
+        }
         if (mode == 4)
         {
             // fixed-size string (char(n)): w bytes at row * w
@@ -179,6 +199,8 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
 bool arrow_eval_row(uint row, uint epage, uint elp, uint coloff, uint ncols, uint insnoff, uint nq, uint nins,
                     uint qreg, inout Reg regs[VM_MAX_REGS])
 {
+    if (ptab[8 * ncols + 2] != 0u && ((pagel[row >> 5] >> (row & 31u)) & 1u) == 0u)
+        return false;                               // GPU-Cache: no such row (free slot, or not visible)
     g_recheck = 0;
     g_src = 0;
     [unroll]

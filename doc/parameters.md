@@ -25,6 +25,9 @@ does nothing). The always-present ones are in sections 1, 3 and 7.
 | `pg_strom.enabled` | bool, `on`, user | Master switch of PG-Strom in the planner. `off` gives PostgreSQL's own plans (the test suites use it to get the CPU's answer). | same |
 | `pg_strom.cpu_fallback` | enum (`off`/`false`/`no`/`0`, `on`/`true`/`yes`/`1`, `notice`), `off`, user | Elevel of the "CPU fallback" message. In the CUDA product `on` let a task that needed a re-run fall back to the CPU. **Here the GPU service never returns fallback chunks** (no `KDS_FORMAT_FALLBACK` in `src/gpuserv/`), so a kernel error such as division by zero still fails the query. A setting other than `off` only changes planning: GPU-Sort and the pinned inner buffer of GpuJoin are not planned. Rows the kernel cannot evaluate (compressed or out-of-line TOAST text) are re-evaluated by the backend regardless of this parameter (plan A6). | same name; behavior reduced |
 | `pg_strom.explain_developer_mode` | bool, `off`, user | Adds internal detail to `EXPLAIN` (xpucode dumps with `VERBOSE`, Parquet cache lines, ...). | same |
+| `pg_strom.enable_gpucache` | bool, `on`, user | Use a table's GPU-Cache (see `doc/features.md`) for scans, aggregates and joins. Off: the table is read (the trigger still logs). | same |
+| `pg_strom.gpucache_max_relation_entries` | int, 1024 (min 1024), postmaster | Number of tables that can have a GPU-Cache at once (shared memory entries). | same |
+| `pg_strom.gpucache_log_buffer_size`, `pg_strom.gpucache_sync_interval`, `pg_strom.gpucache_sync_threshold` | postmaster | Accepted for compatibility with the CUDA product. They have no effect: the redo log is sent to the GPU service synchronously (see `doc/features.md`). | `pg_strom.gpucache_*` |
 | `pg_strom.regression_test_mode` | bool, `off`, user (hidden from `SHOW ALL`) | Hides platform-specific `EXPLAIN` output (for example `Scan-Engine`) so expected files stay stable. | same |
 | `pg_strom.enable_brin` | bool, `on`, user | Use BRIN indexes to skip block ranges for a GPU scan. | same (the BRIN code is unchanged; not covered by the Vulkan tests) |
 
@@ -96,7 +99,6 @@ These no longer exist; setting them has no effect (see [install.md](install.md))
 | `pg_strom.gpu_mempool_max_ratio`, `_min_ratio`, `_release_delay`, `_segment_sz` | the CUDA memory pool is gone (Vulkan buffers are allocated explicitly) |
 | `pg_strom.gpu_selection_policy`, `pg_strom.manual_optimal_gpus` | needed `heterodb-extra` for GPU-to-NVMe distance; one device is used |
 | `pg_strom.enable_select_into_direct` | SELECT INTO direct mode is removed (the service does not write tables) |
-| `pg_strom.enable_gpucache`, `pg_strom.gpucache_*` (log buffer size, max relation entries, sync interval, sync threshold) | GPU-Cache is a stub on this branch (plan item A7) |
 | `pg_strom.parquet_cache_*` (path, size, unitsz, eviction settings, max async write, target usage) | the GPU-side Parquet cache is gone (stub) |
 
 ## Environment variables of the GPU service

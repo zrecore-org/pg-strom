@@ -833,7 +833,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 		return NULL;
 	}
 	kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
-	if (kds_src->format == KDS_FORMAT_ARROW)
+	if (kds_src->format == KDS_FORMAT_ARROW || task->tag == XpuCommandTag__XpuTaskExecGpuCache)
 		return scan_exec_arrow_task(eng, session_cmd, prog, task, p_len, err, errlen);
 	if (kds_src->format != KDS_FORMAT_BLOCK)
 	{

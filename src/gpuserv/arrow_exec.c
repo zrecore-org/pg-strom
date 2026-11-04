@@ -35,6 +35,7 @@
 #include "kernels_spv.h"
 #include "scan_exec.h"
 #include "scan_caps.h"
+#include "gcache.h"
 
 #define ARROW_PASS_ROWS		(1U << 20)
 #define ARROW_PASS_WORDS	(16U << 20)		/* words of the GPU's output buffer per pass, at most */
@@ -366,6 +367,7 @@ typedef struct
 	const scan_prog *prog;
 	const arrow_src *as;
 	const arrow_col *cols;			/* per source column */
+	gcache	   *gc;					/* a GPU-Cache task: the columns come from the cache (cols is unused) */
 	/* scratch of the row being formed (one entry per result column) */
 	uint8_t	   *kind;
 	const unsigned char **ptr;
@@ -455,7 +457,19 @@ arrow_form_tuple(arrow_form *af, uint32_t row, const uint32_t *comp, int fetch,
 
 		len[j] = 0;
 		ptr[j] = NULL;
-		if (pa->kind == SCAN_PROJ_SYS)
+		if (pa->kind == SCAN_PROJ_SYS && af->gc && pa->resno == -1)
+		{
+			gcache_ctid(af->gc, row, tmpv[j]);
+			ptr[j] = tmpv[j];
+			len[j] = 6;
+			kind[j] = FETCH_FIXED;
+			if (cm->attlen != 6)
+			{
+				snprintf(err, errlen, "column %d: ctid does not fit the result type (len %d)", j + 1, cm->attlen);
+				return -1;
+			}
+		}
+		else if (pa->kind == SCAN_PROJ_SYS)
 		{
 			if (pa->resno != -6)
 			{
@@ -474,8 +488,10 @@ arrow_form_tuple(arrow_form *af, uint32_t row, const uint32_t *comp, int fetch,
 		}
 		else if (pa->kind == SCAN_PROJ_SRC)
 		{
-			int		rv = arrow_fetch(af->as, &af->cols[pa->resno - 1], &af->kds_src->colmeta[pa->resno - 1],
-									 row, tmpv[j], &ptr[j], &len[j], err, errlen);
+			int		rv = (af->gc
+						  ? gcache_fetch(af->gc, pa->resno, row, tmpv[j], &ptr[j], &len[j], err, errlen)
+						  : arrow_fetch(af->as, &af->cols[pa->resno - 1], &af->kds_src->colmeta[pa->resno - 1],
+										row, tmpv[j], &ptr[j], &len[j], err, errlen));
 
 			if (rv < 0)
 				return -1;
@@ -851,7 +867,7 @@ enum { ACV_NONE = 0, ACV_DATE = 1, ACV_TIME_S = 2, ACV_TIME_MS = 3, ACV_TIME_US 
 
 /* table words per column, and the words after the table (rows of the pass, first row of the pass) */
 #define ARROW_TAB_COLWORDS	8
-#define ARROW_TAB_EXTRA		2
+#define ARROW_TAB_EXTRA		4		/* rows of the pass, first row, row filter flag (GPU-Cache), spare */
 
 /*
  * Fill the column table of the kernel (8 words per column of the program's column list) and check
@@ -1121,6 +1137,7 @@ typedef struct
 	arrow_col  *cols;
 	uint32_t   *tab;
 	uint32_t	ncols, nrows;
+	gcache	   *gc;					/* a GPU-Cache task: bg is the cache's buffer (not owned), bdummy its row filter */
 	gpu_vk_buffer bg, btab, bprog, bdummy;
 	int			have_data, have_g, have_tab, have_prog, have_dummy;
 } arrow_task;
@@ -1154,6 +1171,25 @@ arrow_task_parse(const XpuCommand *task, arrow_task *at, char *err, size_t errle
 		return -1;
 	}
 	at->kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
+	if (task->tag == XpuCommandTag__XpuTaskExecGpuCache)
+	{
+		/* GPU-Cache: the data is the service's own */
+		if (task->u.task.kds_src_offset + sizeof(kern_data_store) > task->length ||
+			task->length < offsetof(XpuCommand, u.gc_task.data))
+		{
+			snprintf(err, errlen, "corrupted GPU-Cache task");
+			return -1;
+		}
+		at->gc = gcache_find(task->u.gc_task.database_oid, task->u.gc_task.table_oid, task->u.gc_task.table_sig);
+		if (!at->gc)
+		{
+			snprintf(err, errlen, "gpucache: the cache of table %u is not in the GPU service (it was restarted?)",
+					 task->u.gc_task.table_oid);
+			return -1;
+		}
+		at->nrows = gcache_nrows(at->gc);
+		return 0;
+	}
 	if (at->kds_src->format != KDS_FORMAT_ARROW)
 	{
 		snprintf(err, errlen, "source format '%c' is not implemented by the Vulkan service for this task",
@@ -1176,6 +1212,53 @@ arrow_task_parse(const XpuCommand *task, arrow_task *at, char *err, size_t errle
 	return 0;
 }
 
+/*
+ * A GPU-Cache task: the cache's device buffer is the GPU's data (nothing is copied), the column table
+ * points into it, and the row filter is the visibility bitmap of the session.
+ */
+static int
+arrow_task_setup_gcache(gpu_vk_ctx *vk, arrow_task *at, const scan_prog *prog, char *err, size_t errlen)
+{
+	size_t		tabbytes = sizeof(uint32_t) * (ARROW_TAB_COLWORDS * (size_t) at->ncols + ARROW_TAB_EXTRA);
+	const kern_session_info *session = gcache_cur_session;
+	const SerializedTransactionState *xs = NULL;
+	int			own = 0;
+
+	if (session && session->session_xact_state)
+		xs = (const SerializedTransactionState *)((const char *) session + session->session_xact_state);
+	at->tab = calloc(1, tabbytes);
+	if (!at->tab)
+	{
+		snprintf(err, errlen, "out of memory");
+		return -1;
+	}
+	for (uint32_t c = 0; c < at->ncols; c++)
+		at->tab[ARROW_TAB_COLWORDS * c] = 0xffffffffU;
+	if (gcache_build_table(at->gc, prog, at->tab, err, errlen) != 0)
+		return -1;
+	at->tab[ARROW_TAB_COLWORDS * at->ncols + 2] = 1;			/* row filter in the fifth buffer */
+	at->bg = *gcache_data_buffer(at->gc);
+	if (gcache_visibility(at->gc, xs ? (const uint32_t *) xs->parallelCurrentXids : NULL,
+						  xs ? xs->nParallelCurrentXids : 0, &at->bdummy, &own, err, errlen) != 0)
+		return -1;
+	at->have_dummy = own;				/* a temporary bitmap is ours to destroy */
+	if (gpu_vk_buffer_create(vk, &at->btab, tabbytes, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate a buffer: %s", vk->err);
+		return -1;
+	}
+	at->have_tab = 1;
+	memcpy(at->btab.map, at->tab, tabbytes);
+	if (gpu_vk_buffer_create(vk, &at->bprog, prog->nwords * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
+		return -1;
+	}
+	at->have_prog = 1;
+	memcpy(at->bprog.map, prog->words, prog->nwords * 4);
+	return 0;
+}
+
 /* open the data, build the column table, pack the GPU's copy; the program is already built */
 static int
 arrow_task_setup(gpu_vk_ctx *vk, arrow_task *at, const scan_prog *prog, char *err, size_t errlen)
@@ -1184,6 +1267,8 @@ arrow_task_setup(gpu_vk_ctx *vk, arrow_task *at, const scan_prog *prog, char *er
 	size_t		tabbytes;
 
 	at->ncols = prog->words[3];
+	if (at->gc)
+		return arrow_task_setup_gcache(vk, at, prog, err, errlen);
 	if (at->ncols > kds_src->ncols || prog->max_src_resno > (int) kds_src->ncols)
 	{
 		snprintf(err, errlen, "the program reads more columns than the Arrow store has");
@@ -1433,6 +1518,7 @@ arrow_form_open(arrow_form *af, const kern_data_store *kds_dst_head, const arrow
 	af->prog = prog;
 	af->as = &at->ad.as;
 	af->cols = at->cols;
+	af->gc = at->gc;
 	af->kind = malloc(n);
 	af->ptr = malloc(sizeof(void *) * n);
 	af->len = malloc(sizeof(uint32_t) * n);

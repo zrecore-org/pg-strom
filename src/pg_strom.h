@@ -812,6 +812,7 @@ extern int		pgstrom_debug_level;		/* GUC pg_strom.debug_level */
 
 extern int		pgstrom_max_async_tasks(void);
 extern bool		gpuserv_ready_accept(void);
+extern int		gpuClientConnectControl(uint32_t *p_generation);
 extern void		pgstrom_init_gpu_client(void);
 
 /*
@@ -955,6 +956,8 @@ extern XpuCommand *pgstromScanChunkGpuCache(pgstromTaskState *pts,
 											pgstromTaskScanState *ptss,
                                             struct iovec *xcmd_iov,
                                             int *xcmd_iovcnt);
+extern bool		pgstromGpuCacheProgramOk(pgstromTaskState *pts,
+										 const XpuCommand *session);
 extern void		pgstromGpuCacheExecReset(pgstromTaskScanState *ptss);
 extern void		pgstromGpuCacheInitDSM(pgstromTaskScanState *ptss,
 									   pgstromSharedScanState *psss);

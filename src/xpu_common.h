@@ -2789,6 +2789,7 @@ typedef struct
 #define XpuCommandTag__OpenSession			100
 #define XpuCommandTag__XpuTaskExec			110
 #define XpuCommandTag__XpuTaskExecGpuCache	111
+#define XpuCommandTag__GpuCacheOp			112	/* GPU-Cache maintenance (gpuserv/gcache_proto.h) */
 #define XpuCommandTag__XpuTaskFinal			119
 #define XpuCommandMagicNumber				0xdeadbeafU
 
@@ -2896,6 +2897,19 @@ typedef struct {
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task_gpucache;
 
+/* GPU-Cache maintenance request / reply (gpuserv/gcache_proto.h) */
+typedef struct {
+	uint32_t	op;					/* GCOP_* */
+	uint32_t	status;				/* reply: GCST_* */
+	uint32_t	database_oid;
+	uint32_t	table_oid;
+	uint32_t	table_sig;
+	uint32_t	nrecords;			/* GCOP_LOG: records in data */
+	uint64_t	arg;				/* request: the service generation the sender expects (0: any);
+									 * reply: the number of rows (INFO) */
+	char		data[1]				__MAXALIGNED__;
+} kern_gcache_op;
+
 typedef struct {
 	int32_t		scan_relidx;		/* index of the scan relation */
 	uint32_t	chunks_offset;		/* offset of kds_dst array */
@@ -2957,6 +2971,7 @@ typedef struct
 		kern_session_info	session;
 		kern_exec_task		task;
 		kern_exec_task_gpucache gc_task;
+		kern_gcache_op			gcop;
 		kern_exec_results	results;
 		kern_cpu_fallback	fallback;
 	} u;

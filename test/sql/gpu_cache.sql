@@ -50,7 +50,7 @@ CREATE TRIGGER row_sync_test_ng04 AFTER INSERT OR UPDATE OR DELETE
 -- Make GPU cache 
 INSERT INTO cache_test_table(id) values (1);
 -- Check gpucache_info table.
-SELECT config_options FROM pgstrom.gpucache_info WHERE table_name='cache_test_table' AND database_name=current_database();
+SELECT pgstrom.gpucache_info('cache_test_table'::regclass)->>'config_options';
 
 TRUNCATE TABLE cache_test_table;
 -- Force to use GPU Cache
@@ -244,6 +244,8 @@ COUNT(f) AS f_count,SUM(f) AS f_sum,AVG(f) AS f_avg,MAX(f) AS f_max,MIN(f) AS f_
 COUNT(g) AS g_count,SUM(g) AS g_sum,AVG(g) AS g_avg,MAX(g) AS g_max,MIN(g) AS g_min
 INTO TEMPORARY normal_result FROM normal_table WHERE id%3=0;
 --clms=("a" "b" "c" "d" "e" "f" "g") ; mtds=("count" "sum" "avg" "max" "min"); for a in ${clms[@]}; do for m in ${mtds[@]}; do echo ",ABS(c.${a}_${m} - n.${a}_${m}) < 1 AS ${a}_${m}_ok" ; done ; done;
+-- Vulkan build: a GpuJoin of two 35-column tables needs more registers than the scan VM has (planner limit)
+SET pg_strom.enable_gpujoin = off;
 VACUUM ANALYZE cache_test_table;
 SELECT 
 ABS(c.a_count - n.a_count) < 1 AS a_count_ok
@@ -284,6 +286,7 @@ ABS(c.a_count - n.a_count) < 1 AS a_count_ok
  FROM cached_result AS c,
 normal_result AS n
 WHERE c.a_count = n.a_count;
+RESET pg_strom.enable_gpujoin;
 
 ---
 --- TRUNCATE
@@ -315,7 +318,7 @@ CREATE TRIGGER row_sync_corruption AFTER INSERT OR UPDATE OR DELETE ON cache_cor
 ALTER TABLE cache_corruption_test ENABLE ALWAYS TRIGGER row_sync_corruption;
 
 -- check phase
-SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+SELECT pgstrom.gpucache_info('cache_corruption_test'::regclass)->>'phase';
 
 -- INSERT 4000 rows ( < max: 5000 rows )
 INSERT INTO cache_corruption_test (
@@ -334,10 +337,10 @@ INSERT INTO cache_corruption_test (
 );
 
 -- Apply to GPUCache
-SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result;
+SELECT pgstrom.gpucache_apply_redo() AS apply_redo_result;
 
 -- phase should be 'is_ready'
-SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+SELECT pgstrom.gpucache_info('cache_corruption_test'::regclass)->>'phase';
 
 -- check GPUCache is still usable.
 VACUUM ANALYZE cache_corruption_test;
@@ -347,10 +350,10 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
 -- update to make the table corrupted
 UPDATE cache_corruption_test SET d=d/2 WHERE id in (SELECT id FROM cache_corruption_test LIMIT 1001);
 -- Apply to GPUCache (returns error because the table is corrupted)
-SELECT pgstrom.gpucache_apply_redo('cache_corruption_test') AS apply_redo_result;
+SELECT pgstrom.gpucache_apply_redo() AS apply_redo_result;
 
 -- phase should be 'corrupted'
-SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+SELECT pgstrom.gpucache_info('cache_corruption_test'::regclass)->>'phase';
 
 -- check GPUCache is not usable.
 VACUUM ANALYZE cache_corruption_test;
@@ -361,7 +364,7 @@ SELECT * FROM cache_corruption_test WHERE b%3=0;
 SELECT pgstrom.gpucache_recovery('cache_corruption_test');
 
 -- phase should be is_ready
-SELECT phase FROM pgstrom.gpucache_info WHERE table_name='cache_corruption_test';
+SELECT pgstrom.gpucache_info('cache_corruption_test'::regclass)->>'phase';
 
 VACUUM ANALYZE cache_corruption_test;
 EXPLAIN (costs off, verbose)
@@ -372,4 +375,4 @@ SET client_min_messages = error;
 DROP SCHEMA gpu_cache_temp_test CASCADE;
 
 -- Checking GPUCache is removed correctly.
-SELECT count(*) = 0 AS ok FROM pgstrom.gpucache_info WHERE table_name in ('cache_test_table','cache_corruption_test') AND database_name=current_database();
+SELECT count(*) = 0 AS ok FROM json_array_elements(pgstrom.gpucache_info()->'caches') c WHERE c->>'table_name' in ('cache_test_table','cache_corruption_test') AND (c->>'database_oid')::oid = (SELECT oid FROM pg_database WHERE datname = current_database());

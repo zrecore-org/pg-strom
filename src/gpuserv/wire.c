@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include "xpu_common.h"
 #include "wire.h"
+#include "gcache.h"
 
 #define WIRE_MAX_FRAME		((uint64_t)1 << 31)
 
@@ -335,6 +336,9 @@ task_is_arrow(const XpuCommand *xcmd)
 {
 	const kern_data_store *kds;
 
+	if (xcmd->tag == XpuCommandTag__XpuTaskExecGpuCache)
+		return 1;			/* a GPU-Cache is read as a record batch of row slots */
+
 	if (!xcmd->u.task.kds_src_offset || xcmd->u.task.kds_src_offset + sizeof(kern_data_store) > xcmd->length)
 		return 0;
 	kds = (const kern_data_store *)((const char *) xcmd + xcmd->u.task.kds_src_offset);
@@ -357,11 +361,7 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 		 xcmd->u.task.scan_relidx, xcmd->u.task.kds_src_offset,
 		 xcmd->u.task.kds_src_pathname, xcmd->u.task.kds_src_iovec,
 		 (unsigned long long) xcmd->length);
-	if (xcmd->tag != XpuCommandTag__XpuTaskExec)
-	{
-		reply_error(wc, "XpuTaskExec", "GPU-Cache tasks are not implemented in the Vulkan service");
-		return;
-	}
+	gcache_cur_session = &wc->session->u.session;
 	if ((wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
 		uint64_t	raw0 = wc->agg.nitems_raw, in0 = wc->agg.nitems_in;
@@ -442,6 +442,21 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 		case XpuCommandTag__XpuTaskExec:
 		case XpuCommandTag__XpuTaskExecGpuCache:
 			handle_task_exec(ws, wc, xcmd);
+			break;
+		case XpuCommandTag__GpuCacheOp:
+			{
+				size_t		len = 0;
+				XpuCommand *resp = gcache_handle_op(xcmd, &len);
+
+				if (!resp)
+				{
+					reply_error(wc, "GpuCacheOp", "out of memory");
+					break;
+				}
+				if (write_all(wc->fd, resp, len) != 0)
+					wc->closing = 1;
+				free(resp);
+			}
 			break;
 		case XpuCommandTag__XpuTaskFinal:
 			if (wc->session &&
@@ -602,6 +617,7 @@ wire_server_init(wire_server *ws, gpuserv_control *ctl, gpu_vk_ctx *vk, uint32_t
 	ws->trace = (trace && trace[0] && strcmp(trace, "0") != 0);
 	scan_engine_init(&ws->scan, vk);
 	ws->scan.trace = ws->trace;
+	gcache_init(vk);
 }
 
 void
@@ -681,5 +697,6 @@ void
 wire_server_fini(wire_server *ws)
 {
 	wire_server_close_all(ws);
+	gcache_fini();
 	scan_engine_fini(&ws->scan);
 }
