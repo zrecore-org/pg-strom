@@ -30,4 +30,31 @@ fi
 rm -f /tmp/locked_test_build.$$.log
 PKGLIB=$("$PG_CONFIG" --pkglibdir)
 case "$TEST" in */*) SCRIPT=$TREE/$TEST;; *) SCRIPT=$TREE/test/gpuserv/$TEST;; esac
+
+# Where the throwaway cluster goes (an explicit ROOT is used as is and never removed). The local drive is nearly
+# full, so tests run on the external volume ($PGSTROM_TEST_DATA, default the repository's test-data/), except the
+# disk-speed-sensitive benchmarks, which run on the local drive ($PGSTROM_BENCH_ROOT, default /tmp).
+OWN_ROOT=
+if [ -z "$ROOT" ]; then
+	name=$(basename "$SCRIPT" .sh)
+	DATA_DIR=${PGSTROM_TEST_DATA:-/Volumes/CrucialX9/Projects/pg-strom/test-data}
+	case "$name" in
+	perf_bench|arrow_bench) OWN_ROOT=${PGSTROM_BENCH_ROOT:-/tmp}/pgstrom_$name ;;
+	*) if mkdir -p "$DATA_DIR" 2>/dev/null; then OWN_ROOT=$DATA_DIR/$name; else OWN_ROOT=/tmp/pgstrom_$name; fi ;;
+	esac
+	ROOT=$OWN_ROOT; export ROOT
+fi
 GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} sh "$SCRIPT"
+rc=$?
+
+# Free the disk once the test has passed (KEEP=1, KEEP_RUNNING=1, HOLD=1 and REUSE=1 keep the cluster; a failed
+# test keeps it for diagnosis, the next run of the test replaces it).
+if [ -n "$OWN_ROOT" ] && [ -z "$KEEP$KEEP_RUNNING$HOLD$REUSE" ]; then
+	if [ $rc -eq 0 ]; then
+		[ -f "$OWN_ROOT/data/postmaster.pid" ] && "$("$PG_CONFIG" --bindir)/pg_ctl" -D "$OWN_ROOT/data" -m fast -w stop >/dev/null 2>&1
+		rm -rf "$OWN_ROOT"
+	else
+		echo "locked_test: the test failed (exit $rc); its cluster is kept in $OWN_ROOT"
+	fi
+fi
+exit $rc
