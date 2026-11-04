@@ -73,8 +73,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # A slow mirror once spent 36 minutes in the PostgreSQL install and the job ran out of its 120 minutes before
+      # any test started: the install steps fail fast instead, and apt retries a stalled download.
       - name: Install build and runtime packages
+        timeout-minutes: 10
         run: |
+          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ca-certificates curl wget lsb-release gnupg build-essential pkgconf \
@@ -82,6 +86,7 @@ jobs:
             libnuma-dev libkrb5-dev libicu-dev postgresql-common
 
       - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
+        timeout-minutes: 10
         run: |
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
@@ -89,6 +94,7 @@ jobs:
           sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
 
       - name: Install Apache Arrow and Parquet (Apache apt repository)
+        timeout-minutes: 10
         run: |
           wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
           sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
@@ -141,7 +147,9 @@ jobs:
         run: sh test/gpuserv/float8_dev.sh
 
       - name: Differential test, GPU-Cache (lavapipe)
-        timeout-minutes: 30
+        # lavapipe compiles every kernel variant on the CPU (1-2 minutes each), so the time is set by the number
+        # of distinct queries, not the row count: the arm64 run passed 55 checks in 30 minutes and was killed in the join section
+        timeout-minutes: 60
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
