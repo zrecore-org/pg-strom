@@ -13,8 +13,10 @@ name: Vulkan Check
 #     reports the "desktop" capability tier, so the kernels run in a different tier than on
 #     Apple Silicon (the base tier).
 #   * macos-build: builds on an Apple Silicon runner and runs the portability test. It does
-#     not run the GPU tests: whether a GitHub-hosted macOS VM exposes a Metal device to
-#     MoltenVK is not known to us, so nothing here depends on it.
+#     not run the GPU tests: a GitHub-hosted macOS VM has no usable Metal device. MoltenVK
+#     aborts in vkCreateInstance there (AppleParavirtDevice does not implement
+#     newArgumentEncoderWithArguments), so `pgstrom-gpuserv --probe` crashes on the runner;
+#     the probe step is informational (continue-on-error) and nothing depends on it.
 #   * macos-gpu-test: the only job that runs the GPU tests on real Apple Silicon. It needs a
 #     self-hosted runner and runs on manual dispatch only.
 #
