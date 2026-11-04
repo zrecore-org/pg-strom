@@ -27,6 +27,8 @@ make -C src/gpuserv                                                          # t
 
 ## Tests
 
+GPU-Cache: `sh test/gpuserv/locked_test.sh "$PWD" gpucache_dev.sh` runs `test/gpuserv/gpucache_tests.inc` alone (the full `scan_test.sh` sources it); `make -C src/gpuserv gcache_check && src/gpuserv/gcache_check` checks the cache store without a GPU.
+
 ```
 GPUSERV_BIN=src/gpuserv/pgstrom-gpuserv sh test/gpuserv/service_test.sh     # service lifecycle (throwaway cluster)
 GPUSERV_BIN=<installed pgstrom-gpuserv> sh test/gpuserv/scan_test.sh        # GPU vs CPU result comparison of GpuScan
@@ -35,10 +37,10 @@ make -C test/port && test/port/port_test                                    # po
 
 `sh test/gpuserv/locked_test.sh <tree> [scan_test.sh|service_test.sh]` installs a checkout and runs a test while holding a global lock (the installed `$libdir/pg_strom` is shared, so parallel worktrees must queue). Both shell tests build a throwaway cluster and need the module and service installed (`make install` above). `ALLOW_CPU=on` runs them on lavapipe (Linux). `PGSTROM_GPUSERV_TRACE=1` in the postmaster's environment makes the service log each session's xpucode and per-task timings; `PGSTROM_GPUSERV_NO_MAP=1` disables the zero-copy file mapping.
 
-The upstream regression suite (PGXS `pg_regress` from `test/`, database `contrib_regression_pg_strom`, dataset revision in `test/Makefile`) has a Vulkan subset. `test/vulkan_schedule` (22 tests) must pass, `test/pending_schedule` holds what cannot yet (`conv_text_inet`; every other test file is listed there with a reason), and `test/vulkan_known_failures.txt` explains each difference from upstream's expected output. Run it against a throwaway cluster that keeps its 2 GB dataset between runs (about 3 minutes, plus about 20 seconds for the first dataset load; needs the module installed, so under the shared test lock):
+The upstream regression suite (PGXS `pg_regress` from `test/`, database `contrib_regression_pg_strom`, dataset revision in `test/Makefile`) has a Vulkan subset. `test/vulkan_schedule` (23 tests) must pass, `test/pending_schedule` holds what cannot yet (`conv_text_inet`; every other test file is listed there with a reason), and `test/vulkan_known_failures.txt` explains each difference from upstream's expected output. Run it against a throwaway cluster that keeps its 2 GB dataset between runs (about 3 minutes, plus about 20 seconds for the first dataset load; needs the module installed, so under the shared test lock):
 
 ```
-sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_installcheck.sh                        # vulkan_schedule: expect "All 22 tests passed"
+sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_installcheck.sh                        # vulkan_schedule: expect "All 23 tests passed"
 TARGET=pending-installcheck sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_installcheck.sh   # pending_schedule (fails by design)
 sh test/gpuserv/locked_test.sh "$PWD" test/vulkan_regen_expected.sh                      # regenerate the PG17 alternate expected files
 make -C test PG_CONFIG=... vulkan-installcheck                                           # the same against a running server (PGHOST/PGPORT)
