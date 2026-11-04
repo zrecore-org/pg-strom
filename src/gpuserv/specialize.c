@@ -133,8 +133,24 @@ gen_fail(gen_ctx *g, const char *fmt, ...)
 
 /*
  * Instructions [a, b) of the program as a function spec_r<a>_<b>(regs) returning the error code.
- * AND / OR jump forward: the instructions they skip are guarded by the jump's flag.
+ * AND / OR jump forward: the instructions they skip are guarded by a flag per jump target (jumps to the same
+ * target share it: a chain of n ANDed quals is n guards of one flag, not n guards of up to n flags, which made
+ * the generated control flow quadratic and MoltenVK's SPIR-V translation take minutes).
  */
+static int
+jump_target_seen(const uint32_t *w, uint32_t insnoff, uint32_t a, uint32_t s)
+{
+	/* an earlier AND/OR of [a, s) with the same target as the one at s */
+	for (uint32_t t = a; t < s; t++)
+	{
+		const uint32_t *tin = w + insnoff + 6 * t;
+
+		if ((tin[0] == SOP_AND || tin[0] == SOP_OR) && tin[3] == w[insnoff + 6 * s + 3])
+			return 1;
+	}
+	return 0;
+}
+
 static void
 gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 {
@@ -165,9 +181,10 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 	}
 	sb_printf(o, "uint spec_r%u_%u(inout Reg regs[VM_MAX_REGS])\n{\n", a, b);
 	for (uint32_t i = a; i < b; i++)
-		if (w[insnoff + 6 * i] == SOP_AND || w[insnoff + 6 * i] == SOP_OR)
+		if ((w[insnoff + 6 * i] == SOP_AND || w[insnoff + 6 * i] == SOP_OR) &&
+			!jump_target_seen(w, insnoff, a, i))
 		{
-			sb_printf(o, "    bool j%u = false;\n", i);
+			sb_printf(o, "    bool j%u = false;\n", w[insnoff + 6 * i + 3]);
 			nj++;
 		}
 	for (uint32_t i = a; i < b; i++)
@@ -186,9 +203,9 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 		{
 			const uint32_t *sin = w + insnoff + 6 * s;
 
-			if ((sin[0] == SOP_AND || sin[0] == SOP_OR) && sin[3] > i)
+			if ((sin[0] == SOP_AND || sin[0] == SOP_OR) && sin[3] > i && !jump_target_seen(w, insnoff, a, s))
 			{
-				sb_printf(o, guarded ? " && !j%u" : "    if (!j%u", s);
+				sb_printf(o, guarded ? " && !j%u" : "    if (!j%u", sin[3]);
 				guarded = 1;
 			}
 		}
@@ -213,13 +230,13 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 						  "        if (regs[%u].isnull != 0)\n            regs[%u].isnull = 1;\n"
 						  "        else if (regs[%u].v == 0)\n        {\n"
 						  "            regs[%u].v = 0;\n            regs[%u].isnull = 0;\n            j%u = true;\n        }\n",
-						  ra, dst, ra, dst, dst, i);
+						  ra, dst, ra, dst, dst, rb);
 			else
 				sb_printf(o,
 						  "        if (regs[%u].isnull != 0)\n            regs[%u].isnull = 1;\n"
 						  "        else if (regs[%u].v != 0)\n        {\n"
 						  "            regs[%u].v = 1;\n            regs[%u].isnull = 0;\n            j%u = true;\n        }\n",
-						  ra, dst, ra, dst, dst, i);
+						  ra, dst, ra, dst, dst, rb);
 		}
 		else
 		{
@@ -342,9 +359,13 @@ gen_arrow_eval_row(gen_ctx *g, sbuf *o)
 	}
 	sb_printf(o,
 			  "bool spec_arrow_eval_row(uint row, uint epage, uint elp, bool qonly, inout Reg regs[VM_MAX_REGS])\n{\n"
+			  /* GPU-Cache: a row whose bit in the row filter is 0 does not exist (free slot, or not visible) */
+			  "    if (ptab[8u * %uu + 2u] != 0u && ((pagel[row >> 5] >> (row & 31u)) & 1u) == 0u)\n"
+			  "        return false;\n"
 			  "    g_recheck = 0;\n    g_src = 0;\n"
 			  "    [unroll]\n    for (uint i = 0; i < VM_MAX_REGS; i++)\n    {\n"
-			  "        regs[i].v = 0;\n        regs[i].isnull = 1;\n        regs[i].sc = 0;\n    }\n");
+			  "        regs[i].v = 0;\n        regs[i].isnull = 1;\n        regs[i].sc = 0;\n    }\n",
+			  ncols);
 	for (uint32_t c = 0; c < ncols; c++)
 	{
 		uint32_t	desc = w[coloff + c];

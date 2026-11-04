@@ -1307,11 +1307,36 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, co
 	e = prog->spec;
 	if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q && (m->mode >= SPECM_FORCE || want_wait))
 	{
-		/* force / check: the first task waits for the compilation (tests, measurements); a cached kernel, for its pipeline */
+		/*
+		 * force / check: the first task waits for the compilation (tests, measurements); a cached kernel, for its
+		 * pipeline. The wait is bounded (PGSTROM_GPUSERV_SPEC_WAIT_MS, default 60 s): MoltenVK's SPIR-V translation
+		 * of some generated kernels took minutes (a long guard chain of ANDed quals), and the task must not hang
+		 * with it. On a timeout the program stays on the VM.
+		 */
+		const char *ws = getenv("PGSTROM_GPUSERV_SPEC_WAIT_MS");
+		long		wait_ms = (ws && atol(ws) > 0) ? atol(ws) : 60000;
+		struct timespec dl;
+
+		clock_gettime(CLOCK_REALTIME, &dl);
+		dl.tv_sec += wait_ms / 1000;
+		dl.tv_nsec += (wait_ms % 1000) * 1000000L;
+		if (dl.tv_nsec >= 1000000000L)
+		{
+			dl.tv_sec++;
+			dl.tv_nsec -= 1000000000L;
+		}
 		pthread_mutex_lock(&m->mu);
 		while (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q)
-			pthread_cond_wait(&m->done_cv, &m->mu);
+			if (pthread_cond_timedwait(&m->done_cv, &m->mu, &dl) == ETIMEDOUT)
+				break;
 		pthread_mutex_unlock(&m->mu);
+		if (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE) == SPEC_Q)
+		{
+			spec_log(m, 0, "%s kernel %.8s is still compiling after %ld ms: the program stays on the VM",
+					 kind_name(e->kind | (e->arrow ? SPEC_ARROW : 0)), e->keyhex, wait_ms);
+			prog->spec_state = 2;
+			return vm_pipe;
+		}
 	}
 	switch (__atomic_load_n(&e->state, __ATOMIC_ACQUIRE))
 	{
