@@ -113,19 +113,19 @@ void arrow_load_col(uint c, uint desc, uint row, inout Reg regs[VM_MAX_REGS])
         {
             // GPU-Cache string: { offset | length << 32 } per row, the complete datum behind it
             if ((uint64_t(row) + 1) * 8 > uint64_t(vlen))
-                continue;
+                return;
             uint64_t pr = ar_ld64(voff + row * 8);
             uint soff = uint(pr & 0xffffffffu);
             uint slen = uint(pr >> 32);
             if (slen == 0 || uint64_t(soff) + uint64_t(slen) > uint64_t(ptab[t + 6]))
-                continue;                           // corrupted: NULL
+                return;                           // corrupted: NULL
             uint sbase = ptab[t + 5] + soff;
             uint hdr = ((ar_ld8(sbase) & 1u) != 0u) ? 1u : 4u;     // a 1-byte (short) or a 4-byte header
             if (slen < hdr)
-                continue;
+                return;
             regs[slot].v = int64_t(uint64_t(sbase + hdr) | (uint64_t(slen - hdr) << 32));
             regs[slot].isnull = 0;
-            continue;
+            return;
         }
         if (mode == 4)
         {

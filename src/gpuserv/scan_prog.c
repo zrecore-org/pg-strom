@@ -18,7 +18,9 @@
 #include "xpu_common.h"
 #include "scan_prog.h"
 #include "scan_caps.h"
+#ifndef __PGSTROM_MODULE__		/* the backend module links this file for the planner and for GPU-Cache; it has no specializer */
 #include "specialize.h"
+#endif
 
 
 #define PROG_HDR_WORDS		24
@@ -754,7 +756,9 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 void
 scan_prog_free(scan_prog *prog)
 {
+#ifndef __PGSTROM_MODULE__
 	spec_release(prog);
+#endif
 	free(prog->words);
 	free(prog->attrs);
 	memset(prog, 0, sizeof(*prog));
