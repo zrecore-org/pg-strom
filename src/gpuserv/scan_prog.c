@@ -349,6 +349,112 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 }
 
 /*
+ * A11: the fused point of a point-in-polygon function: st_makepoint(x, y) / st_point(x, y), optionally under
+ * st_setsrid(., constant). Returns the st_makepoint kexp (its two arguments are x and y) and the SRID, or NULL.
+ */
+static const kern_expression *
+geom_fused_point(const kern_expression *k, int32_t *srid)
+{
+	scan_func_class fc = scan_vm_classify_func(k->opcode);
+
+	*srid = 0;
+	if (fc.cls != SOP_GEOMMK)
+		return NULL;
+	if (fc.kind == 1)
+	{
+		const kern_expression *kin, *ks;
+
+		if (k->nr_args != 2)
+			return NULL;
+		kin = KEXP_FIRST_ARG(k);
+		ks = KEXP_NEXT_ARG(kin);
+		if (ks->opcode != FuncOpCode__ConstExpr || ks->u.c.const_isnull)
+			return NULL;
+		memcpy(srid, (const unsigned char *) ks->u.c.const_value, sizeof(int32_t));
+		if (*srid < 0 || *srid > 999999)
+			return NULL;
+		k = kin;
+		fc = scan_vm_classify_func(k->opcode);
+		if (fc.cls != SOP_GEOMMK || fc.kind != 0)
+			return NULL;
+	}
+	return (k->nr_args == 2 ? k : NULL);
+}
+
+/*
+ * A11: st_contains / st_covers / st_within / st_coveredby / st_intersects of a polygon and a point. The point is a
+ * string register (a column, constant or parameter), or fused from st_makepoint(x, y): then the instruction takes the
+ * registers of x and y and the SRID (codegen.c checked the shapes and that the fused point sits where the point goes).
+ */
+static int
+emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *next)
+{
+	const kern_expression *ka = KEXP_FIRST_ARG(kexp);
+	const kern_expression *kb = KEXP_NEXT_ARG(ka);
+	const kern_expression *kmk, *kmk0, *kmk1, *kpoly;
+	int32_t		srid0 = 0, srid1 = 0;
+	int			mark = *next;
+	int			ra, rb, ry = 0, dst;
+	uint32_t	flags, k1 = 0;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 2)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	kmk0 = geom_fused_point(ka, &srid0);
+	kmk1 = geom_fused_point(kb, &srid1);
+	if (kmk0 && kmk1)
+		return fail(b, "%s of two points", scan_vm_opcode_name(kexp->opcode));
+	kmk = (kmk0 ? kmk0 : kmk1);
+	kpoly = (kmk0 ? kb : ka);
+	if (kmk)
+	{
+		const kern_expression *kx = KEXP_FIRST_ARG(kmk);
+
+		/* a point in the first place suits st_within / st_coveredby, in the second st_contains / st_covers */
+		if (kmk0 ? fc.kind == SOP_GPIP_POLY_POINT : fc.kind == SOP_GPIP_POINT_POLY)
+			return fail(b, "the point of %s is in the wrong place", scan_vm_opcode_name(kexp->opcode));
+		if (kmk0)
+			srid1 = srid0;
+		srid0 = srid1;
+		ra = expr_to_reg(b, kpoly, next);
+		if (ra < 0)
+			return -1;
+		rb = expr_to_reg(b, kx, next);
+		if (rb < 0)
+			return -1;
+		ry = expr_to_reg(b, KEXP_NEXT_ARG(kx), next);
+		if (ry < 0 || ry > 0xff)
+			return -1;
+		flags = SOP_GPIP_FUSED;
+		k1 = (uint32_t) ry | ((uint32_t) srid0 << 8);
+	}
+	else
+	{
+		/* st_within(point, polygon) and st_coveredby: the polygon goes first */
+		if (fc.kind == SOP_GPIP_POINT_POLY)
+		{
+			const kern_expression *t = ka;
+
+			ka = kb;
+			kb = t;
+		}
+		ra = expr_to_reg(b, ka, next);
+		if (ra < 0)
+			return -1;
+		rb = expr_to_reg(b, kb, next);
+		if (rb < 0)
+			return -1;
+		flags = (fc.kind == SOP_GPIP_EITHER ? SOP_GPIP_SYMM : 0);
+	}
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 || emit(b, SOP_GEOMPIP, dst, ra, rb, flags, k1) < 0)
+		return -1;
+	return dst;
+}
+
+/*
  * A8: jsonb expressions. "x -> key", "x -> idx" are one JSONGET; "->>" adds JSONTXT, the planner's
  * "(x ->> key)::numeric / intN" shortcut JSONNUM / JSONINT; "?", jsonb_typeof and "@>" are single instructions.
  * The literals the instructions return (true/false, the type names) and the compiled pattern of @> live in the
@@ -592,6 +698,11 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 	fc = scan_vm_classify_func(kexp->opcode);
 	if (fc.cls == 0)
 		return fail(b, "%s is not supported by the Vulkan GpuScan yet", scan_vm_opcode_name(kexp->opcode));
+
+	if (fc.cls == SOP_GEOMPIP)
+		return emit_geompip(b, kexp, fc, next);
+	if (fc.cls == SOP_GEOMMK)
+		return fail(b, "%s is only supported as the point of ST_Contains and the like", scan_vm_opcode_name(kexp->opcode));
 
 	if (fc.cls == SOP_JSONGET || fc.cls == SOP_JSONTXT || fc.cls == SOP_JSONNUM || fc.cls == SOP_JSONINT ||
 		fc.cls == SOP_JSONEXISTS || fc.cls == SOP_JSONTYPE || fc.cls == SOP_JSONCONT)

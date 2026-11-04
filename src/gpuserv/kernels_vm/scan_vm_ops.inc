@@ -88,6 +88,17 @@
  *            decides: && is false, ~ and @ are true; whatever else the VM cannot box (geodetic, a small line or
  *            polygon without a cached box) returns SCANVM_RECHECK_CODE.
  *
+ *   GEOMPIP  dst = a point lies in a (multi)polygon: ST_Contains / ST_Covers / ST_Intersects / ST_Within / ST_CoveredBy
+ *            of a polygon and a point. a is the polygon (a string register), b the point: a string register, or with
+ *            k0 & SOP_GPIP_FUSED the float8 register of x and the float8 register (k1 & 0xff) of y, the point of a
+ *            fused st_makepoint(x, y), whose SRID is k1 >> 8. k0 & SOP_GPIP_SYMM: either operand may be the polygon.
+ *            Non-zero winding number over the rings (a hole excludes), the orientation of every edge that spans the
+ *            point's y decided on the software binary64 only when its sign is certain (Shewchuk's error bound with a
+ *            safety factor); PostGIS evaluates the same test with fused multiply-add in places, so a point on an edge
+ *            or too close to decide, an edge that overflows or underflows, non-finite coordinates, a different SRID, a
+ *            geodetic, Z or M polygon and every other geometry type return SCANVM_RECHECK_CODE: the three predicates
+ *            differ only on the boundary, which the backend always decides. An empty operand (same SRID) is false.
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -136,6 +147,15 @@ SCANVM_OP(D2I,        124)
 SCANVM_OP(F2D,        125)
 SCANVM_OP(D2F,        126)
 SCANVM_OP(GEOMBOX,    130)
+SCANVM_OP(GEOMPIP,    131)
+/* never emitted: the class of st_makepoint / st_point (kind 0) and st_setsrid (kind 1), which only a GEOMPIP argument may use */
+SCANVM_OP(GEOMMK,     132)
+/* GEOMPIP: the operands of the function (kind) and the flags of k0 */
+SCANVM_OP(GPIP_POLY_POINT,  0)
+SCANVM_OP(GPIP_POINT_POLY,  1)
+SCANVM_OP(GPIP_EITHER,      2)
+SCANVM_OP(GPIP_FUSED,       1)
+SCANVM_OP(GPIP_SYMM,        2)
 /* GEOMBOX kinds */
 SCANVM_OP(GBOX_OVERLAPS, 0)
 SCANVM_OP(GBOX_CONTAINS, 1)

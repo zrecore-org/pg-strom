@@ -606,6 +606,274 @@ gf_le(uint32_t a, uint32_t b)
 	return f4cmp(bits_to_f(a), bits_to_f(b)) <= 0;
 }
 
+/*
+ * ---- A11: a point in a (multi)polygon (GEOMPIP). The same as vm_geom_pip() of scan_common.slang. ----
+ * Non-zero winding number; an edge's side of the point is decided on the software binary64 only when its sign is
+ * beyond the error bound of the orientation test, anything doubtful (on an edge, on a vertex, too close, overflow,
+ * non-finite) is PIP_UNSURE and the backend evaluates the row.
+ */
+#define PIP_OUT		0
+#define PIP_IN		1
+#define PIP_UNSURE	2
+
+#define F64_NONFINITE(a)	(((a) & F64_MAG) >= F64_INF)
+/* 2^-49: the bound of Shewchuk's orientation filter (3 + 16 eps) eps = 3.3e-16 with a safety factor of 5 */
+#define PIP_ERRBOUND		0x3CE0000000000000ull
+
+static uint64_t
+ld64u(const unsigned char *p)
+{
+	uint64_t	u;
+
+	memcpy(&u, p, 8);
+	return u;
+}
+
+/* the winding number of a ring of n points at p (16 bytes each) around the point (px, py) */
+static int
+pip_ring(const unsigned char *p, uint32_t n, uint64_t px, uint64_t py)
+{
+	uint64_t	x1, y1;
+	int			wn = 0;
+
+	if (n < 4)
+		return PIP_UNSURE;
+	x1 = ld64u(p);
+	y1 = ld64u(p + 8);
+	if (F64_NONFINITE(x1) || F64_NONFINITE(y1))
+		return PIP_UNSURE;
+	for (uint32_t i = 1; i < n; i++)
+	{
+		uint64_t	x2 = ld64u(p + 16 * (size_t) i);
+		uint64_t	y2 = ld64u(p + 16 * (size_t) i + 8);
+		uint64_t	ymin, ymax;
+
+		if (F64_NONFINITE(x2) || F64_NONFINITE(y2))
+			return PIP_UNSURE;
+		if (f64_eq(y1, y2))
+		{
+			/* horizontal (or a zero-length segment: ignored): only a point on it matters, and that is the boundary */
+			if (f64_eq(x1, x2) || !f64_eq(py, y1))
+				goto next;
+			if (f64_le(x1, x2) ? (f64_le(x1, px) && f64_le(px, x2)) : (f64_le(x2, px) && f64_le(px, x1)))
+				return PIP_UNSURE;
+			goto next;
+		}
+		ymin = f64_lt(y1, y2) ? y1 : y2;
+		ymax = f64_lt(y1, y2) ? y2 : y1;
+		if (f64_lt(py, ymin) || f64_gt(py, ymax))
+			goto next;
+		{
+			uint64_t	l = f64_mul(f64_sub(px, x1), f64_sub(y2, y1));
+			uint64_t	r = f64_mul(f64_sub(x2, x1), f64_sub(py, y1));
+			uint64_t	det = f64_sub(r, l);			/* cross(b - a, p - a): > 0 when p is left of a -> b */
+			uint64_t	s = f64_add(l & F64_MAG, r & F64_MAG);
+			uint32_t	e = (uint32_t) ((s >> 52) & 0x7ff);
+
+			/* the error bound holds for finite, non-subnormal terms; s = 0 is a point on the line through a vertex */
+			if (e < 0x080 || e > 0x7f0)
+				return PIP_UNSURE;
+			if (!f64_gt(det & F64_MAG, f64_mul(s, PIP_ERRBOUND)))
+				return PIP_UNSURE;
+			if (f64_le(y1, py) && f64_lt(py, y2))
+			{
+				if ((det & F64_SIGN) == 0)
+					wn++;
+			}
+			else if (f64_le(y2, py) && f64_lt(py, y1))
+			{
+				if ((det & F64_SIGN) != 0)
+					wn--;
+			}
+		}
+	next:
+		x1 = x2;
+		y1 = y2;
+	}
+	return wn != 0 ? PIP_IN : PIP_OUT;
+}
+
+/* the polygon whose type word is at pos: the result, and *pnext = the offset after it (0: malformed) */
+static int
+pip_polygon(const unsigned char *p, uint32_t len, uint32_t pos, uint64_t px, uint64_t py, uint32_t *pnext)
+{
+	uint32_t	nrings, ptsoff, off;
+	int			res = PIP_OUT;
+
+	*pnext = 0;
+	if (pos + 8 > len || ld32u(p + pos) != GEOM_POLYGONTYPE)
+		return PIP_UNSURE;
+	nrings = ld32u(p + pos + 4);
+	if (nrings > (len - pos - 8) / 4)
+		return PIP_UNSURE;
+	ptsoff = pos + 8 + 4 * nrings + ((nrings & 1) ? 4 : 0);
+	if (ptsoff > len)
+		return PIP_UNSURE;
+	off = ptsoff;
+	for (uint32_t r = 0; r < nrings; r++)
+	{
+		uint32_t	n = ld32u(p + pos + 8 + 4 * r);
+		int			rr;
+
+		if (n > (len - off) / 16)
+			return PIP_UNSURE;
+		if (res != PIP_UNSURE && (r == 0 || res == PIP_IN))
+		{
+			rr = pip_ring(p + off, n, px, py);
+			if (rr == PIP_UNSURE)
+				res = PIP_UNSURE;
+			else if (r == 0)
+				res = rr;
+			else if (rr == PIP_IN)
+				res = PIP_OUT;				/* in a hole */
+		}
+		off += 16 * n;
+	}
+	*pnext = off;
+	return res;
+}
+
+/* the header of a geometry: 0 ok; *gtype, *srid (21 bits) and the offset of the type word. 1: not decidable here */
+static int
+geom_head(const unsigned char *p, uint32_t len, uint32_t *gtype, uint32_t *srid, uint32_t *pos, uint32_t *flags)
+{
+	uint32_t	gflags, o = 4;
+
+	if (len < 12)
+		return 1;
+	gflags = p[3];
+	if ((p[0] & 0xe0) != 0)
+		return 1;
+	*srid = ((uint32_t) (p[0] & 0x1f) << 16) | ((uint32_t) p[1] << 8) | p[2];
+	if ((gflags & 0x40) && (gflags & 0x10))
+		o += 8;
+	*flags = gflags;
+	if (o + 8 > len)
+		return 1;
+	if (gflags & 0x04)
+	{
+		/* a cached box: 4 floats when the geometry is 2D (a Z or M box has more, those are not handled) */
+		if (gflags & 0x03)
+			return 1;
+		o += 16;
+		if (o + 8 > len)
+			return 1;
+	}
+	*pos = o;
+	*gtype = ld32u(p + o);
+	return 0;
+}
+
+/* 0: res set (0/1); else SOP_RECHECK_CODE. poly, point: string registers (point_x != NULL: the fused point) */
+static uint32_t
+geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t lb, int have_xy,
+		 uint64_t fx, uint64_t fy, uint32_t fsrid, uint32_t k0, int *res)
+{
+	uint32_t	ta, sa, pos_a, fl_a;
+	uint32_t	tb = GEOM_POINTTYPE, sb = fsrid, pos_b = 0, fl_b = 0;
+	uint64_t	px, py;
+	int			rr = PIP_OUT;
+
+	if (geom_head(pa, la, &ta, &sa, &pos_a, &fl_a))
+		return SOP_RECHECK_CODE;
+	if (!have_xy)
+	{
+		if (geom_head(pb, lb, &tb, &sb, &pos_b, &fl_b))
+			return SOP_RECHECK_CODE;
+		if ((k0 & SOP_GPIP_SYMM) && ta == GEOM_POINTTYPE && (tb == GEOM_POLYGONTYPE || tb == GEOM_MULTIPOLYGONTYPE))
+		{
+			const unsigned char *tp = pa; uint32_t tl = la;
+
+			pa = pb; pb = tp; la = lb; lb = tl;
+			{ uint32_t t;
+			  t = ta; ta = tb; tb = t;
+			  t = sa; sa = sb; sb = t;
+			  t = pos_a; pos_a = pos_b; pos_b = t;
+			  t = fl_a; fl_a = fl_b; fl_b = t; }
+		}
+	}
+	if ((ta != GEOM_POLYGONTYPE && ta != GEOM_MULTIPOLYGONTYPE) || tb != GEOM_POINTTYPE)
+		return SOP_RECHECK_CODE;
+	if (sa != sb)
+		return SOP_RECHECK_CODE;				/* PostGIS raises "mixed SRID": the backend does */
+	if ((fl_a & 0x0b) != 0)
+		return SOP_RECHECK_CODE;				/* Z, M or geodetic polygon */
+	if (have_xy)
+	{
+		px = fx;
+		py = fy;
+	}
+	else
+	{
+		uint32_t	npts;
+
+		if ((fl_b & 0x0c) != 0 || pos_b + 8 > lb)	/* geodetic, or a cached box on a point */
+			return SOP_RECHECK_CODE;
+		npts = ld32u(pb + pos_b + 4);
+		if (npts == 0)
+		{
+			*res = 0;							/* POINT EMPTY */
+			return 0;
+		}
+		if (npts != 1 || pos_b + 8 + 16 > lb)
+			return SOP_RECHECK_CODE;
+		px = ld64u(pb + pos_b + 8);
+		py = ld64u(pb + pos_b + 16);
+	}
+	if (F64_NONFINITE(px) || F64_NONFINITE(py))
+		return SOP_RECHECK_CODE;
+	/* the cached float box is rounded outward: a point beyond it is outside */
+	if (fl_a & 0x04)
+	{
+		uint32_t	bo = pos_a - 16;
+		uint32_t	bx0 = ld32u(pa + bo), bx1 = ld32u(pa + bo + 4), by0 = ld32u(pa + bo + 8), by1 = ld32u(pa + bo + 12);
+
+		if ((bx0 & 0x7fffffffu) <= 0x7f800000u && (bx1 & 0x7fffffffu) <= 0x7f800000u &&
+			(by0 & 0x7fffffffu) <= 0x7f800000u && (by1 & 0x7fffffffu) <= 0x7f800000u &&
+			(f64_lt(px, f64_from_f32(bx0)) || f64_gt(px, f64_from_f32(bx1)) ||
+			 f64_lt(py, f64_from_f32(by0)) || f64_gt(py, f64_from_f32(by1))))
+		{
+			*res = 0;
+			return 0;
+		}
+	}
+	if (ta == GEOM_POLYGONTYPE)
+	{
+		uint32_t	nx;
+
+		rr = pip_polygon(pa, la, pos_a, px, py, &nx);
+	}
+	else
+	{
+		uint32_t	ng, o;
+
+		if (pos_a + 8 > la)
+			return SOP_RECHECK_CODE;
+		ng = ld32u(pa + pos_a + 4);
+		o = pos_a + 8;
+		rr = PIP_OUT;
+		/* PostGIS: the first polygon the point is not outside of decides (inside, or on its boundary: not "contained") */
+		for (uint32_t i = 0; i < ng; i++)
+		{
+			uint32_t	nx;
+			int			r1 = pip_polygon(pa, la, o, px, py, &nx);
+
+			if (nx == 0)
+				return SOP_RECHECK_CODE;
+			if (r1 != PIP_OUT)
+			{
+				rr = r1;
+				break;
+			}
+			o = nx;
+		}
+	}
+	if (rr == PIP_UNSURE)
+		return SOP_RECHECK_CODE;
+	*res = (rr == PIP_IN);
+	return 0;
+}
+
 /* the instructions that A6 added; the same as vm_ext() of scan_common.slang */
 static uint32_t
 vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
@@ -613,6 +881,37 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 {
 	switch (op)
 	{
+		case SOP_GEOMPIP:
+		{
+			vm_reg		x = regs[ra], y = regs[rb];
+			int			res = 0;
+			uint32_t	rc;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			if (k0 & SOP_GPIP_FUSED)
+			{
+				vm_reg		yy = regs[k1 & 0xff];
+
+				if (yy.isnull)
+				{
+					regs[dst].isnull = 1;
+					return 0;
+				}
+				rc = geom_pip(str_ptr(env, x.v), str_len(x.v), NULL, 0, 1, (uint64_t) y.v, (uint64_t) yy.v, k1 >> 8,
+							  k0, &res);
+			}
+			else
+				rc = geom_pip(str_ptr(env, x.v), str_len(x.v), str_ptr(env, y.v), str_len(y.v), 0, 0, 0, 0, k0, &res);
+			if (rc != 0)
+				return rc;
+			regs[dst].isnull = 0;
+			regs[dst].v = res;
+			return 0;
+		}
 		case SOP_GEOMBOX:
 		{
 			vm_reg		x = regs[ra], y = regs[rb];

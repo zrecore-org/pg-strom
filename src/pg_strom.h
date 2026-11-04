@@ -620,6 +620,7 @@ extern void		codegen_build_packed_kvars_move(codegen_context *context,
 												pgstromPlanInfo *pp_info);
 extern bool		pgstrom_vulkan_expr_limits(Expr *expr);
 extern bool		pgstrom_vulkan_expr_cannot_fail(Node *node);
+extern bool		pgstrom_expr_has_geometry_func(Expr *expr);
 extern bool		pgstrom_xpu_expression(Expr *expr,
 									   uint32_t required_xpu_flags,
 									   Index scan_relid,

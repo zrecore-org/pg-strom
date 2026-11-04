@@ -29,7 +29,7 @@ it when it is ready (plan item A6; `pg_strom.gpu_specialize`, `PGSTROM_GPUSERV_S
 | Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float and text aggregates, `min`/`max` of numeric, `sum`/`avg` of numerics whose scale is not fixed by the plan; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
 | Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
 | Sorting (`GPU-Sort`, off by default: `pg_strom.enable_gpusort`) | The groups of a non-parallel GpuPreAgg: `GROUP BY ... ORDER BY` on group keys, `count`, integer `sum`/`min`/`max`, ASC/DESC, NULLS FIRST/LAST, up to 8 keys, `LIMIT` pushed into the sort, `rank()`/`dense_rank()`/`row_number()` below N per partition | Sorting of scan/join results, `avg`, float/numeric keys, parallel plans, `cpu_fallback = on` |
-| Other | GPU-Cache (below) | PostGIS (dropped), SELECT INTO direct (dropped) |
+| Other | GPU-Cache (below) | PostGIS beyond the box operators and point-in-polygon (not yet), SELECT INTO direct (dropped) |
 
 ## GPU-Cache
 
@@ -148,8 +148,8 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 | GPU-Cache | Works, see the section above; differences from the CUDA product are listed there |
 | Numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
 | Specialized kernels for opcodes the generator does not list (new ones until reviewed), for jsonb | They run on the interpreter (plan A6 "kernel specialization") |
-| PostGIS `geometry` | The 2D bounding-box operators `&&`, `~`, `@` (also with an empty, infinite or huge-coordinate operand, exactly as PostGIS 3.7 answers them) in quals of heap tables; the geometry value passes through; whatever the VM cannot box (geodetic values, a small line or polygon PostGIS keeps no box for) is re-checked on the CPU | `ST_Contains`, `ST_Intersects`, `ST_DWithin`, `ST_Distance`, ..., Arrow and GPU-Cache sources, joins |
+| PostGIS `geometry` | The 2D bounding-box operators `&&`, `~`, `@` (also with an empty, infinite or huge-coordinate operand, exactly as PostGIS 3.7 answers them), and `ST_Contains`, `ST_Covers`, `ST_Intersects`, `ST_Within`, `ST_CoveredBy` of a polygon or multipolygon (2D, same SRID) and a point, a point column or the fused `ST_MakePoint(x, y)` / `ST_Point(x, y)` (optionally under `ST_SetSRID` of a constant), in quals of heap tables. The kernel decides a point that is clearly inside or outside (non-zero winding number, holes, multipolygons in PostGIS's order); a point on an edge or a vertex, too close to an edge to be sure, a Z/M or geodetic polygon, another SRID (PostGIS raises an error), another geometry type, or non-finite or extreme coordinates is re-checked on the CPU. The geometry value passes through | `ST_DWithin`, `ST_Distance`, ..., Arrow and GPU-Cache sources (the predicates stay on the CPU there), joins |
 | jsonb | Quals, aggregate arguments and number extraction run on the GPU; computed jsonb/text results in the target list, equality, `#>` and the other operators stay on the CPU (plan A8 status) |
 | GPU-Direct Storage, `heterodb-extra`, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
-| PostGIS geometry functions other than the three box operators, geometry on Arrow and in the GPU-Cache, spatial joins | Not on the GPU yet (plan A11) |
+| PostGIS functions other than the box operators and the point-in-polygon predicates, geometry on Arrow and in the GPU-Cache, spatial joins | Not on the GPU yet (plan A11) |
 | fp64 hardware, 64-bit-atomic kernels for devices that have them | Not used (plan A3b); `float8` is computed in integer arithmetic on every device |

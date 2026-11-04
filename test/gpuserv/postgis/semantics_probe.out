@@ -1,0 +1,158 @@
+  ok    service is ready
+-- PostGIS version
+POSTGIS="3.7.0 0" [EXTENSION] PGSQL="170" GEOS="3.15.0-CAPI-1.21.0" PROJ="9.9.0 NETWORK_ENABLED=OFF URL_ENDPOINT=https://cdn.proj.org USER_WRITABLE_DIRECTORY=/Users/aalbino/Library/Application Support/proj DATABASE_PATH=/opt/homebrew/Cellar/proj/9.9.0/share/proj/proj.db" (compiled against PROJ 9.9.0) LIBXML="2.15.4" LIBJSON="0.19" LIBPROTOBUF="1.5.2" WAGYU="0.5.0 (Internal)"
+-- n(poly), n(pt): contains, covers, intersects, within-reversed (NULL = error)
+bowtie|edge|false|false|false|false|false|false
+bowtie|empty|false|false|false|false|false|false
+bowtie|hole_edge|true|true|true|true|true|true
+bowtie|hole_in|false|false|false|false|false|false
+bowtie|hole_vertex|false|true|true|true|false|true
+bowtie|inside|false|true|true|true|false|true
+bowtie|line|false|true|true|true|false|true
+bowtie|multipt_in|false|true|true|true|false|true
+bowtie|multipt_mix|false|false|true|true|false|false
+bowtie|outside|false|false|false|false|false|false
+bowtie|overlap|false|true|true|true|false|true
+bowtie|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+bowtie|vertex|false|true|true|true|false|true
+bowtie|z_pt|false|true|true|true|false|true
+cw|edge|false|true|true|true|false|true
+cw|empty|false|false|false|false|false|false
+cw|hole_edge|true|true|true|true|true|true
+cw|hole_in|true|true|true|true|true|true
+cw|hole_vertex|true|true|true|true|true|true
+cw|inside|true|true|true|true|true|true
+cw|line|true|true|true|true|true|true
+cw|multipt_in|true|true|true|true|true|true
+cw|multipt_mix|false|false|true|true|false|false
+cw|outside|false|false|false|false|false|false
+cw|overlap|true|true|true|true|true|true
+cw|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+cw|vertex|false|true|true|true|false|true
+cw|z_pt|true|true|true|true|true|true
+doubleloop|edge|false|true|true|true|false|true
+doubleloop|empty|false|false|false|false|false|false
+doubleloop|hole_edge|true|true|true|true|true|true
+doubleloop|hole_in|true|true|true|true|true|true
+doubleloop|hole_vertex|true|true|true|true|true|true
+doubleloop|inside|true|true|true|true|true|true
+doubleloop|line|false|false|false|false|false|false
+doubleloop|multipt_in|true|true|true|true|true|true
+doubleloop|multipt_mix|false|false|true|true|false|false
+doubleloop|outside|false|false|false|false|false|false
+doubleloop|overlap|true|true|true|true|true|true
+doubleloop|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+doubleloop|vertex|false|true|true|true|false|true
+doubleloop|z_pt|true|true|true|true|true|true
+empty|edge|false|false|false|false|false|false
+empty|empty|false|false|false|false|false|false
+empty|hole_edge|false|false|false|false|false|false
+empty|hole_in|false|false|false|false|false|false
+empty|hole_vertex|false|false|false|false|false|false
+empty|inside|false|false|false|false|false|false
+empty|line|false|false|false|false|false|false
+empty|multipt_in|false|false|false|false|false|false
+empty|multipt_mix|false|false|false|false|false|false
+empty|outside|false|false|false|false|false|false
+empty|overlap|false|false|false|false|false|false
+empty|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|false|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+empty|vertex|false|false|false|false|false|false
+empty|z_pt|false|false|false|false|false|false
+hole|edge|false|true|true|true|false|true
+hole|empty|false|false|false|false|false|false
+hole|hole_edge|false|true|true|true|false|true
+hole|hole_in|false|false|false|false|false|false
+hole|hole_vertex|false|true|true|true|false|true
+hole|inside|false|false|false|false|false|false
+hole|line|true|true|true|true|true|true
+hole|multipt_in|false|false|false|false|false|false
+hole|multipt_mix|false|false|false|false|false|false
+hole|outside|false|false|false|false|false|false
+hole|overlap|false|true|true|true|false|true
+hole|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+hole|vertex|false|true|true|true|false|true
+hole|z_pt|false|false|false|false|false|false
+holeinhole|edge|false|true|true|true|false|true
+holeinhole|empty|false|false|false|false|false|false
+holeinhole|hole_edge|false|false|false|false|false|false
+holeinhole|hole_in|false|false|false|false|false|false
+holeinhole|hole_vertex|false|false|false|false|false|false
+holeinhole|inside|false|false|false|false|false|false
+holeinhole|line|true|true|true|true|true|true
+holeinhole|multipt_in|false|false|false|false|false|false
+holeinhole|multipt_mix|false|false|false|false|false|false
+holeinhole|outside|false|false|false|false|false|false
+holeinhole|overlap|false|false|false|false|false|false
+holeinhole|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+holeinhole|vertex|false|true|true|true|false|true
+holeinhole|z_pt|false|false|false|false|false|false
+multi|edge|false|true|true|true|false|true
+multi|empty|false|false|false|false|false|false
+multi|hole_edge|true|true|true|true|true|true
+multi|hole_in|true|true|true|true|true|true
+multi|hole_vertex|true|true|true|true|true|true
+multi|inside|true|true|true|true|true|true
+multi|line|true|true|true|true|true|true
+multi|multipt_in|true|true|true|true|true|true
+multi|multipt_mix|false|false|true|true|false|false
+multi|outside|false|false|false|false|false|false
+multi|overlap|true|true|true|true|true|true
+multi|srid|ERR:contains: Operation on mixed SRID geometries (MultiPolygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (MultiPolygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (MultiPolygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (MultiPolygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (MultiPolygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (MultiPolygon, 0)
+multi|vertex|false|true|true|true|false|true
+multi|z_pt|true|true|true|true|true|true
+multi_disj|edge|false|false|false|false|false|false
+multi_disj|empty|false|false|false|false|false|false
+multi_disj|hole_edge|false|false|false|false|false|false
+multi_disj|hole_in|false|false|false|false|false|false
+multi_disj|hole_vertex|true|true|true|true|true|true
+multi_disj|inside|false|false|false|false|false|false
+multi_disj|line|true|true|true|true|true|true
+multi_disj|multipt_in|false|false|true|true|false|false
+multi_disj|multipt_mix|false|false|false|false|false|false
+multi_disj|outside|false|false|false|false|false|false
+multi_disj|overlap|true|true|true|true|true|true
+multi_disj|srid|ERR:contains: Operation on mixed SRID geometries (MultiPolygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (MultiPolygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (MultiPolygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (MultiPolygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (MultiPolygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (MultiPolygon, 0)
+multi_disj|vertex|false|true|true|true|false|true
+multi_disj|z_pt|false|false|false|false|false|false
+square|edge|false|true|true|true|false|true
+square|empty|false|false|false|false|false|false
+square|hole_edge|true|true|true|true|true|true
+square|hole_in|true|true|true|true|true|true
+square|hole_vertex|true|true|true|true|true|true
+square|inside|true|true|true|true|true|true
+square|line|true|true|true|true|true|true
+square|multipt_in|true|true|true|true|true|true
+square|multipt_mix|false|false|true|true|false|false
+square|outside|false|false|false|false|false|false
+square|overlap|true|true|true|true|true|true
+square|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+square|vertex|false|true|true|true|false|true
+square|z_pt|true|true|true|true|true|true
+srid|edge|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|empty|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|false|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|hole_edge|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|hole_in|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|hole_vertex|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|inside|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|line|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (LineString, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (LineString, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (LineString, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (LineString, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (LineString, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (LineString, 0) != (Polygon, 4326)
+srid|multipt_in|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (MultiPoint, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (MultiPoint, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (MultiPoint, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (MultiPoint, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (MultiPoint, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (MultiPoint, 0) != (Polygon, 4326)
+srid|multipt_mix|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (MultiPoint, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (MultiPoint, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (MultiPoint, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (MultiPoint, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (MultiPoint, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (MultiPoint, 0) != (Polygon, 4326)
+srid|outside|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|overlap|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|srid|true|true|true|true|true|true
+srid|vertex|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+srid|z_pt|ERR:contains: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:covers: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 4326) != (Point, 0)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:within: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)|ERR:coveredby: Operation on mixed SRID geometries (Point, 0) != (Polygon, 4326)
+z_square|edge|false|true|true|true|false|true
+z_square|empty|false|false|false|false|false|false
+z_square|hole_edge|true|true|true|true|true|true
+z_square|hole_in|true|true|true|true|true|true
+z_square|hole_vertex|true|true|true|true|true|true
+z_square|inside|true|true|true|true|true|true
+z_square|line|true|true|true|true|true|true
+z_square|multipt_in|true|true|true|true|true|true
+z_square|multipt_mix|false|false|true|true|false|false
+z_square|outside|false|false|false|false|false|false
+z_square|overlap|true|true|true|true|true|true
+z_square|srid|ERR:contains: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:covers: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Polygon, 0) != (Point, 4326)|ERR:ST_Intersects: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:within: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)|ERR:coveredby: Operation on mixed SRID geometries (Point, 4326) != (Polygon, 0)
+z_square|vertex|false|true|true|true|false|true
+z_square|z_pt|true|true|true|true|true|true

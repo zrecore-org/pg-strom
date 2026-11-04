@@ -1261,6 +1261,18 @@ classify_geometry(const char *name)
 		{ fc.cls = SOP_GEOMBOX; fc.kind = SOP_GBOX_CONTAINS; }
 	else if (!strcmp(name, "geometry_within"))
 		{ fc.cls = SOP_GEOMBOX; fc.kind = SOP_GBOX_WITHIN; }
+	/* a point in a (multi)polygon: the operand order is the kind, the planner checks the argument shapes (codegen.c) */
+	else if (!strcmp(name, "st_contains") || !strcmp(name, "st_covers"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_POLY_POINT; }
+	else if (!strcmp(name, "st_within") || !strcmp(name, "st_coveredby"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_POINT_POLY; }
+	else if (!strcmp(name, "st_intersects"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_EITHER; }
+	/* st_makepoint(x, y), st_point(x, y): only as the point of the above (fused); st_setsrid(point, const) likewise */
+	else if (!strcmp(name, "st_makepoint2") || !strcmp(name, "st_point"))
+		{ fc.cls = SOP_GEOMMK; fc.kind = 0; }
+	else if (!strcmp(name, "st_setsrid"))
+		{ fc.cls = SOP_GEOMMK; fc.kind = 1; }
 	return fc;
 }
 

@@ -1515,6 +1515,284 @@ uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg re
     return 0u;
 }
 
+// A point in a (multi)polygon (GEOMPIP), the same algorithm as geom_pip() of cpu_vm.c: the non-zero winding number,
+// every edge's side of the point decided on the software binary64 only when its sign is beyond the error bound of the
+// orientation test (Shewchuk's (3 + 16 eps) eps with a safety factor of 5 = 2^-49); the doubtful (a point on an edge or
+// a vertex, too close, overflow, non-finite) is PIP_UNSURE and the backend evaluates the row.
+#define PIP_OUT     0u
+#define PIP_IN      1u
+#define PIP_UNSURE  2u
+#define PIP_ERRBOUND 0x3CE0000000000000ull
+
+uint64_t ld64s(uint src, uint o)
+{
+    return uint64_t(ldw_s(src, o)) | (uint64_t(ldw_s(src, o + 4u)) << 32);
+}
+bool f64_nonfinite(uint64_t a) { return (a & F64_MAG) >= F64_INF; }
+
+// the winding number of a ring of n points at off (16 bytes each) around (px, py)
+uint pip_ring(uint src, uint off, uint n, uint64_t px, uint64_t py)
+{
+    if (n < 4u)
+        return PIP_UNSURE;
+    int wn = 0;
+    uint64_t x1 = ld64s(src, off);
+    uint64_t y1 = ld64s(src, off + 8u);
+    if (f64_nonfinite(x1) || f64_nonfinite(y1))
+        return PIP_UNSURE;
+    for (uint i = 1u; i < n; i++)
+    {
+        uint64_t x2 = ld64s(src, off + 16u * i);
+        uint64_t y2 = ld64s(src, off + 16u * i + 8u);
+        if (f64_nonfinite(x2) || f64_nonfinite(y2))
+            return PIP_UNSURE;
+        if (f64_eq(y1, y2))
+        {
+            // horizontal (or zero-length, ignored): only a point on it matters, and that is the boundary
+            if (!f64_eq(x1, x2) && f64_eq(py, y1))
+            {
+                bool inside = f64_le(x1, x2) ? (f64_le(x1, px) && f64_le(px, x2)) : (f64_le(x2, px) && f64_le(px, x1));
+                if (inside)
+                    return PIP_UNSURE;
+            }
+        }
+        else
+        {
+            uint64_t ymin = f64_lt(y1, y2) ? y1 : y2;
+            uint64_t ymax = f64_lt(y1, y2) ? y2 : y1;
+            if (!(f64_lt(py, ymin) || f64_gt(py, ymax)))
+            {
+                uint64_t l = f64_mul(f64_sub(px, x1), f64_sub(y2, y1));
+                uint64_t r = f64_mul(f64_sub(x2, x1), f64_sub(py, y1));
+                uint64_t det = f64_sub(r, l);           // cross(b - a, p - a): > 0 when p is left of a -> b
+                uint64_t s = f64_add(l & F64_MAG, r & F64_MAG);
+                uint e = uint((s >> 52) & 0x7ffu);
+                // the bound holds for finite, non-subnormal terms; s = 0: the point is on the line through a vertex
+                if (e < 0x080u || e > 0x7f0u)
+                    return PIP_UNSURE;
+                if (!f64_gt(det & F64_MAG, f64_mul(s, PIP_ERRBOUND)))
+                    return PIP_UNSURE;
+                if (f64_le(y1, py) && f64_lt(py, y2))
+                {
+                    if ((det & F64_SIGN) == 0ull)
+                        wn++;
+                }
+                else if (f64_le(y2, py) && f64_lt(py, y1))
+                {
+                    if ((det & F64_SIGN) != 0ull)
+                        wn--;
+                }
+            }
+        }
+        x1 = x2;
+        y1 = y2;
+    }
+    return wn != 0 ? PIP_IN : PIP_OUT;
+}
+
+// the polygon whose type word is at pos: the result; pnext = the offset after it (0: malformed)
+uint pip_polygon(uint src, uint base, uint len, uint pos, uint64_t px, uint64_t py, out uint pnext)
+{
+    pnext = 0u;
+    if (pos + 8u > len || ldw_s(src, base + pos) != 3u)
+        return PIP_UNSURE;
+    uint nrings = ldw_s(src, base + pos + 4u);
+    if (nrings > (len - pos - 8u) / 4u)
+        return PIP_UNSURE;
+    uint off = pos + 8u + 4u * nrings + ((nrings & 1u) != 0u ? 4u : 0u);
+    if (off > len)
+        return PIP_UNSURE;
+    uint res = PIP_OUT;
+    for (uint r = 0u; r < nrings; r++)
+    {
+        uint n = ldw_s(src, base + pos + 8u + 4u * r);
+        if (n > (len - off) / 16u)
+            return PIP_UNSURE;
+        if (res != PIP_UNSURE && (r == 0u || res == PIP_IN))
+        {
+            uint rr = pip_ring(src, base + off, n, px, py);
+            if (rr == PIP_UNSURE)
+                res = PIP_UNSURE;
+            else if (r == 0u)
+                res = rr;
+            else if (rr == PIP_IN)
+                res = PIP_OUT;                          // in a hole
+        }
+        off += 16u * n;
+    }
+    pnext = off;
+    return res;
+}
+
+struct GHead
+{
+    uint bad;       // 1: not decidable here
+    uint gtype;
+    uint srid;
+    uint pos;       // the offset of the type word
+    uint flags;
+};
+
+GHead geom_head(uint src, uint base, uint len)
+{
+    GHead h;
+    h.bad = 1u;
+    h.gtype = 0u;
+    h.srid = 0u;
+    h.pos = 0u;
+    h.flags = 0u;
+    if (len < 12u)
+        return h;
+    uint b0 = ldb_s(src, base);
+    uint gflags = ldb_s(src, base + 3u);
+    if ((b0 & 0xe0u) != 0u)
+        return h;
+    h.srid = ((b0 & 0x1fu) << 16) | (ldb_s(src, base + 1u) << 8) | ldb_s(src, base + 2u);
+    uint o = 4u;
+    if ((gflags & 0x40u) != 0u && (gflags & 0x10u) != 0u)
+        o += 8u;
+    h.flags = gflags;
+    if (o + 8u > len)
+        return h;
+    if ((gflags & 0x04u) != 0u)
+    {
+        if ((gflags & 0x03u) != 0u)
+            return h;                                   // a Z or M box has more floats: not handled
+        o += 16u;
+        if (o + 8u > len)
+            return h;
+    }
+    h.pos = o;
+    h.gtype = ldw_s(src, base + o);
+    h.bad = 0u;
+    return h;
+}
+
+// Returns 0 (res set), or SOP_RECHECK_CODE. a: the polygon register; b: the point register, or with SOP_GPIP_FUSED
+// the float8 x (xv) and y (yv) of a point with SRID fsrid.
+uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    Reg y = regs[rb];
+    bool fused = (k0 & SOP_GPIP_FUSED) != 0u;
+    uint yreg = k1 & 0xffu;
+    if ((x.isnull | y.isnull) != 0u || (fused && regs[yreg].isnull != 0u))
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint sa = str_src(x);
+    uint ba = str_off(x);
+    uint la = str_len(x);
+    uint sb = str_src(y);
+    uint bb = str_off(y);
+    uint lb = str_len(y);
+    GHead ha = geom_head(sa, ba, la);
+    GHead hb;
+    uint64_t px = uint64_t(y.v);
+    uint64_t py = uint64_t(regs[yreg].v);
+    if (ha.bad != 0u)
+        return SOP_RECHECK_CODE;
+    if (fused)
+    {
+        hb.bad = 0u;
+        hb.gtype = 1u;
+        hb.srid = k1 >> 8;
+        hb.pos = 0u;
+        hb.flags = 0u;
+    }
+    else
+    {
+        hb = geom_head(sb, bb, lb);
+        if (hb.bad != 0u)
+            return SOP_RECHECK_CODE;
+        if ((k0 & SOP_GPIP_SYMM) != 0u && ha.gtype == 1u && (hb.gtype == 3u || hb.gtype == 6u))
+        {
+            GHead th = ha; ha = hb; hb = th;
+            uint t;
+            t = sa; sa = sb; sb = t;
+            t = ba; ba = bb; bb = t;
+            t = la; la = lb; lb = t;
+        }
+    }
+    if ((ha.gtype != 3u && ha.gtype != 6u) || hb.gtype != 1u)
+        return SOP_RECHECK_CODE;
+    if (ha.srid != hb.srid)
+        return SOP_RECHECK_CODE;                        // PostGIS raises "mixed SRID": the backend does
+    if ((ha.flags & 0x0bu) != 0u)
+        return SOP_RECHECK_CODE;                        // Z, M or geodetic polygon
+    bool empty = false;
+    if (!fused)
+    {
+        if ((hb.flags & 0x0cu) != 0u || hb.pos + 8u > lb)
+            return SOP_RECHECK_CODE;
+        uint npts = ldw_s(sb, bb + hb.pos + 4u);
+        if (npts == 0u)
+            empty = true;
+        else
+        {
+            if (npts != 1u || hb.pos + 8u + 16u > lb)
+                return SOP_RECHECK_CODE;
+            px = ld64s(sb, bb + hb.pos + 8u);
+            py = ld64s(sb, bb + hb.pos + 16u);
+        }
+    }
+    bool res = false;
+    if (!empty)
+    {
+        if (f64_nonfinite(px) || f64_nonfinite(py))
+            return SOP_RECHECK_CODE;
+        bool outside_box = false;
+        if ((ha.flags & 0x04u) != 0u)
+        {
+            // the cached float box is rounded outward: a point beyond it is outside
+            uint bo = ba + ha.pos - 16u;
+            uint bx0 = ldw_s(sa, bo);
+            uint bx1 = ldw_s(sa, bo + 4u);
+            uint by0 = ldw_s(sa, bo + 8u);
+            uint by1 = ldw_s(sa, bo + 12u);
+            if ((bx0 & 0x7fffffffu) <= 0x7f800000u && (bx1 & 0x7fffffffu) <= 0x7f800000u &&
+                (by0 & 0x7fffffffu) <= 0x7f800000u && (by1 & 0x7fffffffu) <= 0x7f800000u &&
+                (f64_lt(px, f64_from_f32(bx0)) || f64_gt(px, f64_from_f32(bx1)) ||
+                 f64_lt(py, f64_from_f32(by0)) || f64_gt(py, f64_from_f32(by1))))
+                outside_box = true;
+        }
+        if (!outside_box)
+        {
+            uint rr = PIP_OUT;
+            uint nx;
+            if (ha.gtype == 3u)
+                rr = pip_polygon(sa, ba, la, ha.pos, px, py, nx);
+            else
+            {
+                if (ha.pos + 8u > la)
+                    return SOP_RECHECK_CODE;
+                uint ng = ldw_s(sa, ba + ha.pos + 4u);
+                uint o = ha.pos + 8u;
+                // PostGIS: the first polygon the point is not outside of decides (inside, or on its boundary)
+                for (uint i = 0u; i < ng; i++)
+                {
+                    uint r1 = pip_polygon(sa, ba, la, o, px, py, nx);
+                    if (nx == 0u)
+                        return SOP_RECHECK_CODE;
+                    if (r1 != PIP_OUT)
+                    {
+                        rr = r1;
+                        break;
+                    }
+                    o = nx;
+                }
+            }
+            if (rr == PIP_UNSURE)
+                return SOP_RECHECK_CODE;
+            res = (rr == PIP_IN);
+        }
+    }
+    regs[dst].isnull = 0u;
+    regs[dst].v = b2l(res);
+    return 0u;
+}
+
 uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     switch (op)
@@ -1707,6 +1985,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_f8(op, dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMBOX)
             return vm_geom(op, dst, ra, rb, k0, k1, regs);
+        if (op == SOP_GEOMPIP)
+            return vm_geom_pip(dst, ra, rb, k0, k1, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;

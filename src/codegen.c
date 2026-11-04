@@ -1659,6 +1659,13 @@ __appendKernExpMagicAndLength(StringInfo buf, int head_pos)
  */
 static bool codegen_jsonb_const_ok = false;
 
+/*
+ * A11: st_makepoint(x, y) / st_point(x, y) and st_setsrid(point, srid) have no register in the scan VM; the point of a
+ * point-in-polygon function (st_contains ...) is built from them in the program (GEOMPIP, fused). The shape is checked
+ * by vulkan_geom_pip_args_ok(); this lets exactly those functions through while their arguments are generated.
+ */
+static bool codegen_geom_mk_ok = false;
+
 static int
 codegen_const_expression(codegen_context *context,
 						 StringInfo buf, int curr_depth,
@@ -1874,6 +1881,108 @@ codegen_var_expression(codegen_context *context,
 }
 
 /*
+ * A11: the geometry predicates hand the rows they cannot decide (a point on an edge, a geometry the kernel does not
+ * read) back to the backend, which re-evaluates them from the heap tuple. An Arrow_Fdw table and a GPU-Cache have no
+ * such path (a recheck there would be an error, and a geometry column cannot be cached or read from Arrow), so a scan
+ * of either keeps these predicates on the CPU.
+ */
+static bool
+vulkan_geom_source_ok(codegen_context *context)
+{
+	PlannerInfo *root = context->root;
+	RelOptInfo *rel;
+
+	if (!root || context->base_relid == 0 || context->base_relid >= root->simple_rel_array_size)
+		return true;
+	rel = root->simple_rel_array[context->base_relid];
+	if (!rel)
+		return true;
+	return !(baseRelIsArrowFdw(rel) || baseRelHasGpuCache(root, rel));
+}
+
+/*
+ * A11: the point of a point-in-polygon function. 1: st_makepoint(x, y) / st_point(x, y), optionally under
+ * st_setsrid(., constant 0 .. 999999) (fused: the program takes x and y from registers, the SRID from the instruction);
+ * 0: a geometry column, parameter or a constant a string register can hold; -1: anything else.
+ */
+static int
+vulkan_geom_operand_shape(Expr *arg)
+{
+	if (IsA(arg, Var))
+		return 0;
+	if (IsA(arg, Param))
+		return (((Param *) arg)->paramkind == PARAM_EXTERN ? 0 : -1);
+	if (IsA(arg, Const))
+	{
+		Const	   *con = (Const *) arg;
+
+		if (con->constisnull ||
+			VARATT_IS_EXTERNAL(DatumGetPointer(con->constvalue)) ||
+			VARATT_IS_COMPRESSED(DatumGetPointer(con->constvalue)))
+			return -1;
+		return 0;
+	}
+	if (IsA(arg, FuncExpr))
+	{
+		FuncExpr   *fe = (FuncExpr *) arg;
+		devfunc_info *dfunc = pgstrom_devfunc_lookup(fe->funcid, fe->args, fe->inputcollid);
+		scan_func_class fc;
+
+		if (!dfunc)
+			return -1;
+		fc = scan_vm_classify_func(dfunc->func_code);
+		if (fc.cls != SOP_GEOMMK || list_length(fe->args) != 2)
+			return -1;
+		if (fc.kind == 0)
+			return 1;
+		/* st_setsrid(st_makepoint(x, y), constant) */
+		{
+			Expr	   *inner = linitial(fe->args);
+			Expr	   *srid = lsecond(fe->args);
+
+			if (!IsA(srid, Const) || ((Const *) srid)->constisnull ||
+				DatumGetInt32(((Const *) srid)->constvalue) < 0 ||
+				DatumGetInt32(((Const *) srid)->constvalue) > 999999)
+				return -1;
+			if (!IsA(inner, FuncExpr))
+				return -1;
+			dfunc = pgstrom_devfunc_lookup(((FuncExpr *) inner)->funcid, ((FuncExpr *) inner)->args,
+										   ((FuncExpr *) inner)->inputcollid);
+			if (!dfunc)
+				return -1;
+			fc = scan_vm_classify_func(dfunc->func_code);
+			if (fc.cls != SOP_GEOMMK || fc.kind != 0 || list_length(((FuncExpr *) inner)->args) != 2)
+				return -1;
+			return 1;
+		}
+	}
+	return -1;
+}
+
+/*
+ * A11: both operands of st_contains / st_covers / st_within / st_coveredby / st_intersects are shapes the GEOMPIP
+ * instruction takes, and a fused point sits where the point goes (the program builder relies on it: a refused
+ * program has no CPU fallback).
+ */
+static bool
+vulkan_geom_pip_args_ok(scan_func_class fc, List *func_args)
+{
+	int			s0, s1;
+
+	if (list_length(func_args) != 2)
+		return false;
+	s0 = vulkan_geom_operand_shape(linitial(func_args));
+	s1 = vulkan_geom_operand_shape(lsecond(func_args));
+	if (s0 < 0 || s1 < 0 || (s0 && s1))
+		return false;
+	if (fc.kind == SOP_GPIP_POLY_POINT && s0)
+		return false;
+	if (fc.kind == SOP_GPIP_POINT_POLY && s1)
+		return false;
+	return true;
+}
+
+/*
  * Vulkan service: when may a text function run on the GPU? Equality compares bytes, which is what
  * the database does for every deterministic collation; the ordering operators are LOCALE_AWARE and
  * need the C collation (checked by the function lookup). LIKE is limited to a constant pattern that is
@@ -1888,8 +1997,13 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 	scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
 	/* PostGIS (A11): the geometry operators read a string register; a join program loads none */
-	if (fc.cls == SOP_GEOMBOX && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	if ((fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMMK) &&
+		((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN || !vulkan_geom_source_ok(context)))
 		return false;
+	if (fc.cls == SOP_GEOMPIP)
+		return vulkan_geom_pip_args_ok(fc, func_args);
+	if (fc.cls == SOP_GEOMMK)
+		return codegen_geom_mk_ok;
 	/* numeric: not in a join program (its registers are not loaded there) */
 	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
 	{
@@ -1993,6 +2107,7 @@ __codegen_func_expression(codegen_context *context,
 	uint32_t		stack_usage_max = stack_usage_saved;
 	ListCell	   *lc;
 	bool			jb_const_saved;
+	bool			geom_mk_saved;
 
 	dfunc = pgstrom_devfunc_lookup(func_oid, func_args, func_collid);
 	if (!dfunc ||
@@ -2017,6 +2132,13 @@ __codegen_func_expression(codegen_context *context,
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	jb_const_saved = codegen_jsonb_const_ok;
 	codegen_jsonb_const_ok = (dfunc->func_code == FuncOpCode__jsonb_contains);
+	geom_mk_saved = codegen_geom_mk_ok;
+	{
+		scan_func_class gfc = scan_vm_classify_func(dfunc->func_code);
+
+		/* the arguments of a point-in-polygon function may be the fused point; those of st_setsrid, its st_makepoint */
+		codegen_geom_mk_ok = (gfc.cls == SOP_GEOMPIP || (gfc.cls == SOP_GEOMMK && gfc.kind == 1));
+	}
 	foreach (lc, func_args)
 	{
 		Expr   *arg = lfirst(lc);
@@ -2024,12 +2146,14 @@ __codegen_func_expression(codegen_context *context,
 		if (codegen_expression_walker(context, buf, curr_depth, arg) < 0)
 		{
 			codegen_jsonb_const_ok = jb_const_saved;
+			codegen_geom_mk_ok = geom_mk_saved;
 			return -1;
 		}
 		stack_usage_max = Max(stack_usage_max, context->stack_usage);
 		context->stack_usage = stack_usage_saved;
 	}
 	codegen_jsonb_const_ok = jb_const_saved;
+	codegen_geom_mk_ok = geom_mk_saved;
 	context->stack_usage = stack_usage_max;
 	if ((dfunc->func_flags & DEVFUNC__HAS_RECURSION) != 0)
 		context->stack_usage += XPUCODE_STACK_USAGE_RECURSIVE;
@@ -4986,6 +5110,61 @@ pgstrom_numeric_static_dscale(Node *node)
 			break;
 	}
 	return -1;
+}
+
+/*
+ * pgstrom_expr_has_geometry_func
+ *
+ * A11: does the expression call a PostGIS function that the Vulkan VM implements (&&, ~, @, st_contains ...)? Those
+ * predicates hand rows back to the backend, which an Arrow_Fdw table and a GPU-Cache cannot do (see
+ * vulkan_geom_source_ok()); the scan path asks this before it accepts a qualifier for such a relation, because the
+ * check pgstrom_xpu_expression() makes has no PlannerInfo.
+ */
+static bool
+geometry_func_walker(Node *node, void *context)
+{
+	Oid			funcid = InvalidOid;
+	List	   *args = NIL;
+	Oid			collid = InvalidOid;
+
+	if (node == NULL)
+		return false;
+	if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *fe = (FuncExpr *) node;
+
+		funcid = fe->funcid;
+		args = fe->args;
+		collid = fe->inputcollid;
+	}
+	else if (IsA(node, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *) node;
+
+		set_opfuncid(op);
+		funcid = op->opfuncid;
+		args = op->args;
+		collid = op->inputcollid;
+	}
+	if (OidIsValid(funcid))
+	{
+		devfunc_info *dfunc = pgstrom_devfunc_lookup(funcid, args, collid);
+
+		if (dfunc)
+		{
+			scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
+
+			if (fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMMK)
+				return true;
+		}
+	}
+	return expression_tree_walker(node, geometry_func_walker, context);
+}
+
+bool
+pgstrom_expr_has_geometry_func(Expr *expr)
+{
+	return geometry_func_walker((Node *) expr, NULL);
 }
 
 /*

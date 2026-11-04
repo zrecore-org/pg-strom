@@ -431,6 +431,18 @@ __gpuScanAddCustomPathOne(PlannerInfo *root,
 }
 
 /*
+ * A11: the geometry predicates hand the rows they cannot decide back to the backend, which an Arrow_Fdw table and a
+ * GPU-Cache have no way to take (codegen.c vulkan_geom_source_ok() refuses them again at plan creation).
+ */
+static bool
+gpuScanGeometryQualOk(PlannerInfo *root, RelOptInfo *baserel, Expr *clause)
+{
+	if (!pgstrom_expr_has_geometry_func(clause))
+		return true;
+	return !(baseRelIsArrowFdw(baserel) || baseRelHasGpuCache(root, baserel));
+}
+
+/*
  * __gpuScanAddCustomPath - main portion of GpuScanPath
  */
 static void
@@ -459,7 +471,8 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 								   DEVKIND__NVIDIA_GPU,
 								   baserel->relid,
 								   NIL,
-								   &devcost))
+								   &devcost) &&
+			gpuScanGeometryQualOk(root, baserel, rinfo->clause))
 		{
 			dev_quals = lappend(dev_quals, rinfo);
 			dev_costs = lappend_int(dev_costs, devcost);
@@ -484,7 +497,8 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 									   DEVKIND__NVIDIA_GPU,
 									   baserel->relid,
 									   NIL,
-									   &devcost))
+									   &devcost) &&
+				gpuScanGeometryQualOk(root, baserel, rinfo->clause))
 			{
 				dev_quals = lappend(dev_quals, rinfo);
 				dev_costs = lappend_int(dev_costs, devcost);
