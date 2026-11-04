@@ -37,6 +37,10 @@ on:
         description: "Run the GPU tests on a self-hosted Apple Silicon runner"
         type: boolean
         default: false
+      try_xlarge_runner:
+        description: "Probe for a Metal device on the GitHub-hosted macos-latest-xlarge runner (billed per minute)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -228,3 +232,60 @@ jobs:
         run: |
           sh test/gpuserv/locked_test.sh "$PWD" service_test.sh
           sh test/gpuserv/locked_test.sh "$PWD" scan_test.sh
+
+  macos-xlarge-probe:
+    # Experiment, manual dispatch only (a larger runner is billed per minute and needs a plan that has them): does the
+    # GitHub-hosted Apple silicon "xlarge" runner expose a Metal device to MoltenVK? The 2023 announcement says GPU
+    # acceleration is on by default; the current docs say Metal Performance Shaders are not supported in the
+    # virtualized runner. Nothing depends on this job; if the probe finds a device, the service test below runs.
+    name: macOS xlarge runner, Metal device probe (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.try_xlarge_runner
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: What the runner reports
+        run: |
+          sw_vers
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          system_profiler SPDisplaysDataType || true
+
+      - name: Install packages (Homebrew)
+        run: brew install postgresql@17 apache-arrow pkgconf molten-vk vulkan-loader vulkan-headers
+
+      - name: Install Slang ${{ env.SLANG_VERSION }}
+        run: |
+          D="$HOME/tools/slang-${SLANG_VERSION}"
+          mkdir -p "$D"
+          curl -fsSL -o /tmp/slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-aarch64.tar.gz"
+          echo "07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4  /tmp/slang.tar.gz" | shasum -a 256 -c -
+          tar -xzf /tmp/slang.tar.gz -C "$D"
+          SLANGC=$(find "$D" -type f -name slangc | head -n 1)
+          test -x "$SLANGC"
+          echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
+
+      - name: Build and install
+        run: |
+          PG_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config"
+          VKH="$(brew --prefix vulkan-headers)"
+          VKL="$(brew --prefix vulkan-loader)"
+          make -C src PG_CONFIG="$PG_CONFIG" WITH_GPUSERV=1 \
+            VK_CFLAGS="-I$VKH/include" \
+            VK_LIBS="-L$VKL/lib -lvulkan -Wl,-rpath,$VKL/lib" \
+            -j"$(sysctl -n hw.ncpu)" install
+
+      - name: Probe the Vulkan devices
+        id: probe
+        run: |
+          PKGLIB="$("$(brew --prefix postgresql@17)/bin/pg_config" --pkglibdir)"
+          "$PKGLIB/pgstrom-gpuserv" --probe
+
+      - name: Service lifecycle test on the Metal device
+        if: steps.probe.outcome == 'success'
+        run: |
+          PKGLIB="$("$(brew --prefix postgresql@17)/bin/pg_config" --pkglibdir)"
+          PGBIN="$(brew --prefix postgresql@17)/bin" GPUSERV_BIN="$PKGLIB/pgstrom-gpuserv" sh test/gpuserv/service_test.sh
