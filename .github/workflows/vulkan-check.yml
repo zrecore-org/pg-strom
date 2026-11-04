@@ -5,8 +5,10 @@ name: Vulkan Check
 #
 # What these jobs can and cannot show (read before trusting a green check):
 #   * linux-lavapipe: builds the module and pgstrom-gpuserv and runs the service lifecycle
-#     test and the GPU-versus-CPU differential test on lavapipe, Mesa's CPU implementation
-#     of Vulkan. There is NO GPU in a GitHub-hosted runner, so this checks the host code,
+#     test and a bounded GPU-versus-CPU differential test (float8 and GPU-Cache dev
+#     scripts on small tables) on lavapipe, Mesa's CPU implementation of Vulkan. The full
+#     scan_test.sh (about 2400 checks) does not fit a hosted runner: lavapipe needs 3 to 5
+#     minutes for each join-aggregate query, so it runs on the Apple Silicon machine only. There is NO GPU in a GitHub-hosted runner, so this checks the host code,
 #     the SPIR-V kernels' logic and the SQL results, not GPU behaviour or speed. Lavapipe
 #     reports the "desktop" capability tier, so the kernels run in a different tier than on
 #     Apple Silicon (the base tier).
@@ -36,6 +38,11 @@ on:
 
 permissions:
   contents: read
+
+# A newer push to the same ref replaces the run in progress (a lavapipe run is long).
+concurrency:
+  group: vulkan-check-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # Pinned Slang release; the sha256 values are the digests GitHub reports for the assets.
@@ -118,22 +125,35 @@ jobs:
           ALLOW_CPU: "on"
         run: sh test/gpuserv/service_test.sh
 
-      - name: GPU-versus-CPU differential test (lavapipe)
-        # How long this takes on a runner is not known; the first dispatch of each kernel
-        # is compiled by lavapipe's JIT, and the service allows 300 s for a dispatch on a
-        # CPU device (PGSTROM_GPUSERV_TIMEOUT_MS overrides).
+      # Bounded subset of the differential tests, on small tables (the full scan_test.sh is
+      # too slow on lavapipe, see the header). Each script compares the GPU path with
+      # pg_strom.enabled=off and exits non-zero on a difference.
+      - name: Differential test, float8 (lavapipe)
+        timeout-minutes: 30
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
           ALLOW_CPU: "on"
-        run: sh test/gpuserv/scan_test.sh
+          F8ROWS: "20000"
+        run: sh test/gpuserv/float8_dev.sh
+
+      - name: Differential test, GPU-Cache (lavapipe)
+        timeout-minutes: 30
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "on"
+          NROWS: "20000"
+        run: sh test/gpuserv/gpucache_dev.sh
 
       - name: Upload the PostgreSQL log of the failed test
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: pgstrom-test-logs-${{ matrix.arch }}
-          path: /tmp/pgstrom_scan_test/log
+          path: |
+            /tmp/f8_dev/log
+            /tmp/gc_dev/log
           if-no-files-found: ignore
 
   macos-build:
