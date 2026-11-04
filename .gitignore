@@ -14,3 +14,6 @@ arrow-tools/pg2arrow
 arrow-tools/arrow2csv
 arrow-tools/tsv2arrow
 arrow-tools/vcf2arrow
+
+# throwaway test clusters and datasets
+/test-data/
