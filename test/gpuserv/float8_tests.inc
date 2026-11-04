@@ -79,6 +79,25 @@ for t in f8_1 f8_2; do
 	runerr $t "float8 NaN -> int" "select z::int4 from %T where z = 'NaN'" "integer out of range"
 	runerr $t "float8 -> float4 overflow" "select z::float4 from %T where z = 1e300" "value out of range: overflow"
 	runerr $t "float8 -> float4 underflow" "select z::float4 from %T where z = 5e-324" "value out of range: underflow"
+	# math functions (sqrt, round = rint, ceil, ceiling, floor, trunc, sign): PostgreSQL's float.c, -0 kept except by sign
+	run $t "round, ceil, ceiling, floor, trunc, sign over every special value" "select i, round(z), ceil(z), ceiling(z), floor(z), trunc(z), sign(z) from %T where i % 3 = 1"
+	run $t "round, ceil, floor, trunc, sign over x and y (exact ties among y)" "select i, round(y), ceil(x), floor(y), trunc(x), sign(y), round(x), sign(x) from %T where i % 3 = 1"
+	run $t "sqrt of non-negative values (w, |x|, |z| with NaN and Infinity)" "select i, sqrt(w), sqrt(abs(x)), sqrt(abs(z)) from %T where i % 3 = 2"
+	run $t "sqrt(-0), sqrt(0), sqrt(Infinity), sqrt(NaN)" "select i, sqrt(z) from %T where z = 0 or z = 'Infinity' or z = 'NaN'"
+	run $t "math functions as quals" "select i from %T where round(y) = 3 or ceil(x) > 100 and floor(x) < 200 or sign(z) = -1 and trunc(z) = -2"
+	run $t "rounding to two decimals, a hypotenuse, ceil and floor of ratios" "select i, round(x * 100) / 100, sqrt(x * x + y * y), ceil(x / w), floor(y / w) from %T where i % 5 = 2"
+	run $t "rounded values cast to integers" "select i, round(y)::int4, ceil(x)::int8, trunc(x)::int4 from %T where abs(x) < 1e6 and x = x and i % 4 = 0"
+	run $t "ceil and floor next to float4 and integer columns" "select i, ceil(d::float8), floor(a::float8 / 7), round(b::float8 / 3) from %T where d = d and b is not null and d < 'Infinity' and d > '-Infinity' and i % 6 = 0"
+	# sqrt raises on a negative argument: the quals below must not, on either path, whatever order they are written in
+	run $t "guarded sqrt: x >= 0 and sqrt(x) > 20" "select i, x from %T where x >= 0 and sqrt(x) > 20"
+	run $t "guarded sqrt, written in the other order" "select i, x from %T where sqrt(x) > 20 and x >= 0"
+	run $t "x < 0 or sqrt(x) > 20" "select i, x from %T where x < 0 or sqrt(x) > 20"
+	run $t "sqrt in the projection of non-negative rows" "select i, sqrt(x), round(sqrt(x) * 10) from %T where x >= 0"
+	run $t "sqrt of a CASE-free guard through abs()" "select i, sqrt(abs(x) + 1) from %T where x < 0 and i % 9 = 0"
+	runerr $t "sqrt of a negative number" "select sqrt(x) from %T where x < 0" "cannot take square root of a negative number"
+	runerr $t "sqrt of -Infinity" "select sqrt(z) from %T where z = '-Infinity'" "cannot take square root of a negative number"
+	runerr $t "sqrt of the smallest negative number" "select sqrt(-z) from %T where z = 5e-324" "cannot take square root of a negative number"
+	runerr $t "sqrt of a negative number in a qual" "select i from %T where sqrt(x) > 1 and x < -5" "cannot take square root of a negative number"
 done
 
 # joins: the float8 columns of both sides, in a qual that needs both, in the projection and in a join aggregate
@@ -93,6 +112,7 @@ for t in f8_1 f8_2; do
 	runjoin $t "float8 qual on the inner side" "select t.i, d.grp from %T t join f8_dim d on t.b = d.k where d.v < -100.5 or d.u > 100"
 	runjoin $t "float8 arithmetic mixing both sides" "select t.i, t.x + d.v, d.u * t.y, t.x / (d.grp + 1), -d.v from %T t join f8_dim d on t.b = d.k where t.i % 3 = 0"
 	runjoin $t "float8 compare of a computed value across the join" "select t.i, d.grp from %T t join f8_dim d on t.b = d.k where t.x * 2 > d.v + d.u"
+	runjoin $t "math functions across the join" "select t.i, ceil(t.x), floor(d.v), sqrt(abs(d.u)), sign(t.y - d.v), round(t.x + d.v) from %T t join f8_dim d on t.b = d.k where t.i % 3 = 0"
 	runjoin $t "LEFT JOIN with a float8 column of the inner side" "select t.i, d.v, d.u from %T t left join f8_dim d on t.b = d.k where t.i % 11 = 4"
 	runjoin $t "aggregate over the join with a float8 qual" "select d.grp, count(*), sum(t.a) from %T t join f8_dim d on t.b = d.k where t.x > d.v group by 1 order by 1"
 	ANYPLAN=1
@@ -119,6 +139,9 @@ for t in f8_1 f8_2; do
 	runagg $t "aggregates with a qual" "select sum(w), min(x), max(y), avg(w) from %T where i % 7 = 1 and a > 0"
 	runagg $t "aggregates with FILTER" "select sum(w) filter (where i % 3 = 0), max(x) filter (where b > 0), min(y) filter (where a < 0), count(*) from %T"
 	runagg $t "aggregate of a computed float8 argument" "select sum(w * 2 + 1), max(x * 2.5 - y), min(w / 4) from %T where i % 5 = 2"
+	runagg $t "aggregates of math functions (integer-valued sums are exact in any order)" "select count(*), sum(round(x)), sum(ceil(y)), sum(floor(w)), sum(trunc(x)), max(sqrt(w)), min(sqrt(abs(y))), sum(sign(x)) from %T where x >= 0"
+	runagg $t "max of sqrt over non-negative rows" "select max(sqrt(x)), min(sqrt(x)), count(*) from %T where x >= 0"
+	runagg_any $t "max of sqrt with a FILTER that guards it (the argument is not evaluated for the rejected rows)" "select max(sqrt(x)) filter (where x >= 0), count(*) from %T"
 	runagg $t "no row qualifies (NULL results)" "select sum(w), min(x), max(y), avg(w), count(*) from %T where a > 30000"
 	runagg $t "float4: min, max, avg (double accumulation, exact)" "select min(d), max(d), avg(d), count(d) from %T"
 	runagg_any $t "sum(float4) stays on the CPU" "select sum(d) from %T where d > 1000 and d < 'Infinity'"

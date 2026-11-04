@@ -119,6 +119,16 @@ for t in gc1 gc2; do
 	gcrun_any $t "numeric in the projection" "select id, n * 2 from %T where a = 5"
 	gcrun $t "float8 qual" "select id, x from %T where x > 1000"
 	gcrun $t "float8 arithmetic and a cast" "select id, x * 2 + 1, x::int8 from %T where x < 500 and a = 7"
+	gcrun $t "float8 math functions (round, ceil, floor, trunc, sign, sqrt of abs)" "select id, round(x), ceil(x), floor(x), trunc(x), sign(x), sqrt(abs(x)) from %T where a = 7"
+	gcrun $t "guarded sqrt as a qual" "select id, x from %T where x >= 0 and sqrt(x) > 20"
+	gcagg $t "aggregates of math functions" "select count(*), sum(round(x)), max(ceil(x)), min(floor(x)), max(sqrt(abs(x))) from %T"
+	# the kernel's error reaches the user from the cache, with PostgreSQL's message
+	qry="select sqrt(-abs(x)) from $t where abs(x) > 1 and a = 7"
+	g=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
+	pl=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; explain $qry" 2>&1 | grep -c "GPU Cache:")
+	if [ "$pl" -ge 1 ] && echo "$g" | grep -q "cannot take square root of a negative number" && echo "$c" | grep -q "cannot take square root of a negative number"; then
+		echo "  ok    $t: sqrt of a negative number raises PostgreSQL's message (GPU-Cache)"
+	else echo "  FAIL  $t: sqrt of a negative number (plan GPU Cache=$pl)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 	gcrun_any $t "uuid qual" "select id from %T where u > '80000000-0000-0000-0000-000000000000'::uuid"
 	gcagg $t "count, sum, min, max, avg of int4 with NULLs" "select count(*), count(b), sum(b), min(b), max(b), avg(b) from %T"
 	gcagg $t "float8: count, min, max, and exact sum and avg" "select count(x), min(x), max(x), sum((a % 100)::float8), avg((a % 100)::float8) from %T"

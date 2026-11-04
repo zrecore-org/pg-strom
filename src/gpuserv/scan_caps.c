@@ -1188,6 +1188,13 @@ classify_float8(const char *name)
 	const char *rest = NULL;
 	int			k, w;
 
+	/* the math functions of float.c (A10): sqrt/round/trunc are the aliases dsqrt/dround/dtrunc, ceil/ceiling/floor/sign by name */
+	if (!strcmp(name, "dsqrt")) { fc.cls = SOP_DUNARY; fc.width = SOP_DUN_SQRT; return fc; }
+	if (!strcmp(name, "dround")) { fc.cls = SOP_DUNARY; fc.width = SOP_DUN_ROUND; return fc; }
+	if (!strcmp(name, "ceil") || !strcmp(name, "ceiling")) { fc.cls = SOP_DUNARY; fc.width = SOP_DUN_CEIL; return fc; }
+	if (!strcmp(name, "floor")) { fc.cls = SOP_DUNARY; fc.width = SOP_DUN_FLOOR; return fc; }
+	if (!strcmp(name, "dtrunc")) { fc.cls = SOP_DUNARY; fc.width = SOP_DUN_TRUNC; return fc; }
+	if (!strcmp(name, "sign")) { fc.cls = SOP_DUNARY; fc.width = SOP_DUN_SIGN; return fc; }
 	if (!strncmp(name, "float8", 6) && strncmp(name, "float84", 7) != 0 && strncmp(name, "float82", 7) != 0)
 		rest = name + 6;
 	else if (!strncmp(name, "float48", 7))

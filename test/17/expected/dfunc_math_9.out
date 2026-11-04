@@ -89,11 +89,11 @@ SELECT id, round(b), dround(c),
   INTO test02g
   FROM rt_data
  WHERE c BETWEEN -40 AND 120;
-                                              QUERY PLAN                                               
--------------------------------------------------------------------------------------------------------
+                                                                          QUERY PLAN                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
-   Output: id, round(b), dround(c), ceil(d), ceiling(d), floor(d), trunc(c), dtrunc(d)
-   GPU Projection: rt_data.id, rt_data.b, rt_data.c, rt_data.d
+   Output: id, (round(b)), (dround(c)), (ceil(d)), (ceiling(d)), (floor(d)), (trunc(c)), (dtrunc(d))
+   GPU Projection: rt_data.id, round(rt_data.b), dround(rt_data.c), ceil(rt_data.d), ceiling(rt_data.d), floor(rt_data.d), trunc(rt_data.c), dtrunc(rt_data.d)
    GPU Scan Quals: ((rt_data.c >= '-40'::double precision) AND (rt_data.c <= '120'::double precision))
 (4 rows)
 
@@ -167,11 +167,11 @@ SELECT id, sign(a), sqrt(@c), dsqrt(@d), cbrt(d), dcbrt(d)
   INTO test04g
   FROM rt_data
  WHERE d < 0;
-                             QUERY PLAN                              
----------------------------------------------------------------------
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dfunc_math_temp.rt_data
-   Output: id, sign(a), sqrt((@ c)), dsqrt((@ d)), cbrt(d), dcbrt(d)
-   GPU Projection: rt_data.id, rt_data.a, rt_data.c, rt_data.d
+   Output: id, (sign(a)), (sqrt((@ c))), (dsqrt((@ d))), cbrt(d), dcbrt(d)
+   GPU Projection: rt_data.id, sign(rt_data.a), sqrt((@ rt_data.c)), dsqrt((@ rt_data.d)), rt_data.d
    GPU Scan Quals: (rt_data.d < '0'::double precision)
 (4 rows)
 

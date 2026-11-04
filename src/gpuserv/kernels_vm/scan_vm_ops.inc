@@ -73,7 +73,9 @@
  *
  *   CMPD     dst = cmp(a, b) on float8; k0 = SCANVM_CMP_* (NaN equals NaN and sorts last, -0 = +0)
  *   DARITH   dst = a op b on float8; k0 = SCANVM_ARITH_PL/MI/MUL/DIV, k1 = error id (overflow, underflow, division by zero)
- *   DUNARY   dst = -a (k0 = 0) or abs(a) (k0 = 1)
+ *   DUNARY   dst = a float8 function of one argument, k0 = SCANVM_DUN_*: -a, abs, sqrt, round (rint: ties to even), ceil,
+ *            floor, trunc, sign (PostgreSQL's float.c: -0 stays -0 except in sign, which gives 0 for zero and NaN).
+ *            sqrt of a negative number (-infinity included, not -0 or NaN) is the error SCANVM_ERR_SQRTNEG, k1 = error id
  *   I2D      dst = (float8) a (an integer)
  *   D2I      dst = rint(a) as an integer of k0 bits (range checked, error id k1)
  *   F2D      dst = (float8) a (a float4, exact)
@@ -156,6 +158,15 @@ SCANVM_OP(GPIP_POINT_POLY,  1)
 SCANVM_OP(GPIP_EITHER,      2)
 SCANVM_OP(GPIP_FUSED,       1)
 SCANVM_OP(GPIP_SYMM,        2)
+/* DUNARY kinds (k0) */
+SCANVM_OP(DUN_NEG,   0)
+SCANVM_OP(DUN_ABS,   1)
+SCANVM_OP(DUN_SQRT,  2)
+SCANVM_OP(DUN_ROUND, 3)
+SCANVM_OP(DUN_CEIL,  4)
+SCANVM_OP(DUN_FLOOR, 5)
+SCANVM_OP(DUN_TRUNC, 6)
+SCANVM_OP(DUN_SIGN,  7)
 /* GEOMBOX kinds */
 SCANVM_OP(GBOX_OVERLAPS, 0)
 SCANVM_OP(GBOX_CONTAINS, 1)
@@ -184,6 +195,7 @@ SCANVM_OP(ERR_FLTUNDER, 4)
 SCANVM_OP(ERR_DATERANGE, 20)    /* date out of range */
 SCANVM_OP(ERR_TSRANGE,   21)    /* date out of range for timestamp */
 SCANVM_OP(ERR_INFSUB,    22)    /* cannot subtract infinite dates */
+SCANVM_OP(ERR_SQRTNEG,   23)    /* cannot take square root of a negative number */
 /* date arithmetic kinds */
 SCANVM_OP(DATEOP_PLI, 0)        /* date + int4 */
 SCANVM_OP(DATEOP_MII, 1)        /* date - int4 */

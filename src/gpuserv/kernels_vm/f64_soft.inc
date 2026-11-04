@@ -34,6 +34,7 @@ typedef uint32_t uint;
 #define F64_INF		0x7FF0000000000000ull
 #define F64_QNAN	0x7FF8000000000000ull
 #define F64_FRAC	0x000FFFFFFFFFFFFFull
+#define F64_E_SQRTNEG	23u		// error reason of f64_math_err: cannot take square root of a negative number (SCANVM_ERR_SQRTNEG)
 
 // number of leading zero bits of a non-zero 32-bit value
 F64S_FN uint f64s_clz32(uint x)
@@ -370,6 +371,74 @@ F64S_FN uint64_t f64_rint(uint64_t a)
 	if (rem > half || (rem == half && (m & one) != 0ull))
 		m += one;							// a carry into the exponent is correct on the bit pattern
 	return sgn | m;
+}
+
+// trunc(): drop the fraction, keep the sign (trunc(-0.7) = -0); NaN, infinity and |x| >= 2^52 are returned as they are
+F64S_FN uint64_t f64_trunc(uint64_t a)
+{
+	uint64_t mag = a & F64_MAG, sgn = a & F64_SIGN;
+	int u;
+
+	if (mag >= 0x4330000000000000ull)
+		return a;
+	if (mag < 0x3FF0000000000000ull)
+		return sgn;							// |x| < 1, zero and subnormals included
+	u = (int)(mag >> 52) - 1023;			// 0 .. 51
+	return sgn | (mag & ~((1ull << (uint)(52 - u)) - 1ull));
+}
+
+// ceil(): trunc, plus 1 for a positive value that had a fraction (ceil(-0.5) = -0)
+F64S_FN uint64_t f64_ceil(uint64_t a)
+{
+	uint64_t t = f64_trunc(a);
+
+	if (t != a && (a & F64_SIGN) == 0ull)
+		return f64_add(t, 0x3FF0000000000000ull);	// t < 2^52: exact
+	return t;
+}
+
+// floor(): trunc, minus 1 for a negative value that had a fraction (floor(-0) = -0)
+F64S_FN uint64_t f64_floor(uint64_t a)
+{
+	uint64_t t = f64_trunc(a);
+
+	if (t != a && (a & F64_SIGN) != 0ull)
+		return f64_sub(t, 0x3FF0000000000000ull);
+	return t;
+}
+
+// sign() as PostgreSQL's dsign(): 1, -1, or 0 for zero of either sign and for NaN (a comparison chain, not copysign)
+F64S_FN uint64_t f64_sign(uint64_t a)
+{
+	uint64_t mag = a & F64_MAG;
+
+	if (mag == 0ull || mag > F64_INF)
+		return 0ull;
+	return ((a & F64_SIGN) != 0ull) ? 0xBFF0000000000000ull : 0x3FF0000000000000ull;
+}
+
+// The float8 unary functions of the VM (DUNARY k0): 0 -x, 1 abs, 2 sqrt, 3 round (rint), 4 ceil, 5 floor, 6 trunc, 7 sign
+F64S_FN uint64_t f64_math(uint kind, uint64_t a)
+{
+	switch (kind)
+	{
+		case 0u: return a ^ F64_SIGN;
+		case 1u: return a & F64_MAG;
+		case 2u: return f64_sqrt(a);
+		case 3u: return f64_rint(a);
+		case 4u: return f64_ceil(a);
+		case 5u: return f64_floor(a);
+		case 6u: return f64_trunc(a);
+		default: return f64_sign(a);
+	}
+}
+
+// the error of f64_math: sqrt of a negative number (-0 and NaN are fine, -infinity is not); F64_E_SQRTNEG, else 0
+F64S_FN uint f64_math_err(uint kind, uint64_t a)
+{
+	if (kind == 2u && (a & F64_SIGN) != 0ull && (a & F64_MAG) != 0ull && (a & F64_MAG) <= F64_INF)
+		return F64_E_SQRTNEG;
+	return 0u;
 }
 
 // the value rint(a) is in [-2^63, 2^63) (false for NaN and infinity)

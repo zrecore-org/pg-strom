@@ -1531,8 +1531,13 @@ vm_run(const vm_env *env, const uint32_t *insn, uint32_t ip, uint32_t end, vm_re
 
 				regs[dst].isnull = x.isnull;
 				if (!x.isnull)
-					regs[dst].v = (int64_t) (k0 == 0 ? ((uint64_t) x.v ^ 0x8000000000000000ull)
-												 : ((uint64_t) x.v & 0x7fffffffffffffffull));
+				{
+					uint32_t	e = f64_math_err(k0, (uint64_t) x.v);
+
+					if (e != 0)
+						return k1 | (e << 16);
+					regs[dst].v = (int64_t) f64_math(k0, (uint64_t) x.v);
+				}
 				break;
 			}
 			case SOP_I2D:

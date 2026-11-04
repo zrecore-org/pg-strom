@@ -318,7 +318,14 @@ class Gen:
             return N("(-{0})", [self.expr("f4", d - 1)], "f4")
         if k < 0.9:
             return self.cast(self.expr(r.choice(INTS + (("num",) if self.allow else ())), d - 1), "float4")
-        return N("abs({0})", [self.expr("f4", d - 1)], "f4")
+        if r.random() < 0.5:
+            return N("abs({0})", [self.expr("f4", d - 1)], "f4")
+        # A10: the float8 math functions (sqrt only of an abs(): a negative argument raises on both paths, but the
+        # asymmetric-error rules would only tally it), applied to a widened float4 and narrowed back
+        fn = r.choice(["round", "ceil", "ceiling", "floor", "trunc", "sign", "sqrt_abs"])
+        inner = self.cast(self.expr("f4", d - 1), "float8")
+        e = N("sqrt(abs({0}))", [inner], "f8") if fn == "sqrt_abs" else N(fn + "({0})", [inner], "f8")
+        return self.cast(e, "float4")
 
     def g_f8(self, d):
         r = self.r

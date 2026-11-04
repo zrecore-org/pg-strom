@@ -403,6 +403,9 @@ describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_
 			case SOP_ERR_INFSUB:
 				what = "cannot subtract infinite dates";
 				break;
+			case SOP_ERR_SQRTNEG:
+				what = "cannot take square root of a negative number";
+				break;
 		}
 		snprintf(buf, buflen, "%s (in %s, block index %u, line pointer %u)",
 				 what, scan_vm_opcode_name(func), page, lp + 1);

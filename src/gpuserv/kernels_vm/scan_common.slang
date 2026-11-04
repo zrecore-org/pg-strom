@@ -1293,7 +1293,12 @@ uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs
     {
         regs[dst].isnull = x.isnull;
         if (x.isnull == 0)
-            regs[dst].v = int64_t((k0 == 0u) ? (uint64_t(x.v) ^ F64_SIGN) : (uint64_t(x.v) & F64_MAG));
+        {
+            uint e = f64_math_err(k0, uint64_t(x.v));
+            if (e != 0u)
+                return k1 | (e << 16);
+            regs[dst].v = int64_t(f64_math(k0, uint64_t(x.v)));
+        }
         return 0;
     }
     case SOP_I2D:

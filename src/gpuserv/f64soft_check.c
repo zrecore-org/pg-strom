@@ -50,6 +50,9 @@ static const uint64_t specials[] = {
 	0x0000000000000001ull, 0x8000000000000001ull, 0x3FF0000000000001ull, 0x3FEFFFFFFFFFFFFFull,
 	0x4330000000000000ull, 0x4340000000000000ull, 0x43E0000000000000ull, 0xC3E0000000000000ull,
 	0x3CA0000000000000ull, 0x3FF8000000000000ull, 0x4008000000000000ull, 0x36A0000000000000ull,
+	/* ties, the neighbours of 0.5 and of 2^52 (rint, ceil, floor, trunc, sign) */
+	0x3FDFFFFFFFFFFFFFull, 0xBFDFFFFFFFFFFFFFull, 0xBFE0000000000000ull, 0x4004000000000000ull, 0xC004000000000000ull,
+	0x432FFFFFFFFFFFFFull, 0xB32FFFFFFFFFFFFFull, 0x4330000000000001ull, 0xC330000000000001ull, 0xBFF8000000000000ull,
 };
 #define NSPECIAL (sizeof(specials) / sizeof(specials[0]))
 
@@ -198,6 +201,28 @@ static uint64_t h_gt(uint64_t a, uint64_t b, uint32_t m) { (void) m; return pg_g
 static uint64_t h_ge(uint64_t a, uint64_t b, uint32_t m) { (void) m; return pg_ge(u2d(a), u2d(b)); }
 
 static uint64_t s_rint(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_rint(a); }
+/* A10 math functions through the dispatcher the VM uses (f64_math kinds 4 ceil, 5 floor, 6 trunc, 7 sign) */
+static uint64_t s_ceil(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math(4u, a); }
+static uint64_t h_ceil(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return d2u(ceil(u2d(a))); }
+static uint64_t s_floor(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math(5u, a); }
+static uint64_t h_floor(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return d2u(floor(u2d(a))); }
+static uint64_t s_trunc(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math(6u, a); }
+static uint64_t h_trunc(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return d2u(trunc(u2d(a))); }
+static uint64_t s_sign(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math(7u, a); }
+/* PostgreSQL's dsign(): a comparison chain (zero of either sign and NaN give +0) */
+static uint64_t h_sign(uint64_t a, uint64_t b, uint32_t m)
+{
+	double x = u2d(a);
+
+	(void) b; (void) m;
+	return d2u(x > 0 ? 1.0 : (x < 0 ? -1.0 : 0.0));
+}
+/* the error of sqrt: PostgreSQL's dsqrt() raises for arg1 < 0 (not for -0 or NaN) */
+static uint64_t s_err_sqrt(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math_err(2u, a); }
+static uint64_t h_err_sqrt(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return u2d(a) < 0.0 ? 23 : 0; }
+/* the dispatcher agrees with the functions it names: sqrt (2) and rint (3) */
+static uint64_t s_math_sqrt(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math(2u, a); }
+static uint64_t s_math_rint(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_math(3u, a); }
 static uint64_t h_rint(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return d2u(rint(u2d(a))); }
 static uint64_t s_fits(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_fits_i64(a); }
 static uint64_t h_fits(uint64_t a, uint64_t b, uint32_t m)
@@ -293,10 +318,18 @@ static const f64op ops[] = {
 	{ "err_mul", s_err_mul, h_err_mul, 0, 0 },
 	{ "err_div", s_err_div, h_err_div, 0, 0 },
 	{ "err_to_f32", s_err_f32, h_err_f32, 0, 0 },
+	{ "ceil",   s_ceil,   h_ceil,   0, 0 },
+	{ "floor",  s_floor,  h_floor,  0, 0 },
+	{ "trunc",  s_trunc,  h_trunc,  0, 0 },
+	{ "sign",   s_sign,   h_sign,   0, 0 },
+	{ "err_sqrt", s_err_sqrt, h_err_sqrt, 0, 0 },
+	{ "math_sqrt", s_math_sqrt, h_sqrt, 0, 0 },
+	{ "math_rint", s_math_rint, h_rint, 0, 0 },
 };
 
 /* the error numbers of the library are those of the VM */
-_Static_assert(F64_E_ZERODIV == SOP_ERR_ZERODIV && F64_E_OVER == SOP_ERR_FLTOVER && F64_E_UNDER == SOP_ERR_FLTUNDER,
+_Static_assert(F64_E_ZERODIV == SOP_ERR_ZERODIV && F64_E_OVER == SOP_ERR_FLTOVER && F64_E_UNDER == SOP_ERR_FLTUNDER &&
+			   F64_E_SQRTNEG == SOP_ERR_SQRTNEG,
 			   "f64_soft.inc error numbers differ from scan_vm_ops.inc");
 #define NOPS ((int)(sizeof(ops) / sizeof(ops[0])))
 

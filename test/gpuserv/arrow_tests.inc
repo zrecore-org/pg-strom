@@ -208,6 +208,21 @@ for t in at1 at2; do
 	aagg $t "float8 (Arrow double): count, min, max with NaN and Infinity" "select count(x), min(x), max(x) from %T"
 	aagg $t "float8 (Arrow double): sum and avg of exact values" "select sum(x), avg(x), count(x) from %T where i % 20 = 6 or i % 20 = 7"
 	aagg $t "float8 aggregate of a computed value" "select max(x * 2 + 1), min(x - 1) from %T where i % 20 > 7"
+	run $t "float8 (Arrow double) math functions over every value" "select i, round(x), ceil(x), ceiling(x), floor(x), trunc(x), sign(x) from %T where i % 3 = 1"
+	run $t "float8 (Arrow double) sqrt of abs()" "select i, sqrt(abs(x)), round(sqrt(abs(x)) * 100) from %T where i % 3 = 0"
+	run $t "float8 (Arrow double) guarded sqrt as a qual" "select i, x from %T where x >= 0 and sqrt(x) > 3"
+	aagg $t "float8 (Arrow double): aggregates of math functions" "select count(*), sum(round(x)), max(ceil(x)), min(floor(x)), sum(sign(x)), max(sqrt(abs(x))) from %T where abs(x) < 1e9"
+	# an error from the kernel reaches the user from an Arrow table as from a heap table (there is no recheck path here)
+	qry="select sqrt(-abs(x)) from $t where abs(x) > 1 and abs(x) < 1e300 and i % 5 = 0"
+	g=$($PSQL -d scantest -c "$GPU $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
+	pl=$($PSQL -d scantest -c "$GPU explain $qry" 2>&1 | grep -c "Custom Scan (GpuScan)")
+	if [ "$pl" -ge 1 ] && echo "$g" | grep -q "cannot take square root of a negative number" && echo "$c" | grep -q "cannot take square root of a negative number"; then
+		echo "  ok    $t: sqrt of a negative number raises PostgreSQL's message (Arrow)"
+	elif [ "$ARROWANY" != 1 ] && [ "$t" != a2 ] && [ "$t" != at2 ]; then
+		echo "  FAIL  $t: sqrt of a negative number (plan GpuScan=$pl)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1))
+	else
+		echo "  ok    $t: sqrt of a negative number (small table: CPU plan, message checked: $(echo "$g" | grep -c "cannot take square root"))"
+	fi
 	run $t "float8 IS NULL and a float8 / int8 mix" "select i, x + v::float8 from %T where x is not null and v > 0 and i % 3 = 0 and abs(x) < 1e9"
 done
 adim=sd; adim2=sd2
