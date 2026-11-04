@@ -1,6 +1,9 @@
 # A10: float8 on the GPU (the kernel computes it in integer arithmetic, kernels_vm/f64_soft.inc). Sourced by
 # scan_test.sh and float8_dev.sh (they provide run, run_any, q, check, sql, $PSQL, $GPU, $CPU, $fail). New tables only (f8_*).
 echo "float8 (A10)"
+# F8PARTS (default: all) picks the sections that run: scan (heap scans, casts, errors, math functions), join, agg, joinagg. The CI job
+# runs "scan" only: on lavapipe every join and aggregate kernel is compiled by the CPU's JIT and the other sections need over an hour.
+f8part() { case " ${F8PARTS:-scan join agg joinagg} " in *" $1 "*) echo f8_1 f8_2;; esac; }
 F8ROWS=${F8ROWS:-200000}
 
 # x: ordinary values with NULLs; y: ordinary values (some exact ties of rint); w: positive divisors; z: every special
@@ -39,7 +42,7 @@ runerr() { # table, label, query-with-%T, text of the error
 	else echo "  FAIL  $tbl: $label (plan GpuScan=$plan, expected '$want')"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 
-for t in f8_1 f8_2; do
+for t in $(f8part scan); do
 	echo "table $t"
 	run $t "float8 compare with a constant" "select i, x from %T where x > 12.5"
 	run $t "float8 =, <>, <, <=, >=" "select i, x, y from %T where x = y or x <> y and x <= 3.25 or y >= 10 or y < -9.75"
@@ -105,7 +108,7 @@ sql "create table f8_dim as select (i * 3 - 50000)::int4 as k, (((i::int8 * 7919
 	case when i % 11 = 0 then null else (((i::int8 * 104729) % 1999 - 999) / 8.0)::float8 end as u, (i % 5)::int4 as grp
 	from generate_series(0, 40000) i"
 sql "analyze f8_dim"
-for t in f8_1 f8_2; do
+for t in $(f8part join); do
 	echo "join, table $t"
 	ANYPLAN=0
 	runjoin $t "float8 columns of both sides, compared in a join qual" "select t.i, d.v, t.x from %T t join f8_dim d on t.b = d.k where t.x > d.v"
@@ -129,7 +132,7 @@ runerr_agg() { # table, label, query-with-%T, text of the error: the plan must u
 	if [ "$plan" -ge 1 ] && echo "$g" | grep -q "$want" && echo "$c" | grep -q "$want"; then echo "  ok    $tbl: $label ($want)"
 	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan, expected '$want')"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
-for t in f8_1 f8_2; do
+for t in $(f8part agg); do
 	echo "aggregates, table $t"
 	runagg $t "count, sum, min, max, avg of exact values" "select count(*), count(w), sum(w), min(w), max(w), avg(w) from %T"
 	runagg $t "min, max of float8 with NULLs" "select min(x), max(x), min(y), max(y), count(x) from %T"
@@ -150,7 +153,7 @@ for t in f8_1 f8_2; do
 	runerr_agg $t "sum overflows" "select sum(z) from %T where z = 1.7976931348623157e308" "value out of range: overflow"
 done
 echo "join aggregates (float8, no GROUP BY)"
-for t in f8_1 f8_2; do
+for t in $(f8part joinagg); do
 	runagg $t "float8 aggregates over a join" "select sum(d.v), min(t.x), max(d.u), avg(d.v), count(*) from %T t join f8_dim d on t.b = d.k" "$JOINSET"
 	runagg $t "float8 aggregates over a join with a float8 qual and a FILTER" "select sum(d.v) filter (where d.grp < 3), max(t.y), min(d.u) from %T t join f8_dim d on t.b = d.k where t.x > d.v" "$JOINSET"
 	runagg $t "float8 aggregate of a computed value across the join" "select sum(d.v * 2 + d.u), max(t.x - d.v) from %T t join f8_dim d on t.b = d.k where t.i % 3 = 0" "$JOINSET"

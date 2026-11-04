@@ -137,6 +137,7 @@ jobs:
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
           ALLOW_CPU: "on"
           F8ROWS: "20000"
+          F8PARTS: scan
         run: sh test/gpuserv/float8_dev.sh
 
       - name: Differential test, GPU-Cache (lavapipe)
