@@ -49,40 +49,40 @@ uint ar_ld32(uint o)
 }
 uint64_t ar_ld64(uint o) { return uint64_t(ar_ld32(o)) | (uint64_t(ar_ld32(o + 4)) << 32); }
 
-// Load the columns of the program's column list for `row` of the record batch into the registers
-// their descriptors name (the caller has set every register to NULL). Columns that are NULL stay so.
-void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REGS])
+// Load column c (descriptor desc) of the program's column list for `row` of the record batch into the
+// register the descriptor names (the caller has set every register to NULL). A column that is NULL
+// stays so. arrow_load_row() calls it for every column; the specialized kernels call it with constant
+// c and desc (the body keeps the nesting it had inside the column loop).
+void arrow_load_col(uint c, uint desc, uint row, inout Reg regs[VM_MAX_REGS])
 {
-    for (uint c = 0; c < ncols; c++)
     {
-        uint desc = prog[coloff + c];
         uint slot = (desc >> 16) & 0xffu;
         if (slot == 0xffu)
-            continue;
+            return;
         uint vt = (desc >> 12) & 0xfu;
         uint t  = c * 8;
         uint mode = ptab[t + 4];
 
         if (mode == 1)
-            continue;                               // NULL in every row
+            return;                               // NULL in every row
         if (mode == 2)
         {
             regs[slot].v = int64_t(uint64_t(ptab[t + 5]) | (uint64_t(ptab[t + 6]) << 32));
             regs[slot].isnull = 0;
-            continue;
+            return;
         }
         uint noff = ptab[t + 0];
         if (noff != 0xffffffffu)
         {
             uint nbyte = row >> 3;
             if (nbyte >= ptab[t + 1] || ((ar_ld8(noff + nbyte) >> (row & 7u)) & 1u) == 0)
-                continue;                           // NULL
+                return;                           // NULL
         }
         if (vt == SOP_VT_NULLONLY)
         {
             regs[slot].v = 0;
             regs[slot].isnull = 0;
-            continue;
+            return;
         }
         uint voff = ptab[t + 2];
         uint w    = ptab[t + 3];
@@ -92,7 +92,7 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
             // utf8 / binary: offsets (w bytes each) into the string bytes
             uint64_t o1, o2;
             if ((uint64_t(row) + 2) * w > uint64_t(vlen))
-                continue;                           // short offsets buffer: NULL, as the CPU path
+                return;                           // short offsets buffer: NULL, as the CPU path
             if (w == 4)
             {
                 o1 = uint64_t(ar_ld32(voff + row * 4));
@@ -104,10 +104,10 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
                 o2 = ar_ld64(voff + row * 8 + 8);
             }
             if (o1 > o2 || o2 > uint64_t(ptab[t + 6]) || o2 - o1 > 0x0fffffffull)
-                continue;                           // corrupted: NULL, as the CPU path
+                return;                           // corrupted: NULL, as the CPU path
             regs[slot].v = int64_t(uint64_t(ptab[t + 5] + uint(o1)) | ((o2 - o1) << 32));
             regs[slot].isnull = 0;
-            continue;
+            return;
         }
         if (mode == 5)
         {
@@ -131,14 +131,14 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
         {
             // fixed-size string (char(n)): w bytes at row * w
             if ((uint64_t(row) + 1) * w > uint64_t(vlen))
-                continue;
+                return;
             regs[slot].v = int64_t(uint64_t(voff + row * w) | (uint64_t(w) << 32));
             regs[slot].isnull = 0;
-            continue;
+            return;
         }
         int64_t v = 0;
         if (w == 0 ? ((row >> 3) >= vlen) : ((uint64_t(row) + 1) * w > uint64_t(vlen)))
-            continue;                               // short buffer: NULL
+            return;                               // short buffer: NULL
         uint conv = ptab[t + 5];
         if (vt == SOP_VT_BOOL)
             v = int64_t((ar_ld8(voff + (row >> 3)) >> (row & 7u)) & 1u);
@@ -191,6 +191,14 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
         regs[slot].v = v;
         regs[slot].isnull = 0;
     }
+}
+
+// Load the columns of the program's column list for `row` of the record batch into the registers
+// their descriptors name (the caller has set every register to NULL). Columns that are NULL stay so.
+void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REGS])
+{
+    for (uint c = 0; c < ncols; c++)
+        arrow_load_col(c, prog[coloff + c], row, regs);
 }
 
 // Evaluate `row`: load the columns, run the qual part of the program and, for a qualifying row, the

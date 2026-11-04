@@ -33,6 +33,9 @@
 #include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
 #endif
 #include "join_common.inc"
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
 
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]

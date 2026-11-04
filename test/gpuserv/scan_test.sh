@@ -32,6 +32,11 @@ pg_strom.gpuserv_path = '$GPUSERV_BIN'
 pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
+# A6: every dispatch also runs the specialized kernel next to the VM's and compares them (spec_verify.c); a cache
+# directory of its own keeps the test from using (or filling) the user's; the log shows what the specializer did
+export PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check}
+export PGSTROM_GPUSERV_CACHE_DIR=${PGSTROM_GPUSERV_CACHE_DIR:-$ROOT/speccache}
+export PGSTROM_GPUSERV_SPEC_LOG=1
 export PGSTROM_GPUSERV_SORT=gpu		# GPU-Sort tests: the service sorts on the device whatever the row count
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
@@ -381,6 +386,7 @@ echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported
 . "${0%/*}/fuzz_regress.inc"
 . "${0%/*}/gpusort_tests.inc"
 . "${0%/*}/gpucache_tests.inc"
+. "${0%/*}/spec_tests.inc"
 
 echo "errors"
 for t in s1; do

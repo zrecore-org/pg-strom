@@ -34,6 +34,10 @@ groupshared uint    sh_n[AGG_MAX * SCAN_WG];
 groupshared int64_t sh_a[AGG_MAX * SCAN_WG];
 groupshared int64_t sh_b[AGG_MAX * SCAN_WG];
 
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
+
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]
 void jagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)

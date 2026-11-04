@@ -587,7 +587,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = int64_t(uint64_t(k0) | (uint64_t(k1) << 32));
         regs[dst].sc = rb;
         regs[dst].isnull = ra;
-        break;
+        return 0;
     case SOP_NUMCMP:
     {
         Reg x = regs[ra];
@@ -595,11 +595,11 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         regs[dst].isnull = 0;
         regs[dst].v = b2l(cmp_result(num_cmp(x.v, x.sc, y.v, y.sc), k0));
-        break;
+        return 0;
     }
     case SOP_NUMARITH:
     {
@@ -612,7 +612,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 regs[dst].v = (k0 == SOP_NUMOP_NEG || x.v < 0) ? -x.v : x.v;
                 regs[dst].sc = x.sc;
             }
-            break;
+            return 0;
         }
         if (k0 >= SOP_NUMOP_CEIL)
         {
@@ -624,13 +624,13 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 regs[dst].v = ur;
                 regs[dst].sc = 0;
             }
-            break;
+            return 0;
         }
         Reg y = regs[rb];
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         int64_t a = x.v;
         int64_t b = y.v;
@@ -671,7 +671,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = r;
         regs[dst].sc = sc;
         regs[dst].isnull = 0;
-        break;
+        return 0;
     }
     case SOP_NUMDIV:
     {
@@ -680,7 +680,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         int64_t qr;
         uint qsc;
@@ -690,7 +690,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = qr;
         regs[dst].sc = qsc;
         regs[dst].isnull = 0;
-        break;
+        return 0;
     }
     case SOP_NUMRND:
     {
@@ -699,7 +699,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         int64_t qr;
         uint qsc;
@@ -709,7 +709,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].v = qr;
         regs[dst].sc = qsc;
         regs[dst].isnull = 0;
-        break;
+        return 0;
     }
     case SOP_I2N:
     {
@@ -722,7 +722,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             regs[dst].v = x.v;
             regs[dst].sc = 0;
         }
-        break;
+        return 0;
     }
     case SOP_N2I:
     {
@@ -750,7 +750,7 @@ uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 return SOP_RECHECK_CODE;            // PostgreSQL's range error: the backend raises it
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
     default:
         return op | 0x80000000u;
@@ -1275,7 +1275,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 r = d * 86400000000;
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
     case SOP_TS2D:
     {
@@ -1297,7 +1297,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             }
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
     case SOP_DATEOP:
     {
@@ -1306,7 +1306,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         regs[dst].isnull = 0;
         bool ainf = (x.v == 2147483647 || x.v == -2147483648);
@@ -1325,13 +1325,13 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
                 return k1 | (SOP_ERR_DATERANGE << 16);
             regs[dst].v = r;
         }
-        break;
+        return 0;
     }
 
     case SOP_CONSTSTR:
         regs[dst].v = int64_t(uint64_t(prog[20] * 4u + k0) | (uint64_t(k1) << 32) | (uint64_t(3u) << 60));
         regs[dst].isnull = 0;
-        break;
+        return 0;
     case SOP_STRCMP:
     {
         Reg x = regs[ra];
@@ -1339,7 +1339,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         if (((uint64_t(x.v) | uint64_t(y.v)) >> 62) != 0ul)
             return SOP_RECHECK_CODE;            // a deferred text of ->> (a numeric or a container)
@@ -1362,7 +1362,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         }
         regs[dst].isnull = 0;
         regs[dst].v = b2l(cmp_result(c, k0));
-        break;
+        return 0;
     }
     case SOP_STRLIKE:
     {
@@ -1371,7 +1371,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if ((x.isnull | y.isnull) != 0)
         {
             regs[dst].isnull = 1;
-            break;
+            return 0;
         }
         if (((uint64_t(x.v) | uint64_t(y.v)) >> 62) != 0ul)
             return SOP_RECHECK_CODE;
@@ -1409,7 +1409,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             res = !res;
         regs[dst].isnull = 0;
         regs[dst].v = b2l(res);
-        break;
+        return 0;
     }
     case SOP_STRLEN:
     {
@@ -1430,7 +1430,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             }
             regs[dst].v = int64_t(n);
         }
-        break;
+        return 0;
     }
     default:
         if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
@@ -1471,26 +1471,27 @@ bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg r
     return true;
 }
 
-// Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
-uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
+// NOTE for vm_num(), vm_ext() and vm_step(): a case ends with "return 0;", not "break;". With constant
+// operands (the specialized kernels) Slang folds the switch, and a "break" in the middle of a case that sits
+// in a nested "if" came out of its SPIR-V structurizer as a fall-through (the code after the "if" ran for
+// the NULL branch too: `n1 = 12.34 or n1 = 0` counted the rows with a NULL n1). A "break" that leaves an
+// inner loop or switch (ARITH's switch on the operator, the loop of LIKE '%x%') is not affected and stays.
+// Executes one instruction { op, dst, ra, rb, k0, k1 }; AND / OR set ip to their jump target. Returns the
+// FuncOpCode of a failing function, 0 on success. vm_run() below interprets a program with it; the
+// specialized kernels (specialize.c) call it with constant operands, so the generated code runs
+// exactly the semantics of the VM. (The loop is only there to keep the body's nesting unchanged.)
+uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint ip,
+             inout Reg regs[VM_MAX_REGS])
 {
-    while (ip < end)
+    [loop]
+    while (true)
     {
-        uint ib  = insnoff + ip * INSN_WORDS;
-        uint op  = prog[ib + 0];
-        uint dst = prog[ib + 1];
-        uint ra  = prog[ib + 2];
-        uint rb  = prog[ib + 3];
-        uint k0  = prog[ib + 4];
-        uint k1  = prog[ib + 5];
-
-        ip++;
         switch (op)
         {
         case SOP_CONST:
             regs[dst].v = int64_t(uint64_t(k0) | (uint64_t(k1) << 32));
             regs[dst].isnull = ra;
-            break;
+            return 0;
 
         // three-valued AND / OR as accumulate-and-jump
         case SOP_AND:
@@ -1502,7 +1503,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 regs[dst].isnull = 0;
                 ip = rb;
             }
-            break;
+            return 0;
         case SOP_OR:
             if (regs[ra].isnull != 0)
                 regs[dst].isnull = 1;
@@ -1512,22 +1513,22 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 regs[dst].isnull = 0;
                 ip = rb;
             }
-            break;
+            return 0;
         case SOP_NOT:
             regs[dst].isnull = regs[ra].isnull;
             regs[dst].v = b2l(regs[ra].v == 0);
-            break;
+            return 0;
         case SOP_ISNULL:
             regs[dst].v = b2l(regs[ra].isnull != 0);
             regs[dst].isnull = 0;
-            break;
+            return 0;
         case SOP_ISNOTNULL:
             regs[dst].v = b2l(regs[ra].isnull == 0);
             regs[dst].isnull = 0;
-            break;
+            return 0;
         case SOP_MOV:
             regs[dst] = regs[ra];
-            break;
+            return 0;
 
         case SOP_CAST:
         {
@@ -1544,7 +1545,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                     regs[dst].v = x.v;
                 }
             }
-            break;
+            return 0;
         }
 
         case SOP_CMPI:
@@ -1558,7 +1559,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 regs[dst].isnull = 0;
                 regs[dst].v = b2l(cmp_result(x.v < y.v ? -1 : (x.v > y.v ? 1 : 0), k0));
             }
-            break;
+            return 0;
         }
 
         case SOP_CMPF:
@@ -1572,7 +1573,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 regs[dst].isnull = 0;
                 regs[dst].v = b2l(cmp_result(f4cmpbits(uint(x.v), uint(y.v)), k0));
             }
-            break;
+            return 0;
         }
 
         case SOP_ARITH:
@@ -1582,7 +1583,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             if ((x.isnull | y.isnull) != 0)
             {
                 regs[dst].isnull = 1;
-                break;
+                return 0;
             }
             uint    aop = k0 & 0xffu;
             uint    w   = k0 >> 8;
@@ -1666,7 +1667,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 return k1 | (why << 16);
             regs[dst].v = r;
             regs[dst].isnull = 0;
-            break;
+            return 0;
         }
 
         case SOP_FARITH:
@@ -1676,7 +1677,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             if ((x.isnull | y.isnull) != 0)
             {
                 regs[dst].isnull = 1;
-                break;
+                return 0;
             }
             // Metal flushes denormal floats to zero (operands and results), PostgreSQL does not: a row with a denormal
             // operand, or whose result may be denormal or underflow, is evaluated by the backend (exact, including
@@ -1728,13 +1729,13 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 return k1 | (why << 16);
             regs[dst].v = int64_t(asuint(r));
             regs[dst].isnull = 0;
-            break;
+            return 0;
         }
 
         case SOP_HASHINIT:
             regs[dst].v = int64_t(0xffffffffu);
             regs[dst].isnull = 0;
-            break;
+            return 0;
         case SOP_HASHMERGE:
             if (regs[ra].isnull == 0)
             {
@@ -1743,10 +1744,10 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                 uint acc = uint(regs[dst].v);
                 regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
             }
-            break;
+            return 0;
         case SOP_HASHFIN:
             regs[dst].v = int64_t(uint(regs[dst].v) ^ 0xffffffffu);
-            break;
+            return 0;
 
         case SOP_I2F:
         {
@@ -1754,7 +1755,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             regs[dst].isnull = x.isnull;
             if (x.isnull == 0)
                 regs[dst].v = int64_t(asuint(float(x.v)));
-            break;
+            return 0;
         }
 
         case SOP_F2I:
@@ -1777,7 +1778,7 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
                     return k1 | (SOP_ERR_INTRANGE << 16);
                 regs[dst].v = r;
             }
-            break;
+            return 0;
         }
 
         default:
@@ -1785,9 +1786,30 @@ uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
             uint e = vm_ext(op, dst, ra, rb, k0, k1, regs);
             if (e != 0)
                 return e;
-            break;
+            return 0;
         }
         }
+        return 0;
+    }
+}
+
+// Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
+uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
+{
+    while (ip < end)
+    {
+        uint ib  = insnoff + ip * INSN_WORDS;
+        uint op  = prog[ib + 0];
+        uint dst = prog[ib + 1];
+        uint ra  = prog[ib + 2];
+        uint rb  = prog[ib + 3];
+        uint k0  = prog[ib + 4];
+        uint k1  = prog[ib + 5];
+
+        ip++;
+        uint e = vm_step(op, dst, ra, rb, k0, k1, ip, regs);
+        if (e != 0)
+            return e;
     }
     return 0;
 }
@@ -1803,22 +1825,14 @@ void report_error(uint page, uint lp, uint err)
     }
 }
 
-// Deform the columns a program needs from the heap-format tuple at byte offset tbase of the
-// current source (g_src) into the registers named by the column descriptors at coloff. A join
-// inner tuple (kern_hashitem) has the layout of a heap tuple whose first 8 bytes are the chain
-// pointer, so the same code reads it. Returns false after report_error().
-bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
-                  inout Reg regs[VM_MAX_REGS])
+// Deform column c (descriptor desc) of the heap-format tuple at byte offset tbase of the current source
+// (g_src) into its register; off is the running byte offset in the tuple. Returns false after
+// report_error(). deform_tuple() calls it for every column of a table; the specialized kernels call it
+// with constant c and desc (the body keeps the nesting it had inside the column loop).
+bool deform_col(uint c, uint desc, uint tbase, uint natts, bool hasnull, uint page, uint lp,
+                inout uint off, inout Reg regs[VM_MAX_REGS])
 {
-    uint infomask2 = ld16(tbase + 18);
-    uint infomask  = ld16(tbase + 20);
-    uint natts     = infomask2 & 0x7ffu;
-    bool hasnull   = (infomask & 1u) != 0;
-    uint off       = ld8(tbase + 22);       // t_hoff
-
-    for (uint c = 0; c < ncols; c++)
     {
-        uint desc  = prog[coloff + c];
         uint alen  = desc & 0xffu;
         uint align = (desc >> 8) & 0xfu;
         uint vt    = (desc >> 12) & 0xfu;
@@ -1826,7 +1840,7 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
         bool isnull = (c >= natts) ||
                       (hasnull && (((ld8(tbase + 23 + (c >> 3)) >> (c & 7u)) & 1u) == 0));
         if (isnull)
-            continue;       // register stays NULL, no space is used
+            return true;    // register stays NULL, no space is used
 
         if (alen == 0xffu)
         {
@@ -1933,6 +1947,27 @@ bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
             }
             off += alen;
         }
+    }
+    return true;
+}
+
+// Deform the columns a program needs from the heap-format tuple at byte offset tbase of the
+// current source (g_src) into the registers named by the column descriptors at coloff. A join
+// inner tuple (kern_hashitem) has the layout of a heap tuple whose first 8 bytes are the chain
+// pointer, so the same code reads it. Returns false after report_error().
+bool deform_tuple(uint tbase, uint page, uint lp, uint coloff, uint ncols,
+                  inout Reg regs[VM_MAX_REGS])
+{
+    uint infomask2 = ld16(tbase + 18);
+    uint infomask  = ld16(tbase + 20);
+    uint natts     = infomask2 & 0x7ffu;
+    bool hasnull   = (infomask & 1u) != 0;
+    uint off       = ld8(tbase + 22);       // t_hoff
+
+    for (uint c = 0; c < ncols; c++)
+    {
+        if (!deform_col(c, prog[coloff + c], tbase, natts, hasnull, page, lp, off, regs))
+            return false;
     }
     return true;
 }

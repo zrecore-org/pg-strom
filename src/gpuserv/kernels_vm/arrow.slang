@@ -11,6 +11,9 @@
 // the computed projection values (written for qualifying rows).
 #include "scan_common.slang"
 #include "arrow_load.inc"
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
 
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]
@@ -31,11 +34,18 @@ void arrow_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint compoff = prog[9];
 
     Reg regs[VM_MAX_REGS];
+#ifdef SPEC_PROG
+    bool hit = spec_arrow_eval_row(row, row, 0, false, regs);
+#else
     bool hit = arrow_eval_row(row, row, 0, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#endif
     outb[4 + rel] = hit ? 1u : 0u;
     if (hit)
     {
         uint vb = 4 + kparam.total_lps + rel * (3 * ncomp);
+#ifdef SPEC_PROG
+        spec_store_comp(regs, vb);
+#else
         for (uint k = 0; k < ncomp; k++)
         {
             Reg r = regs[prog[compoff + k]];
@@ -43,5 +53,6 @@ void arrow_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             outb[vb + 3 * k + 1] = uint(uint64_t(r.v) & 0xffffffffu);
             outb[vb + 3 * k + 2] = uint(uint64_t(r.v) >> 32);
         }
+#endif
     }
 }

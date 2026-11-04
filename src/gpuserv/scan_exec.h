@@ -10,6 +10,7 @@
 #include "xpu_common.h"
 #include "gpu_vk.h"
 #include "scan_prog.h"
+#include "specialize.h"
 
 #define SCAN_MAP_CACHE		4
 
@@ -54,6 +55,7 @@ typedef struct scan_engine
 	int				ajoin_ready[2];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
+	struct spec_mgr *spec;			/* A6: specialized kernels (specialize.h) */
 } scan_engine;
 
 void	describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen);
@@ -159,6 +161,8 @@ XpuCommand *scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd,
 void	scan_agg_state_prepare(agg_state *st, int nagg);
 void	scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total);
 void	scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *ov_rec);
+/* the keys of the groups the session has so far (what a specialized GROUP BY kernel is made for) */
+void	scan_group_keystats(const agg_state *st, int nkeys, spec_keystats *ks);
 int		scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
 								uint32_t cap, uint32_t rec_words, uint32_t blk_words);
 int		scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,

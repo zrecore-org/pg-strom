@@ -73,6 +73,10 @@ uint hash_keys(int64_t k0, int64_t k1, uint kn)
     return h;
 }
 
+#ifdef SPEC_PROG
+#include "spec_gen.inc"           // A6: the program baked in (specialize.c)
+#endif
+
 [shader("compute")]
 [numthreads(SCAN_WG, 1, 1)]
 void jgagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)

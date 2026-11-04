@@ -13,8 +13,12 @@ result; at worst it is not faster. Every GPU result is compared with the CPU's i
 
 How the GPU work is done: a **scan VM** (one opcode-switch interpreter written in Slang) evaluates
 the planner's expression trees; there are kernels for scanning, aggregation, GROUP BY, join and Arrow
-columns (`src/gpuserv/kernels_vm/`). Specialized kernels generated per query (plan item A6) are not
-done, which is why a trivial qual costs more than it would in generated code.
+columns (`src/gpuserv/kernels_vm/`). For a query that runs more than one task the service also
+**generates a kernel from the program** (registers as constants, the instructions as straight-line code that
+calls the interpreter's own helpers, so the results are identical), compiles it with `slangc` in a
+background thread while the interpreter serves the first tasks, keeps it in a disk cache and switches to
+it when it is ready (plan item A6; `pg_strom.gpu_specialize`, `PGSTROM_GPUSERV_SPECIALIZE`). Without
+`slangc` and without a cached kernel everything runs on the interpreter, as before.
 
 ## Summary
 
@@ -88,11 +92,13 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 - Without GROUP BY (`count`, `sum`, `avg`, `min`, `max` of integers): 2.6x to 4x faster than 8-process
   PostgreSQL on a 16.8M-row table (plan A3).
 - With GROUP BY on **up to two** keys of type `int1/2/4/8`, `date`, `time`, `timestamp` or
-  `timestamptz` (a `bool` key is not offloaded). **GROUP BY is only worth it for few groups:** 1.3x faster
-  at 7 groups, 0.8x at 100, 0.3x at 1,000 (most rows overflow to a CPU path). The planner therefore keeps
-  queries with more than `pg_strom.gpupreagg_max_groups` (default 16) estimated groups on PostgreSQL.
-- Aggregation over a join is `Aggregate (CPU) -> GpuJoin`: every joined row is shipped to the backend
-  (a GPU-side join-then-aggregate was designed in the plan but is not built as of this commit).
+  `timestamptz` (a `bool` key is not offloaded). **GROUP BY is only worth it for up to about a hundred
+  groups:** with the specialized kernels (plan A6) 5.7x faster than 8-process PostgreSQL at 7 groups and 3.9x at
+  100 (dense integer keys; a direct-mapped table), 3.5x for a GROUP BY over a join; with the interpreter
+  alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
+  queries with more than `pg_strom.gpupreagg_max_groups` (default 128) estimated groups on PostgreSQL.
+- Aggregation over a join runs on the device as well (`GpuPreAgg` on the join; plan A4): without GROUP BY
+  4.8x faster than 8-process PostgreSQL with the specialized kernels (28 ms against 136 ms on 16.8M rows).
 - GpuPreAgg and GpuJoin run directly on an Arrow or Parquet outer source (`Custom Scan (GpuPreAgg) on <arrow table>`,
   GpuJoin whose outer relation is the Arrow table, and aggregation over such a join), with the same shapes as for heap
   tables. Quals, join keys and group keys may read integer, float4, bool, date, time, timestamp (every unit), utf8,
@@ -125,7 +131,10 @@ side (`EXPLAIN ANALYZE` execution time):
 |---|---|---|
 | Selective heap scan (0.9% of 16.8M rows) | about 90 ms vs 124 ms (1.4x) | plan gate was 2.9x and is **not met** |
 | Unselective heap scan (50% of rows) | 980 ms vs 195 ms (slower) | forming and shipping 8.4M tuples through the socket dominates |
-| Aggregation without GROUP BY | 35-67 ms vs 115-172 ms | |
+| Aggregation without GROUP BY | 35-67 ms vs 115-172 ms; with a specialized kernel 37-41 ms vs 132-183 ms (16.8M rows, whatever the quals) | |
+| GROUP BY 7 / 100 dense integer keys | 44 ms / 73 ms vs 249 ms / 288 ms | specialized, direct-mapped table |
+| GROUP BY 1,000 keys | 855 ms vs 285 ms (slower) | most rows overflow to the CPU; the planner keeps it on PostgreSQL |
+| Aggregate / GROUP BY over a join (1,000-row dimension) | 28 ms / 91 ms vs 136 ms / 318 ms | |
 | Selective Arrow scan (2.2 GB file) | 59-65 ms vs 196-367 ms | an unselective one loses to 8 workers |
 
 Nothing is known about speed on other GPUs. The acceptance criterion in the plan is relative to
@@ -137,7 +146,8 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 |---|---|
 | GPU-Sort of scan / join results, window functions other than the rank filter | Not implemented (plan A7 status); GPU-Sort of GpuPreAgg groups works, see the table above |
 | GPU-Cache | Works, see the section above; differences from the CUDA product are listed there |
-| Specialized kernels, fuzzer; numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
+| Numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
+| Specialized kernels for opcodes the generator does not list (new ones until reviewed), for jsonb | They run on the interpreter (plan A6 "kernel specialization") |
 | jsonb | Quals, aggregate arguments and number extraction run on the GPU; computed jsonb/text results in the target list, equality, `#>` and the other operators stay on the CPU (plan A8 status) |
 | GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
 | fp64, 64-bit-atomic kernels for devices that have them | Not implemented (plan A3b); `float8` stays on the CPU on every device |

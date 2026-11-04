@@ -136,6 +136,13 @@ void gpu_vk_buffer_destroy(gpu_vk_ctx *ctx, gpu_vk_buffer *b);
  */
 int  gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 							size_t spirv_bytes, uint32_t nbind, uint32_t pc_size);
+/*
+ * The same with the message going to the caller's buffer instead of ctx->err: usable from a second
+ * thread (pipeline creation does not need external synchronization; ctx->err would race).
+ */
+int  gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+							   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size,
+							   char *err, size_t errlen);
 void gpu_vk_pipeline_destroy(gpu_vk_ctx *ctx, gpu_vk_pipeline *p);
 
 /*
