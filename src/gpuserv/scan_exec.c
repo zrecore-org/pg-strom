@@ -369,6 +369,10 @@ describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_
 		snprintf(buf, buflen, "malformed GPU program (instruction %u)", err & 0x7fffffffU);
 	else if (err == 0x7ffffffeU)
 		snprintf(buf, buflen, "a compressed or external string reached the CPU re-evaluation of block index %u, line pointer %u", page, lp + 1);
+	else if (err == 0x7ffffffdU)
+		snprintf(buf, buflen, "GiST join: the probe point of block index %u, line pointer %u has a non-finite coordinate", page, lp + 1);
+	else if (err == 0x7ffffffcU)
+		snprintf(buf, buflen, "GiST join: the index walk of block index %u, line pointer %u exceeded pg_strom.gpugist_max_steps", page, lp + 1);
 	else if (err == 0x7fffffffU)
 		snprintf(buf, buflen, "unsupported attribute layout in block index %u, line pointer %u", page, lp + 1);
 	else
@@ -2741,10 +2745,9 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 		const kern_data_store *kds = (const kern_data_store *)((const char *) map + kds_offset);
 
 		(void) dummy;
-		if (kmrels->chunks[i].is_nestloop ||
-			kmrels->chunks[i].pinned_buffer || kmrels->chunks[i].gist_offset != 0)
+		if (kmrels->chunks[i].is_nestloop || kmrels->chunks[i].pinned_buffer)
 		{
-			snprintf(err, errlen, "only plain hash joins are implemented by the Vulkan service");
+			snprintf(err, errlen, "only hash joins and GiST-index joins are implemented by the Vulkan service");
 			munmap(map, maplen);
 			return -1;
 		}
@@ -2755,6 +2758,23 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 			snprintf(err, errlen, "inner relation %d is not a hash store the service can use", i + 1);
 			munmap(map, maplen);
 			return -1;
+		}
+		if (kmrels->chunks[i].gist_offset != 0)
+		{
+			uint64_t	goff = kmrels->chunks[i].gist_offset;
+			const kern_data_store *kg = (const kern_data_store *)((const char *) map + goff);
+
+			if (goff + sizeof(kern_data_store) > (uint64_t) st.st_size || kg->format != KDS_FORMAT_BLOCK ||
+				goff + kg->block_offset + (uint64_t) kg->nitems * BLCKSZ > (uint64_t) st.st_size ||
+				kg->nitems == 0 || kg->nitems >= (1U << 21) - 1 || goff + kg->length >= 0xffffffffULL ||
+				kg->block_offset % 4 != 0)
+			{
+				snprintf(err, errlen, "inner relation %d has no index the service can walk", i + 1);
+				munmap(map, maplen);
+				return -1;
+			}
+			ji->rels[i].gist_page0 = (uint32_t)(goff + kg->block_offset);
+			ji->rels[i].gist_nblocks = kg->nitems;
 		}
 		ji->rels[i].kds = kds;
 		ji->rels[i].kds_end = (uint32_t)(kds_offset + kds->length);

@@ -34,6 +34,10 @@
         uint nxt[JOIN_MAXD + 1];                    // the next chain item to look at, per depth
         uint cur[JOIN_MAXD + 1];                    // the item matched at each depth
         uint hv[JOIN_MAXD + 1];                     // the hash value at each depth
+#ifndef SPEC_PROG
+        uint gq[(JOIN_MAXD + 1) * 4];               // GiST depths: the query box (float4 bits), see join_common.inc
+        uint gst[JOIN_MAXD + 1];                    // GiST depths: index entries looked at
+#endif
         uint d = 0;                                 // current depth; 0: this lane is done
         uint mflag = 0;                             // bit d: depth d has found a match
         for (uint i = 0; i <= JOIN_MAXD; i++)
@@ -41,6 +45,10 @@
             nxt[i] = NO_ITEM;
             cur[i] = NO_ITEM;
             hv[i] = 0;
+#ifndef SPEC_PROG
+            gst[i] = 0;
+            gq[4 * i + 0] = 0; gq[4 * i + 1] = 0; gq[4 * i + 2] = 0; gq[4 * i + 3] = 0;
+#endif
         }
 
         g_src = outer_src;
@@ -71,10 +79,27 @@
             else
             {
 #ifndef SPEC_PROG
-                hv[1] = uint(regs[prog[dt + 3]].v);
-#endif
+                if (prog[dt + 14] != 0u)
+                {
+                    uint ge = gist_open(dt, 1, regs[prog[dt + 3]], regs[prog[dt + 15]], gq, nxt, gst);
+                    if (ge != 0u)
+                    {
+                        report_error(page, lp, ge);
+                        d = 0;
+                    }
+                    else
+                        d = 1;
+                }
+                else
+                {
+                    hv[1] = uint(regs[prog[dt + 3]].v);
+                    nxt[1] = chain_first(dt, hv[1]);
+                    d = 1;
+                }
+#else
                 nxt[1] = chain_first(dt, hv[1]);
                 d = 1;
+#endif
             }
         }
 
@@ -115,11 +140,38 @@
                 uint dt = dtab + JDT_WORDS * (d - 1);
                 uint it = nxt[d];
                 bool ok = false;
-                if (it != NO_ITEM)
+#ifndef SPEC_PROG
+                bool gdep = (prog[dt + 14] != 0u);
+                if (gdep && it != NO_ITEM)
                 {
+                    uint ge;
+                    it = gist_next(dt, d, gq, nxt[d], gst[d], ge);
+                    if (ge != 0u)
+                    {
+                        report_error(page, lp, ge);
+                        d = 0;
+                        it = NO_ITEM;
+                    }
+                }
+#endif
+                if (d == 0)
+                {
+                    // a GiST walk failed above: this lane is done
+                }
+                else if (it != NO_ITEM)
+                {
+#ifndef SPEC_PROG
+                    if (!gdep)
+                        nxt[d] = chain_next(dt, it);
+#else
                     nxt[d] = chain_next(dt, it);
+#endif
                     g_src = 2;
+#ifndef SPEC_PROG
+                    if (gdep || ld32(it + 12) == hv[d])         // the stored hash value (a GiST entry names the row)
+#else
                     if (ld32(it + 12) == hv[d])                 // the stored hash value
+#endif
                     {
 #ifdef SPEC_PROG
                         if (spec_inner(d, it, page, lp, regs))
@@ -220,9 +272,23 @@
                         else
                         {
 #ifndef SPEC_PROG
-                            hv[d] = uint(regs[prog[dt2 + 3]].v);
-#endif
+                            if (prog[dt2 + 14] != 0u)
+                            {
+                                uint ge = gist_open(dt2, d, regs[prog[dt2 + 3]], regs[prog[dt2 + 15]], gq, nxt, gst);
+                                if (ge != 0u)
+                                {
+                                    report_error(page, lp, ge);
+                                    d = 0;
+                                }
+                            }
+                            else
+                            {
+                                hv[d] = uint(regs[prog[dt2 + 3]].v);
+                                nxt[d] = chain_first(dt2, hv[d]);
+                            }
+#else
                             nxt[d] = chain_first(dt2, hv[d]);
+#endif
                         }
                     }
                 }

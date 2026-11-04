@@ -8,7 +8,7 @@ if ! $PSQL -d scantest -c "create extension if not exists postgis" >/dev/null 2>
 else
 GZ=${GZ:-6000}
 GP=${GP:-20000}
-GISTON="set pg_strom.enable_gpugistindex=on;"
+GISTON="set pg_strom.enable_gpugistindex=on; set enable_seqscan=on;"
 # inner: shapes of every kind (a multi-level index at this size), fillfactor 60 so updates of a non-indexed column are HOT
 sql "drop table if exists pg_gz; drop table if exists pg_gp"
 sql "create table pg_gz (id int4, geom geometry, a int4, b int4) with (fillfactor=60)"
@@ -27,17 +27,19 @@ sql "insert into pg_gz select i,
 sql "create index pg_gz_gist on pg_gz using gist (geom)"
 sql "create table pg_gp (id int4, x float8, y float8)"
 sql "insert into pg_gp select i, ((i * 7919) % 100001) / 1000.0, ((i * 104729) % 100001) / 1000.0 from generate_series(1, $GP) i"
-sql "insert into pg_gp values (-1, 'NaN', 1), (-2, 1, 'NaN'), (-3, 'Infinity', 1), (-4, -1e300, 1e300), (-5, null, 1), (-6, 1, null)" >/dev/null
+sql "insert into pg_gp values (-4, -1e300, 1e300), (-5, null, 1), (-6, 1, null), (-7, 1e300, 0)" >/dev/null
+sql "create table pg_gnf (id int4, x float8, y float8)"
+sql "insert into pg_gnf values (1, 'NaN', 1), (2, 1, 'NaN'), (3, 'Infinity', 1), (4, 1, '-Infinity')" >/dev/null
 sql "analyze pg_gz; analyze pg_gp"
 
 # gistjoin: label, query. The plan must use GpuJoin and report the GiST index, and the rows must equal the CPU rows
 gistjoin() {
 	label=$1; qry=$2; set_extra=${3:-}
 	plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $set_extra explain $qry")
-	pj=$(echo "$plan" | grep -c "Custom Scan (GpuJoin)"); pg=$(echo "$plan" | grep -c "GiST-Index")
+	pj=$(echo "$plan" | grep -c "Custom Scan (GpuJoin)"); pg=$(echo "$plan" | grep -c "GPU GiST Join")
 	g=$(q "$GPU $JOINSET $GISTON $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$pj" -ge 1 ] && [ "$pg" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
-	else echo "  FAIL  $label (plan GpuJoin=$pj GiST-Index=$pg)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+	else echo "  FAIL  $label (plan GpuJoin=$pj GPU GiST Join=$pg)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 JQ="select o.id, i.id from pg_gp o join pg_gz i on i.geom && st_makepoint(o.x, o.y)"
 gistjoin "point against geometry boxes" "$JQ"
@@ -46,6 +48,12 @@ gistjoin "inner qual" "$JQ and i.a = 3"
 gistjoin "outer qual" "$JQ and o.id % 4 = 0"
 gistjoin "left join" "select o.id, i.id from pg_gp o left join pg_gz i on i.geom && st_makepoint(o.x, o.y)"
 gistjoin "count per outer row" "select o.id, count(i.id) from pg_gp o join pg_gz i on i.geom && st_makepoint(o.x, o.y) group by o.id"
+
+# a probe point with a non-finite coordinate is an error (the CPU answers by its own rules), never a wrong result
+for i in 1 2 3 4; do
+	e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
+	check "non-finite probe point $i is an error" "$(echo "$e" | grep -q 'non-finite' ; echo $?)"
+done
 
 # the index has more than one level
 lv=$(sql "select (select count(*) from pg_class where relname = 'pg_gz_gist' and relpages > 2)")
@@ -72,7 +80,7 @@ gistjoin "after a rolled back delete" "$JQ"
 e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpugist_max_steps=2; $JQ" 2>&1 | tail -1)
 check "step limit raises an error" "$(echo "$e" | grep -q 'ERROR' ; echo $?)"
 
-# off by default: the plan has no GiST-Index
-off=$($PSQL -d scantest -c "$GPU $JOINSET explain $JQ" | grep -c "GiST-Index")
+# off by default: the plan has no GPU GiST Join
+off=$($PSQL -d scantest -c "$GPU $JOINSET explain $JQ" | grep -c "GPU GiST Join")
 check "pg_strom.enable_gpugistindex is off by default" "$([ "$off" = 0 ]; echo $?)"
 fi

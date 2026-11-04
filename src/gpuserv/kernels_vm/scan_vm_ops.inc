@@ -187,6 +187,8 @@ SCANVM_OP(GBOX_CONTAINS, 1)
 SCANVM_OP(GBOX_WITHIN,   2)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
+SCANVM_OP(GIST_NONFINITE_CODE, 0x7ffffffd)  /* A13: a GiST join probe point has a non-finite coordinate (an error, not a recheck) */
+SCANVM_OP(GIST_STEPS_CODE, 0x7ffffffc)       /* A13: the index walk of one outer row exceeded the step limit */
 /* unary numeric operations (NUMARITH k0) */
 SCANVM_OP(NUMOP_NEG, 16)
 SCANVM_OP(NUMOP_ABS, 17)

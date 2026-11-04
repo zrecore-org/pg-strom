@@ -710,7 +710,7 @@ gen_store_comp(gen_ctx *g, sbuf *o, const char *name, int scan_style)
 	sb_printf(o, "}\n\n");
 }
 
-#define SPEC_JDT_WORDS	14
+#define SPEC_JDT_WORDS	19
 
 /* the join: per depth the hash section, the join qual section and the inner column loads */
 static void
@@ -729,6 +729,11 @@ gen_join(gen_ctx *g, sbuf *o)
 		const uint32_t *dt = w + dtab + SPEC_JDT_WORDS * (d - 1);
 		char		nm[16];
 
+		if (dt[14] != 0)
+		{
+			gen_fail(g, "a GiST-index join runs on the interpreter");
+			return;
+		}
 		gen_range(g, o, dt[0], dt[1]);
 		gen_range(g, o, dt[1], dt[2]);
 		snprintf(nm, sizeof(nm), "in%u", d);

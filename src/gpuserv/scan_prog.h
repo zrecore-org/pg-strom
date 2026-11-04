@@ -87,6 +87,9 @@ typedef struct scan_join_rel
 	int			semi;				/* semi join: the first match keeps the outer row, no inner columns */
 	int			anti;				/* anti join: only an outer row without a match is kept */
 	int			right_outer;		/* RIGHT or FULL: the kernel flags the inner rows that matched */
+	/* A13: the rows are found through a GiST index (kds is the hash store of the rows, indexed by row id) */
+	uint32_t	gist_page0;			/* byte offset of block 0 of the index pages in the inner buffer; 0: no index */
+	uint32_t	gist_nblocks;
 } scan_join_rel;
 
 int		scan_prog_build_join(const struct kern_session_info *session,

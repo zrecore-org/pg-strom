@@ -4126,6 +4126,13 @@ codegen_build_packed_gistevals(codegen_context *context,
 	uint32_t		stack_usage_max = stack_usage_saved;
 	bytea		   *result = NULL;
 
+	/*
+	 * The Vulkan service walks a GiST index by the strategy in the plan (pp_inner->gist_strategy, A13) with the
+	 * outer point's x and y as hash keys; there is no GiSTEval expression to ship.
+	 */
+	pp_info->kexp_gist_evals_packed = NULL;
+	return;
+
 	head_sz = MAXALIGN(offsetof(kern_expression,
 								u.pack.offset[pp_info->num_inner_rels+1]));
 	kexp = alloca(head_sz);

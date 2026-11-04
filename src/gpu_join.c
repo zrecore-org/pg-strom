@@ -23,6 +23,7 @@ static CustomExecMethods	gpujoin_exec_methods;
 static bool					pgstrom_enable_gpujoin = false;		/* GUC */
 static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
+int							pgstrom_gist_max_steps = 10000000;	/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
 static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
 static int					__pinned_inner_buffer_partition_size_mb = 0; /* GUC */
@@ -389,6 +390,8 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	List		   *inner_target_list = NIL;
 	ListCell	   *lc;
 	bool			clauses_are_immutable = true;
+	pgstromPlanInnerInfo gist_inner;		/* A13: the GiST index the inner side is read through, if any */
+	RestrictInfo   *gist_rinfo = NULL;
 
 	/* cross join is not welcome */
 	if (!restrict_clauses)
@@ -430,6 +433,35 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	}
 
 	/*
+	 * A13: an inner relation with a GiST index that a join clause can use is read through the index
+	 * (pg_strom.enable_gpugistindex): the clause is answered by the walk, not by the join program.
+	 */
+	memset(&gist_inner, 0, sizeof(gist_inner));
+	if (pgstrom_enable_gpugistindex &&
+		(join_type == JOIN_INNER || join_type == JOIN_LEFT))
+	{
+		List   *cands = NIL;
+
+		foreach (lc, restrict_clauses)
+		{
+			RestrictInfo *rinfo = lfirst(lc);
+
+			if (IS_OUTER_JOIN(join_type) &&
+				RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
+				continue;
+			cands = lappend(cands, rinfo);
+		}
+		temp_path = pgstromTryFindGistIndex(root, outer_rel, inner_path, cands,
+											pp_prev->xpu_task_flags, pp_prev->base_relid,
+											inner_target_list, &gist_inner, &gist_rinfo);
+		if (temp_path)
+		{
+			inner_path = temp_path;
+			llast(inner_paths_list) = inner_path;
+		}
+	}
+
+	/*
 	 * All the join-clauses must be executable on GPU device.
 	 * Even though older version supports HostQuals to be
 	 * applied post device join, it leads undesirable (often
@@ -440,6 +472,13 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	foreach (lc, restrict_clauses)
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
+
+		/* the clause the GiST walk answers */
+		if (rinfo == gist_rinfo)
+		{
+			clauses_are_immutable = false;
+			continue;
+		}
 
 		/*
 		 * In case when neither outer-vars nor inner-vars are not referenced,
@@ -547,8 +586,15 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			 nodeToString(restrict_clauses));
 		return NULL;
 	}
-	/* hash join only: no GpuNestLoop, and no GiST-index join */
-	if (hash_outer_keys == NIL)
+	/* hash join or GiST-index join only: no GpuNestLoop */
+	if (gist_rinfo)
+	{
+		/* only the clauses of the walk and device quals; the outer keys are the point's x and y */
+		Assert(hash_outer_keys == NIL);
+		hash_outer_keys = gist_inner.hash_outer_keys;
+		hash_inner_keys = NIL;
+	}
+	else if (hash_outer_keys == NIL)
 		return NULL;
 
 	/*
@@ -586,6 +632,19 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	pp_inner->join_type = join_type;
 	pp_inner->hash_outer_keys = hash_outer_keys;
 	pp_inner->hash_inner_keys = hash_inner_keys;
+	if (gist_rinfo)
+	{
+		pp_inner->gist_index_oid   = gist_inner.gist_index_oid;
+		pp_inner->gist_index_col   = gist_inner.gist_index_col;
+		pp_inner->gist_ctid_resno  = gist_inner.gist_ctid_resno;
+		pp_inner->gist_strategy    = gist_inner.gist_strategy;
+		pp_inner->gist_func_oid    = gist_inner.gist_func_oid;
+		pp_inner->gist_slot_id     = gist_inner.gist_slot_id;
+		pp_inner->gist_clause      = gist_inner.gist_clause;
+		pp_inner->gist_selectivity = gist_inner.gist_selectivity;
+		pp_inner->gist_npages      = gist_inner.gist_npages;
+		pp_inner->gist_height      = gist_inner.gist_height;
+	}
 	pp_inner->join_quals = join_quals;
 	pp_inner->other_quals = other_quals;
 	/*
@@ -635,7 +694,21 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	 */
 	cost_qual_eval(&join_quals_cost, join_quals, root);
 	startup_cost += join_quals_cost.startup;
-	if (hash_outer_keys != NIL && hash_inner_keys != NIL)
+	if (gist_rinfo)
+	{
+		/*
+		 * GiST-index join: the inner rows are loaded (with their ctid) and the index pages copied, then
+		 * every outer row walks the tree (about one page per level plus the matching leaves)
+		 */
+		double	hops = Max(pp_inner->gist_height, 1) + 1.0 +
+			Max(pp_inner->gist_selectivity * inner_path->rows, 1.0) / 100.0;
+
+		startup_cost += cpu_tuple_cost * inner_path->rows +
+			cpu_operator_cost * pp_inner->gist_npages;
+		comp_cost += gpu_operator_cost * hops * 4.0 * outer_nrows;
+		comp_cost += join_quals_cost.per_tuple * gpu_ratio * outer_nrows;
+	}
+	else if (hash_outer_keys != NIL && hash_inner_keys != NIL)
 	{
 		/*
 		 * GpuHashJoin - It computes hash-value of inner tuples by CPU,
@@ -1439,7 +1512,8 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 
 		/* xpu code to generate outer hash-value */
 		if (pp_inner->hash_outer_keys != NIL &&
-			pp_inner->hash_inner_keys != NIL)
+			(pp_inner->hash_inner_keys != NIL ||
+			 OidIsValid(pp_inner->gist_index_oid)))
 		{
 			hash_keys_stacked = lappend(hash_keys_stacked,
 										pp_inner->hash_outer_keys);
@@ -2046,11 +2120,11 @@ again:
 			Assert(i_rel->rd_amhandler == F_GISTHANDLER);
 			block_offset = (estimate_kern_data_store(i_tupdesc) +
 							MAXALIGN(sizeof(uint32_t) * nblocks));
+			nbytes = block_offset + BLCKSZ * nblocks;	/* the first (sizing) pass needs it too */
 			if (h_kmrels)
 			{
 				kds = (kern_data_store *)((char *)h_kmrels + offset);
 				h_kmrels->chunks[depth-1].gist_offset = offset;
-				nbytes = block_offset + BLCKSZ * nblocks;
 
 				setup_kern_data_store(kds, i_tupdesc, nbytes,
 									  KDS_FORMAT_BLOCK);
@@ -2229,6 +2303,132 @@ __innerPreloadSetupHashBuffer(kern_data_store *kds,
 	}
 }
 
+/*
+ * innerPreloadFixupGiSTLeaves (A13)
+ *
+ * The leaf entries of the copied index pages name heap tuples by TID. The service has no heap, only the inner
+ * rows the preload gathered (visible to this scan, inner quals applied), so every leaf entry is rewritten to
+ * the row id of its inner row in the hash store: the row id goes into the block part of t_tid (bi_hi:bi_lo).
+ * An entry with no inner row (deleted, invisible, filtered out, NULL key) is marked LP_DEAD.
+ *
+ * A leaf entry points at the root of a HOT chain, while the inner row carries the t_self of the chain member
+ * that is visible, so the rows are keyed by (block, root offset) (heap_get_root_tuples()).
+ *
+ * The walker follows downlinks only, so a page that can be reached only through a right-link (an incomplete
+ * split, F_FOLLOW_RIGHT) would be missed: that is an error.
+ */
+typedef struct
+{
+	ItemPointerData	tid;			/* key: the HOT chain root */
+	uint32_t		rowid;
+} GistRowEnt;
+
+static void
+innerPreloadFixupGiSTLeaves(pgstromTaskState *pts)
+{
+	kern_multirels *h_kmrels = pts->h_kmrels;
+
+	for (int depth=1; depth <= pts->num_inner_rels; depth++)
+	{
+		pgstromTaskInnerState *istate = &pts->inners[depth-1];
+		kern_data_store *kds;
+		kern_data_store *kds_gist;
+		TupleDesc	tupdesc;
+		uint64_t   *row_index;
+		HTAB	   *htab;
+		HASHCTL		hctl;
+		Relation	heap_rel;
+		BlockNumber	cached_blk = InvalidBlockNumber;
+		OffsetNumber root_offsets[MaxHeapTuplesPerPage];
+
+		if (!istate->gist_irel)
+			continue;
+		kds = KERN_MULTIRELS_INNER_KDS(h_kmrels, depth);
+		kds_gist = (kern_data_store *)((char *)h_kmrels + h_kmrels->chunks[depth-1].gist_offset);
+		tupdesc = istate->ps->ps_ResultTupleDesc;
+		row_index = KDS_GET_ROWINDEX(kds);
+
+		memset(&hctl, 0, sizeof(hctl));
+		hctl.keysize = sizeof(ItemPointerData);
+		hctl.entrysize = sizeof(GistRowEnt);
+		hctl.hcxt = CurrentMemoryContext;
+		htab = hash_create("GiST inner rows", Max(kds->nitems, 16), &hctl,
+						   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+		heap_rel = table_open(istate->gist_irel->rd_index->indrelid, AccessShareLock);
+		for (uint32_t rowid=0; rowid < kds->nitems; rowid++)
+		{
+			kern_tupitem *titem = (kern_tupitem *)((char *)kds + kds->length - row_index[rowid]);
+			HeapTupleData htup;
+			Datum		datum;
+			bool		isnull;
+			ItemPointer	ctid;
+			ItemPointerData	key;
+			GistRowEnt *ent;
+			bool		found;
+			OffsetNumber root;
+
+			memset(&htup, 0, sizeof(htup));
+			htup.t_len = titem->t_len;
+			htup.t_data = (HeapTupleHeader)((char *)titem - MINIMAL_TUPLE_OFFSET);
+			datum = heap_getattr(&htup, istate->gist_ctid_resno, tupdesc, &isnull);
+			if (isnull)
+				elog(ERROR, "GiST join: an inner row has no ctid");
+			ctid = (ItemPointer) DatumGetPointer(datum);
+			if (ItemPointerGetBlockNumber(ctid) != cached_blk)
+			{
+				Buffer		buffer = ReadBuffer(heap_rel, ItemPointerGetBlockNumber(ctid));
+
+				LockBuffer(buffer, BUFFER_LOCK_SHARE);
+				heap_get_root_tuples(BufferGetPage(buffer), root_offsets);
+				UnlockReleaseBuffer(buffer);
+				cached_blk = ItemPointerGetBlockNumber(ctid);
+			}
+			root = root_offsets[ItemPointerGetOffsetNumber(ctid) - 1];
+			if (!OffsetNumberIsValid(root))
+				root = ItemPointerGetOffsetNumber(ctid);
+			ItemPointerSet(&key, ItemPointerGetBlockNumber(ctid), root);
+			ent = hash_search(htab, &key, HASH_ENTER, &found);
+			if (!found)
+				ent->rowid = rowid;
+		}
+		table_close(heap_rel, AccessShareLock);
+
+		for (BlockNumber blk=0; blk < kds_gist->nitems; blk++)
+		{
+			Page		page = (Page) KDS_BLOCK_PGPAGE(kds_gist, blk);
+			OffsetNumber maxoff, off;
+
+			if (GistPageIsDeleted(page))
+				continue;
+			if (GistFollowRight(page))
+				elog(ERROR, "GiST join: index \"%s\" has an incomplete page split at block %u; VACUUM or retry",
+					 RelationGetRelationName(istate->gist_irel), blk);
+			if (!GistPageIsLeaf(page))
+				continue;
+			maxoff = PageGetMaxOffsetNumber(page);
+			for (off = FirstOffsetNumber; off <= maxoff; off = OffsetNumberNext(off))
+			{
+				ItemId		iid = PageGetItemId(page, off);
+				IndexTuple	it;
+				GistRowEnt *ent;
+
+				if (!ItemIdIsNormal(iid))
+					continue;
+				it = (IndexTuple) PageGetItem(page, iid);
+				ent = hash_search(htab, &it->t_tid, HASH_FIND, NULL);
+				if (!ent || IndexTupleHasNulls(it))
+				{
+					iid->lp_flags = LP_DEAD;
+					continue;
+				}
+				BlockIdSet(&it->t_tid.ip_blkid, ent->rowid);
+				it->t_tid.ip_posid = 0;
+			}
+		}
+		hash_destroy(htab);
+	}
+}
+
 #define INNER_PHASE__SCAN_RELATIONS		0
 #define INNER_PHASE__SETUP_BUFFERS		1
 #define INNER_PHASE__GPUJOIN_EXEC		2
@@ -2399,6 +2599,17 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 				ps_state->preload_nr_setup == 0)
 			{
 				Assert(ps_state->preload_phase == INNER_PHASE__SETUP_BUFFERS);
+				/* the last worker: every inner row is in the hash stores, name them in the GiST leaves */
+				PG_TRY();
+				{
+					innerPreloadFixupGiSTLeaves(pts);
+				}
+				PG_CATCH();
+				{
+					pthreadMutexUnlock(&ps_state->preload_mutex);
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
 				ps_state->preload_phase = INNER_PHASE__GPUJOIN_EXEC;
 				pthreadCondBroadcast(&ps_state->preload_cond);
             }
@@ -2510,9 +2721,20 @@ pgstrom_init_gpu_join(void)
 							 NULL,
 							 &pgstrom_enable_gpugistindex,
 							 false,
-							 PGC_INTERNAL,
+							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+	/* the step limit of the index walk of one outer row (A13) */
+	DefineCustomIntVariable("pg_strom.gpugist_max_steps",
+							"Index entries one outer row may look at in a GiST-index GpuJoin; more is an error",
+							NULL,
+							&pgstrom_gist_max_steps,
+							10000000,
+							1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
 	/* turn on/off partition-wise gpujoin */
 	DefineCustomBoolVariable("pg_strom.enable_partitionwise_gpujoin",
 							 "Enables the use of partition-wise GpuJoin",

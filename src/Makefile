@@ -9,7 +9,7 @@ include ../Makefile.common
 STROM_OBJS = main.o githash.o codegen.o \
              executor.o fallback.o \
              gpu_device.o gpu_client.o gpu_cache.o \
-             gpu_scan.o gpu_join.o gpu_preagg.o \
+             gpu_scan.o gpu_join.o gpu_preagg.o gist.o \
              relscan.o brin.o \
              arrow_fdw.o arrow_meta.o \
              parquet_read.o parquet_cache.o \

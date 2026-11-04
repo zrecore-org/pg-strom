@@ -790,6 +790,7 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 	/* other database session information */
 	session->query_plan_id = ps_state->query_plan_id;
 	session->xpu_task_flags = pts->xpu_task_flags;
+	session->gist_max_steps = pgstrom_gist_max_steps;
 	session->optimal_gpus = pts->optimal_gpus;
 	session->kcxt_kvecs_bufsz = pp_info->kvecs_bufsz;
 	session->kcxt_kvecs_ndims = pp_info->kvecs_ndims;

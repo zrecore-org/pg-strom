@@ -2807,7 +2807,7 @@ typedef struct kern_session_info
 	uint32_t	kcxt_kvecs_bufsz;	/* length of kvecs buffer */
 	uint32_t	kcxt_kvecs_ndims;	/* =(num_inner_rels + 2) */
 	uint32_t	kcxt_extra_bufsz;	/* length of vlbuf[] */
-	uint32_t	cuda_stack_size;	/* estimated stack size */
+	uint32_t	gist_max_steps;		/* A13: index entries one outer row may look at in a GiST join */
 	uint32_t	xpu_task_flags;		/* mask of device flags */
 	gpumask_t	optimal_gpus;		/* mask of schedulable GPUs */
 	/* xpucode for this session */

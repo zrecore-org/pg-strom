@@ -205,6 +205,7 @@ form_pgstrom_plan_info(CustomScan *cscan, pgstromPlanInfo *pp_info)
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_index_col));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_ctid_resno));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_func_oid));
+		__privs = lappend(__privs, makeInteger(pp_inner->gist_strategy));
 		__privs = lappend(__privs, makeInteger(pp_inner->gist_slot_id));
 		__exprs = lappend(__exprs, pp_inner->gist_clause);
 		__privs = lappend(__privs, __makeFloat(pp_inner->gist_selectivity));
@@ -351,6 +352,7 @@ deform_pgstrom_plan_info(CustomScan *cscan)
 		pp_inner->gist_index_col  = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_ctid_resno = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_func_oid   = intVal(list_nth(__privs, __pindex++));
+		pp_inner->gist_strategy   = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_slot_id    = intVal(list_nth(__privs, __pindex++));
 		pp_inner->gist_clause     = list_nth(__exprs, __eindex++);
 		pp_inner->gist_selectivity = floatVal(list_nth(__privs, __pindex++));

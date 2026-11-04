@@ -1557,6 +1557,32 @@ error:
  * ----------------------------------------------------------------
  */
 
+/*
+ * A13: the "keys" of a GiST join depth are the x and y of the outer point (two float8 expressions): no hash value,
+ * the two registers; returns the register of x and sets *yreg
+ */
+static int
+emit_gist_keys(builder *b, const kern_expression *khash, int *next, int *yreg)
+{
+	const kern_expression *kx = KEXP_FIRST_ARG(khash);
+	const kern_expression *ky;
+	int			rx, ry;
+
+	if (khash->nr_args != 2)
+		return fail(b, "a GiST join needs the x and y of the outer point");
+	ky = KEXP_NEXT_ARG(kx);
+	if (kx->exptype != TypeOpCode__float8 || ky->exptype != TypeOpCode__float8)
+		return fail(b, "the outer point of a GiST join must be two float8 values");
+	rx = expr_to_reg(b, kx, next);
+	if (rx < 0)
+		return -1;
+	ry = expr_to_reg(b, ky, next);
+	if (ry < 0)
+		return -1;
+	*yreg = ry;
+	return rx;
+}
+
 /* the HashValue of the join keys: HASHINIT, one HASHMERGE per key, HASHFIN; returns its register */
 static int
 emit_hash_value(builder *b, const kern_expression *khash, int *next)
@@ -1772,7 +1798,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
  * [8] computed values, [9] their registers, [14] number of inner relations, [15] depth table,
  * [16] first projection instruction, [17] words of the outer-join map (RIGHT/FULL joins).
  */
-#define JDT_WORDS			14
+#define JDT_WORDS			19
 
 int
 scan_prog_build_join(const kern_session_info *session, const kern_data_store *kds_src,
@@ -1787,6 +1813,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	uint32_t	nq, proj_begin;
 	int			next, ncols = 0, incols[SCAN_JOIN_MAXDEPTH + 1] = {0}, inc_total = 0;
 	uint32_t	dsec[SCAN_JOIN_MAXDEPTH + 1][5];	/* hash begin, hash end, jq end, hash reg, jq reg */
+	uint32_t	gist_yreg[SCAN_JOIN_MAXDEPTH + 1] = {0};	/* GiST depths: the register of the point's y */
 	uint32_t	nattrs = 0, ncomp = 0, nwords;
 	uint32_t   *comp_regs = NULL, *w;
 	int			max_src = 0;
@@ -1880,14 +1907,29 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		const kern_expression *kjq = SESSION_KEXP_JOIN_QUALS(session, depth);
 		int		hash_reg, jq_reg = -1;
 
+		int		is_gist = (rels[depth - 1].gist_page0 != 0);
+
 		if (!khash)
 		{
-			fail(&b, "join %d has no hash value (only hash joins are implemented)", depth);
+			fail(&b, "join %d has no hash value (only hash joins and GiST-index joins are implemented)", depth);
+			goto error;
+		}
+		if (is_gist && (rels[depth - 1].semi || rels[depth - 1].anti || rels[depth - 1].right_outer))
+		{
+			fail(&b, "a GiST-index join must be an inner or LEFT join");
 			goto error;
 		}
 		dsec[depth][0] = b.ninsn;
 		next = b.nslots;
-		hash_reg = emit_hash_value(&b, khash, &next);
+		if (is_gist)
+		{
+			int		yr = 0;
+
+			hash_reg = emit_gist_keys(&b, khash, &next, &yr);
+			gist_yreg[depth] = (uint32_t) yr;
+		}
+		else
+			hash_reg = emit_hash_value(&b, khash, &next);
 		if (hash_reg < 0)
 			goto error;
 		dsec[depth][1] = b.ninsn;
@@ -2095,6 +2137,11 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			dt[11] = rels[depth - 1].semi ? 1 : rels[depth - 1].anti ? 2 : 0;
 			dt[12] = 0xffffffffU;
 			dt[13] = 0;
+			dt[14] = rels[depth - 1].gist_page0 ? 1 : 0;			/* GiST strategy: 1 is && */
+			dt[15] = gist_yreg[depth];
+			dt[16] = rels[depth - 1].gist_page0;
+			dt[17] = rels[depth - 1].gist_nblocks;
+			dt[18] = session->gist_max_steps ? session->gist_max_steps : 10000000U;
 			prog->oj_off[depth] = 0xffffffffU;
 			if (rels[depth - 1].right_outer)
 			{

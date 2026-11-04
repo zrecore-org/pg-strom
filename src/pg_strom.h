@@ -257,6 +257,7 @@ typedef struct
 	int				gist_index_col; /* GiST index column number */
 	int				gist_ctid_resno;/* resno to reference ctid */
 	Oid				gist_func_oid;	/* device function to evaluate GiST clause */
+	int				gist_strategy;	/* 1: && (box overlap) */
 	int				gist_slot_id;	/* slot-id to store the index key */
 	Expr		   *gist_clause;    /* GiST index clause */
 	Selectivity		gist_selectivity; /* GiST selectivity */
@@ -678,13 +679,16 @@ extern void		pgstrom_init_brin(void);
 /*
  * gist.c
  */
+extern int		pgstrom_gist_max_steps;
 extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
+										RelOptInfo *outer_rel,
 										Path *inner_path,
 										List *restrict_clauses,
 										uint32_t xpu_task_flags,
 										Index base_scan_relid,
 										List *inner_target_list,
-										pgstromPlanInnerInfo *pp_inner);
+										pgstromPlanInnerInfo *pp_inner,
+										RestrictInfo **p_rinfo);
 /*
  * relscan.c
  */
