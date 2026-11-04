@@ -18,3 +18,5 @@ agg	select (nf)::int2 as k0, sum(e8) as a0 from fz2 t where (nw IS NOT NULL) gro
 agg	select (w22 % 5) as k0, (w1 % 5) as k1, sum(w5) as a0, max((w32 + w4)) as a1, count((w15 + w35)) as a2, min((w14 + w29)) as a3, max((w16 + w21)) as a4, sum((w28 + w13)) as a5 from fz_w t group by 1, 2
 # fail_service seed=9 index=2245 GPU: ERROR:  gpuserv:0  the expression needs more than 32 registers | CPU: 5d859ef39dc879e2d81833c23f08a66a|8415
 join	select (t.w35 % 5) as k0, (t.w43 % 5) as k1, (t.w23 % 5) as k2, (t.w25 % 5) as k3, max(((t.w7 - t.w22) - (((t.w10 - t.w6) - (t.w13 + t.w1)) + ((t.w24 + t.w43) + (t.w43 - t.w23))))) as a0, avg((((t.w36 - t.w19) - ((t.w44 - t.w41) - ((2)::int4 - t.w42))) - (((t.w28 - t.w19) - (t.w27 + t.w32)) + ((t.w40 - t.w38) + (t.w37 - t.w33))))) as a1 from fz_w t inner join fz_d d on (t.w2 = d.k4) group by 1, 2, 3, 4
+# fail_asym seed=10 index=1056 GPU: ERROR:  compressed pglz data is corrupt | CPU: 3484bf8bf191cb8b759f9777549f0386|5
+agg	select nl as k0, nm as k1, count(*) as a0 from fz2 t group by 1, 2 order by 1, 2 limit 5
