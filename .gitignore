@@ -19,3 +19,4 @@ arrow-tools/vcf2arrow
 /test-data/
 /src/*.d
 /src/gpuserv/*.d
+/src/gpuserv/f64soft_check

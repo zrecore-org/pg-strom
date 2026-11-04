@@ -34,6 +34,7 @@ GPUSERV_BIN=src/gpuserv/pgstrom-gpuserv sh test/gpuserv/service_test.sh     # se
 GPUSERV_BIN=<installed pgstrom-gpuserv> sh test/gpuserv/scan_test.sh        # GPU vs CPU result comparison of GpuScan
 sh test/gpuserv/locked_test.sh <tree> jsonb_test.sh                           # only the jsonb section of scan_test.sh (jsonb_tests.inc)
 make -C test/port && test/port/port_test                                    # portability layer
+sh test/gpuserv/f64soft_check.sh [N [device|-1]]                              # software binary64 (kernels_vm/f64_soft.inc) vs the hardware double, on the host and the device (no lock, no cluster)
 sh test/gpuserv/spec_compile_check.sh                                       # generator: every kernel kind's generated source compiles with slangc (no GPU, no lock)
 sh test/gpuserv/locked_test.sh "$PWD" spec_dev.sh                           # kernel specialization tests on a small data set (the section scan_test.sh sources as spec_tests.inc)
 sh test/gpuserv/locked_test.sh "$PWD" perf_bench.sh                         # benchmark: 16.8M rows, GPU vs 8-worker PostgreSQL, kernel ms per task (SPECS="off default" compares variants)

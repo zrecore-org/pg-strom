@@ -164,6 +164,17 @@ gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
 gpusort_check: gpusort_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS) -lpthread
 
+# self-check of the software binary64 (kernels_vm/f64_soft.inc): the library as C against the host's hardware double,
+# and the same source compiled by slangc against the device (not part of "all"; test/gpuserv/f64soft_check.sh)
+build/f64soft_check.spv: kernels_check/f64soft_check.slang kernels_vm/f64_soft.inc | build
+	$(SLANGC) kernels_check/f64soft_check.slang -I kernels_vm -target spirv -entry main -stage compute -o $@
+
+f64soft_check.o: f64soft_check.c kernels_vm/f64_soft.inc gpu_vk.h
+	$(CC) $(CFLAGS) -ffp-contract=off -fno-fast-math -c -o $@ $<
+
+f64soft_check: f64soft_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ f64soft_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
+
 ARROW_INCS := kernels_vm/arrow_load.inc
 build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
@@ -245,6 +256,6 @@ check: gpuserv-probe proto_check
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check f64soft_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
 
 .PHONY: all check clean
