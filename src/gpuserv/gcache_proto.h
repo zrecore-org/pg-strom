@@ -48,6 +48,7 @@
 #define GCVT_INT			2		/* int1/2/4/8, date, time, timestamp, timestamptz */
 #define GCVT_FLOAT4			3
 #define GCVT_STR			4		/* text, varchar, bpchar */
+#define GCVT_FLOAT8			5		/* float8 */
 
 typedef struct
 {

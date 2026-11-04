@@ -856,6 +856,7 @@ vt_name(uint32_t vt)
 		case SOP_VT_BOOL:	return "bool";
 		case SOP_VT_INT:	return "integer";
 		case SOP_VT_FLOAT4:	return "float4";
+		case SOP_VT_FLOAT8:	return "float8";
 		case SOP_VT_STR:	return "text";
 		default:			return "?";
 	}
@@ -895,7 +896,7 @@ arrow_build_table(const arrow_src *as, const kern_data_store *kds, const scan_pr
 		t[0] = 0xffffffffU;
 		if (slot == 0xff)
 			continue;
-		if (vt != 0 && vt != SOP_VT_BOOL && vt != SOP_VT_INT && vt != SOP_VT_FLOAT4 &&
+		if (vt != 0 && vt != SOP_VT_BOOL && vt != SOP_VT_INT && vt != SOP_VT_FLOAT4 && vt != SOP_VT_FLOAT8 &&
 			vt != SOP_VT_NULLONLY && vt != SOP_VT_STR)
 		{
 			snprintf(err, errlen, "column %u: the expression reads a value type the Arrow scan does not load", c + 1);
@@ -1013,6 +1014,11 @@ arrow_build_table(const arrow_src *as, const kern_data_store *kds, const scan_pr
 				}
 				else
 					goto badtype;
+				break;
+			case SOP_VT_FLOAT8:		/* an Arrow double: the 64 bits are the register */
+				if (cm->attopts.tag != ArrowType__FloatingPoint || cm->attopts.unitsz != 8 || cm->attlen != 8)
+					goto badtype;
+				w = 8;
 				break;
 			default:	/* SOP_VT_FLOAT4 */
 				if (cm->attopts.tag != ArrowType__FloatingPoint || cm->attopts.unitsz != 4)

@@ -1295,6 +1295,12 @@ gcache_build_table(const gcache *g, const scan_prog *prog, uint32_t *tab, char *
 				t[2] = (uint32_t) col->v_off;
 				t[3] = 4;
 				break;
+			case SOP_VT_FLOAT8:
+				if (col->kind != GCK_FIXED || col->vt != GCVT_FLOAT8 || col->w != 8)
+					goto badtype;
+				t[2] = (uint32_t) col->v_off;
+				t[3] = 8;
+				break;
 			case SOP_VT_STR:
 				if (col->kind != GCK_VAR || col->vt != GCVT_STR)
 					goto badtype;

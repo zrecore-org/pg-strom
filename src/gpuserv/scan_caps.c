@@ -1170,6 +1170,80 @@ scan_vm_jsonb_pattern(const unsigned char *jb, uint32_t len, unsigned char *out,
 	return (int) bpos;
 }
 
+/* ----------------------------------------------------------------
+ * A10: float8
+ * ----------------------------------------------------------------
+ */
+
+/*
+ * float8eq ... float8ge, float8pl / mi / mul / div, float8um, float8up, float8abs; the mixed forms float48xx (the first
+ * argument is a float4) and float84xx (the second): width 1 / 2 says which argument is converted to float8 first;
+ * float8_to_int2/4/8 (width: the target's bits), float8_to_float4, intN_to_float8, float4_to_float8. The unary
+ * classes carry their kind in width: DUNARY 0 = negate, 1 = abs. float8 modulo does not exist in PostgreSQL.
+ */
+static scan_func_class
+classify_float8(const char *name)
+{
+	scan_func_class fc = {0, 0, 0};
+	const char *rest = NULL;
+	int			k, w;
+
+	if (!strncmp(name, "float8", 6) && strncmp(name, "float84", 7) != 0 && strncmp(name, "float82", 7) != 0)
+		rest = name + 6;
+	else if (!strncmp(name, "float48", 7))
+	{
+		rest = name + 7;
+		fc.width = 1;
+	}
+	else if (!strncmp(name, "float84", 7))
+	{
+		rest = name + 7;
+		fc.width = 2;
+	}
+	else if (!strcmp(name, "float4_to_float8"))
+	{
+		fc.cls = SOP_F2D;
+		return fc;
+	}
+	else if (!strncmp(name, "int", 3) && (w = int_width_of_digit(name[3])) != 0 && !strcmp(name + 4, "_to_float8"))
+	{
+		fc.cls = SOP_I2D;
+		return fc;
+	}
+	if (!rest)
+		return fc;
+	if (fc.width == 0)
+	{
+		if (!strncmp(rest, "_to_int", 7) && (w = int_width_of_digit(rest[7])) != 0 && rest[8] == '\0')
+		{
+			fc.cls = SOP_D2I;
+			fc.width = w;
+			return fc;
+		}
+		if (!strcmp(rest, "_to_float4"))
+		{
+			fc.cls = SOP_D2F;
+			return fc;
+		}
+		if (!strcmp(rest, "um")) { fc.cls = SOP_DUNARY; fc.width = 0; return fc; }
+		if (!strcmp(rest, "abs")) { fc.cls = SOP_DUNARY; fc.width = 1; return fc; }
+		if (!strcmp(rest, "up")) { fc.cls = SOP_MOV; return fc; }
+	}
+	if ((k = cmp_kind_of(rest)) >= 0)
+	{
+		fc.cls = SOP_CMPD;
+		fc.kind = k;
+	}
+	else if ((k = arith_kind_of(rest)) >= 0 && k != SOP_ARITH_MOD)
+	{
+		fc.cls = SOP_DARITH;
+		fc.kind = k;
+	}
+	else
+		fc.width = 0;
+	return fc;
+}
+
 /* "int4lt", "int48pl", "float4mul", "int4_to_int8", "booleq", "int4um" ... */
 scan_func_class
 scan_vm_classify_func(uint32_t opcode)
@@ -1187,6 +1261,8 @@ scan_vm_classify_func(uint32_t opcode)
 	if ((fc = classify_temporal(name)).cls != 0)
 		return fc;
 	if ((fc = classify_string(name)).cls != 0)
+		return fc;
+	if ((fc = classify_float8(name)).cls != 0)
 		return fc;
 	if (!strcmp(name, "booleq")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_EQ; return fc; }
 	if (!strcmp(name, "boolne")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_NE; return fc; }

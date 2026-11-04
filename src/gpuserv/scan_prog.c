@@ -115,6 +115,8 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		case TypeOpCode__int4:   *p_bytes = 4; return SOP_VT_INT;
 		case TypeOpCode__int8:   *p_bytes = 8; return SOP_VT_INT;
 		case TypeOpCode__float4: *p_bytes = 4; return SOP_VT_FLOAT4;
+		/* A10: float8 is the 64 bits of the double (the kernel computes with f64_soft.inc) */
+		case TypeOpCode__float8: *p_bytes = 8; return SOP_VT_FLOAT8;
 		/* A6: dates and times are integers (days, microseconds) */
 		case TypeOpCode__date:        *p_bytes = 4; return SOP_VT_INT;
 		case TypeOpCode__time:
@@ -595,7 +597,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 
 	if (fc.cls == SOP_CAST || fc.cls == SOP_MOV || fc.cls == SOP_I2F || fc.cls == SOP_F2I ||
 		fc.cls == -SOP_ARITH || fc.cls == SOP_D2TS || fc.cls == SOP_TS2D || fc.cls == SOP_STRLEN ||
-		fc.cls == SOP_I2N || fc.cls == SOP_N2I || (fc.cls == SOP_NUMARITH && fc.kind >= SOP_NUMOP_NEG))
+		fc.cls == SOP_I2N || fc.cls == SOP_N2I || (fc.cls == SOP_NUMARITH && fc.kind >= SOP_NUMOP_NEG) ||
+		fc.cls == SOP_I2D || fc.cls == SOP_D2I || fc.cls == SOP_F2D || fc.cls == SOP_D2F || fc.cls == SOP_DUNARY)
 	{
 		if (kexp->nr_args != 1)
 			return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
@@ -703,6 +706,19 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		else
 			rb = t;
 	}
+	if ((fc.cls == SOP_CMPD || fc.cls == SOP_DARITH) && fc.width != 0)
+	{
+		/* float48xx / float84xx: the float4 side (width 1: the left, 2: the right) is widened to float8 first, exactly */
+		int			t = new_reg(b, next);
+		int			fs = (fc.width == 1 ? ra : rb);
+
+		if (t < 0 || emit(b, SOP_F2D, t, fs, 0, 0, kexp->opcode) < 0)
+			return -1;
+		if (fc.width == 1)
+			ra = t;
+		else
+			rb = t;
+	}
 	if (fc.cls == SOP_DATEOP && fc.width == 1)
 	{
 		int			t = ra;			/* integer_pl_date(int4, date): date first */
@@ -727,7 +743,12 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		case SOP_CMPI:
 		case SOP_CMPF:
 		case SOP_NUMCMP:
+		case SOP_CMPD:
 			if (emit(b, fc.cls, dst, ra, rb, fc.kind, 0) < 0)
+				return -1;
+			break;
+		case SOP_DARITH:
+			if (emit(b, SOP_DARITH, dst, ra, rb, fc.kind, kexp->opcode) < 0)
 				return -1;
 			break;
 		case SOP_NUMARITH:
@@ -1352,7 +1373,7 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 	{
 		int		bytes, r;
 
-		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4 ||
+		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4 || karg->exptype == TypeOpCode__float8 ||
 			reg_vtype(karg->exptype, &bytes) == SOP_VT_STR || reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM ||
 			reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);

@@ -22,6 +22,7 @@
 
 #define SCANVM_OP(n, v) static const uint SOP_##n = v;
 #include "scan_vm_ops.inc"
+#include "f64_soft.inc"         // A10: float8 in 64-bit integer arithmetic (the device has no fp64)
 
 #ifndef VM_MAX_REGS
 #define VM_MAX_REGS 32
@@ -1249,6 +1250,99 @@ uint vm_json(uint op, uint dst, uint ra, uint rb, uint k0, inout Reg regs[VM_MAX
 }
 
 // Instructions of A6 (not in the original VM). Returns 0 or the error code.
+// The float8 instructions (A10): a register holds the 64 bits of the double, every operation is f64_soft.inc's.
+// Returns 0, or k1 | reason << 16 of the error PostgreSQL raises.
+uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    Reg y = regs[rb];
+
+    switch (op)
+    {
+    case SOP_CMPD:
+    {
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            return 0;
+        }
+        uint64_t kx = f64_key(uint64_t(x.v));
+        uint64_t ky = f64_key(uint64_t(y.v));
+        regs[dst].isnull = 0;
+        regs[dst].v = b2l(cmp_result(kx < ky ? -1 : (kx > ky ? 1 : 0), k0));
+        return 0;
+    }
+    case SOP_DARITH:
+    {
+        if ((x.isnull | y.isnull) != 0)
+        {
+            regs[dst].isnull = 1;
+            return 0;
+        }
+        uint64_t a = uint64_t(x.v);
+        uint64_t b = uint64_t(y.v);
+        uint64_t r = f64_arith(k0, a, b);
+        uint e = f64_arith_err(k0, a, b, r);
+        if (e != 0u)
+            return k1 | (e << 16);
+        regs[dst].v = int64_t(r);
+        regs[dst].isnull = 0;
+        return 0;
+    }
+    case SOP_DUNARY:
+    {
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+            regs[dst].v = int64_t((k0 == 0u) ? (uint64_t(x.v) ^ F64_SIGN) : (uint64_t(x.v) & F64_MAG));
+        return 0;
+    }
+    case SOP_I2D:
+    {
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+            regs[dst].v = int64_t(f64_from_i64(x.v));
+        return 0;
+    }
+    case SOP_D2I:
+    {
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            uint64_t a = uint64_t(x.v);
+            if (!f64_fits_i64(a))
+                return k1 | (SOP_ERR_INTRANGE << 16);
+            int64_t r = f64_to_i64_rint(a);
+            if (out_of_range(r, k0))
+                return k1 | (SOP_ERR_INTRANGE << 16);
+            regs[dst].v = r;
+        }
+        return 0;
+    }
+    case SOP_F2D:
+    {
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+            regs[dst].v = int64_t(f64_from_f32(uint(x.v)));
+        return 0;
+    }
+    default:    // SOP_D2F
+    {
+        regs[dst].isnull = x.isnull;
+        if (x.isnull == 0)
+        {
+            uint64_t a = uint64_t(x.v);
+            uint r = f64_to_f32(a, 0u);
+            uint e = f64_to_f32_err(a, r);
+            if (e != 0u)
+                return k1 | (e << 16);
+            regs[dst].v = int64_t(r);
+        }
+        return 0;
+    }
+    }
+    return 0;
+}
+
 uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     switch (op)
@@ -1437,6 +1531,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_num(op, dst, ra, rb, k0, k1, regs);
         if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
             return vm_json(op, dst, ra, rb, k0, regs);
+        if (op >= SOP_CMPD && op <= SOP_D2F)
+            return vm_f8(op, dst, ra, rb, k0, k1, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;
@@ -1710,7 +1806,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 tiny = (abs(r) < 1.17549435e-38) && a != 0 && b != 0;
                 break;
             default:    // SOP_ARITH_DIV
-                if (b == 0)
+                if (b == 0 && !isnan(a))        // float4div: NaN / 0 is NaN
                 {
                     bad = true;
                     why = SOP_ERR_ZERODIV;

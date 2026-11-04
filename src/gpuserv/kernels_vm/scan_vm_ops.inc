@@ -67,6 +67,18 @@
  *   JSONCONT   dst = a @> pattern (k0 = pool word offset of the compiled pattern, scan_caps.c)
  * Whatever these cannot decide exactly returns SCANVM_RECHECK_CODE.
  *
+ * float8 (A10): a float8 register holds the 64 bits of the double. There is no float arithmetic in the kernel: the
+ * operations are the integer software binary64 of f64_soft.inc (bit-identical to a hardware double, PostgreSQL's
+ * float8 order and error rules), so they run on devices without fp64.
+ *
+ *   CMPD     dst = cmp(a, b) on float8; k0 = SCANVM_CMP_* (NaN equals NaN and sorts last, -0 = +0)
+ *   DARITH   dst = a op b on float8; k0 = SCANVM_ARITH_PL/MI/MUL/DIV, k1 = error id (overflow, underflow, division by zero)
+ *   DUNARY   dst = -a (k0 = 0) or abs(a) (k0 = 1)
+ *   I2D      dst = (float8) a (an integer)
+ *   D2I      dst = rint(a) as an integer of k0 bits (range checked, error id k1)
+ *   F2D      dst = (float8) a (a float4, exact)
+ *   D2F      dst = (float4) a (nearest even; overflow and underflow errors, error id k1)
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -107,6 +119,13 @@ SCANVM_OP(JSONTYPE,   103)
 SCANVM_OP(JSONNUM,    104)
 SCANVM_OP(JSONINT,    105)
 SCANVM_OP(JSONCONT,   106)
+SCANVM_OP(CMPD,       120)
+SCANVM_OP(DARITH,     121)
+SCANVM_OP(DUNARY,     122)
+SCANVM_OP(I2D,        123)
+SCANVM_OP(D2I,        124)
+SCANVM_OP(F2D,        125)
+SCANVM_OP(D2F,        126)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
 /* unary numeric operations (NUMARITH k0) */
@@ -161,3 +180,4 @@ SCANVM_OP(VT_NULLONLY,4)   /* any type: only NULL-ness is loaded (IS [NOT] NULL)
 SCANVM_OP(VT_STR,   5)     /* text/varchar/bpchar: a string register (see above) */
 SCANVM_OP(VT_NUM,   6)     /* numeric: { unscaled, scale } (see above); not readable -> row rechecked */
 SCANVM_OP(VT_JSON,  7)     /* jsonb: a register pointing at the container (see above); not readable -> row rechecked */
+SCANVM_OP(VT_FLOAT8,8)     /* float8: the 64 bits of the double (see above) */

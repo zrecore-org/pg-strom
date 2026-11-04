@@ -19,7 +19,7 @@ check "the extra Arrow test data generator builds" $?
 sql "create foreign table ad (k int4, grp int4, pay int8, txt text, k8 int8) server arrow_fdw options (file '$ARROWDIR/ad.arrow')"
 sql "create foreign table adp (k int4, grp int4, pay int8, txt text, k8 int8) server arrow_fdw options (file '$ARROWDIR/adp.parquet')"
 sql "create foreign table ad2 (k2 int4, g2 int4, p2 int8) server arrow_fdw options (file '$ARROWDIR/ad2.arrow')"
-ATDEF="(i int8, ts_s timestamp, ts_ms timestamp, ts_us timestamp, ts_ns timestamp, d32 date, t_s time, t_ms time, t_us time, t_ns time, u8 text, lu text, fx char(5), g int4, v int8)"
+ATDEF="(i int8, ts_s timestamp, ts_ms timestamp, ts_us timestamp, ts_ns timestamp, d32 date, t_s time, t_ms time, t_us time, t_ns time, u8 text, lu text, fx char(5), g int4, v int8, x float8)"
 sql "create foreign table at1 $ATDEF server arrow_fdw options (file '$ARROWDIR/at1.arrow')"
 sql "create foreign table at2 $ATDEF server arrow_fdw options (file '$ARROWDIR/at2.arrow')"
 sql "analyze ad"; sql "analyze adp"; sql "analyze ad2"; sql "analyze at1"; sql "analyze at2"
@@ -201,6 +201,10 @@ for t in at1 at2; do
 	aagg_any $t "group by time[s], time[ms]" "select t_s, t_ms, count(*) from %T where i < 3000 and g = 2 group by 1, 2 order by 1, 2"
 	aagg $t "aggregates with a utf8 qual and a char(5) qual" "select count(*), sum(v), max(i) from %T where u8 like 'a%' and fx <> 'abbcd'"
 	aagg $t "group by an integer key with a timestamp[ns] qual" "select g, count(*), sum(v), min(v), max(v) from %T where ts_ns > '2017-07-14 02:40:10'::timestamp group by 1 order by 1"
+	run $t "float8 (Arrow double) compare incl. NaN, Infinity, -0" "select i, x from %T where x > 100.5 or x = 'NaN' or x = '-Infinity' or x = 0"
+	run $t "float8 column arithmetic" "select i, x * 2.5 + 1, x / 3, -x, abs(x) from %T where i % 7 = 3 and abs(x) < 1e6 and abs(x) > 1e-100"
+	run $t "float8 cast to int and float4" "select i, x::int4, (x / 7)::float4 from %T where i % 5 = 1 and abs(x) < 1e9 and x = x"
+	run $t "float8 IS NULL and a float8 / int8 mix" "select i, x + v::float8 from %T where x is not null and v > 0 and i % 3 = 0 and abs(x) < 1e9"
 done
 adim=sd; adim2=sd2
 for t in at1 at2; do

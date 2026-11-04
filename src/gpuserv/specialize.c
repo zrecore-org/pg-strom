@@ -100,6 +100,7 @@ op_known(uint32_t op)
 		case SOP_CONSTSTR: case SOP_STRCMP: case SOP_STRLIKE: case SOP_STRLEN:
 		case SOP_NUMCONST: case SOP_NUMCMP: case SOP_NUMARITH: case SOP_I2N: case SOP_N2I:
 		case SOP_NUMDIV: case SOP_NUMRND:
+		case SOP_CMPD: case SOP_DARITH: case SOP_DUNARY: case SOP_I2D: case SOP_D2I: case SOP_F2D: case SOP_D2F:
 			return 1;
 	}
 	return 0;

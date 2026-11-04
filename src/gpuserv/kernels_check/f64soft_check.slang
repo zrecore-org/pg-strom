@@ -35,6 +35,11 @@ void main(uint3 tid : SV_DispatchThreadID)
 	else if (pc.op == 13u) r = (uint64_t) f64_to_i64_rint(a);
 	else if (pc.op == 14u) r = f64_from_i64((int64_t) a);
 	else if (pc.op == 15u) r = f64_from_f32((uint)(a & 0xFFFFFFFFull));
-	else                   r = (uint64_t) f64_to_f32(a, pc.mode);
+	else if (pc.op == 16u || pc.op == 17u || pc.op == 18u) r = (uint64_t) f64_to_f32(a, pc.mode);
+	else if (pc.op == 19u) r = (uint64_t) f64_arith_err(0u, a, b, f64_arith(0u, a, b));
+	else if (pc.op == 20u) r = (uint64_t) f64_arith_err(1u, a, b, f64_arith(1u, a, b));
+	else if (pc.op == 21u) r = (uint64_t) f64_arith_err(2u, a, b, f64_arith(2u, a, b));
+	else if (pc.op == 22u) r = (uint64_t) f64_arith_err(3u, a, b, f64_arith(3u, a, b));
+	else                   r = (uint64_t) f64_to_f32_err(a, f64_to_f32(a, 0u));
 	outR[i] = r;
 }

@@ -21,6 +21,7 @@
 #include <math.h>
 #include <float.h>
 #include "gpu_vk.h"
+#include "scan_caps.h"
 
 #define F64SOFT_C 1
 #include "kernels_vm/f64_soft.inc"
@@ -228,6 +229,44 @@ static uint64_t h_tof32(uint64_t a, uint64_t b, uint32_t m)
 	return f2u(r);
 }
 
+/* the error PostgreSQL raises (float.c): written from its code, on the hardware double */
+static uint64_t pg_err_arith(int op, double a, double b)
+{
+	double r;
+
+	if (op == 3 && b == 0.0 && !isnan(a))
+		return 1;							/* division by zero (float8div: not for a NaN dividend) */
+	r = op == 0 ? a + b : op == 1 ? a - b : op == 2 ? a * b : a / b;
+	if (isinf(r) && !isinf(a) && !isinf(b))
+		return 3;							/* overflow */
+	if (op == 2 && r == 0.0 && a != 0.0 && b != 0.0)
+		return 4;							/* underflow */
+	if (op == 3 && r == 0.0 && a != 0.0 && !isinf(b))
+		return 4;
+	return 0;
+}
+static uint64_t s_err_add(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_arith_err(0, a, b, f64_arith(0, a, b)); }
+static uint64_t s_err_sub(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_arith_err(1, a, b, f64_arith(1, a, b)); }
+static uint64_t s_err_mul(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_arith_err(2, a, b, f64_arith(2, a, b)); }
+static uint64_t s_err_div(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_arith_err(3, a, b, f64_arith(3, a, b)); }
+static uint64_t h_err_add(uint64_t a, uint64_t b, uint32_t m) { (void) m; return pg_err_arith(0, u2d(a), u2d(b)); }
+static uint64_t h_err_sub(uint64_t a, uint64_t b, uint32_t m) { (void) m; return pg_err_arith(1, u2d(a), u2d(b)); }
+static uint64_t h_err_mul(uint64_t a, uint64_t b, uint32_t m) { (void) m; return pg_err_arith(2, u2d(a), u2d(b)); }
+static uint64_t h_err_div(uint64_t a, uint64_t b, uint32_t m) { (void) m; return pg_err_arith(3, u2d(a), u2d(b)); }
+static uint64_t s_err_f32(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return f64_to_f32_err(a, f64_to_f32(a, 0)); }
+static uint64_t h_err_f32(uint64_t a, uint64_t b, uint32_t m)
+{
+	double num = u2d(a);
+	float result = (float) num;
+
+	(void) b; (void) m;
+	if (isinf(result) && !isinf(num))
+		return 3;
+	if (result == 0.0f && num != 0.0)
+		return 4;
+	return 0;
+}
+
 /* kind: 0 plain 64-bit, 1 value compared only where the guard (the previous op) is true, 2 32-bit result */
 static const f64op ops[] = {
 	{ "add",    s_add,    h_add,    0, 0 },
@@ -249,7 +288,16 @@ static const f64op ops[] = {
 	{ "to_f32_rn", s_tof32, h_tof32, 2, 0 },
 	{ "to_f32_rd", s_tof32, h_tof32, 2, 1 },
 	{ "to_f32_ru", s_tof32, h_tof32, 2, 2 },
+	{ "err_add", s_err_add, h_err_add, 0, 0 },
+	{ "err_sub", s_err_sub, h_err_sub, 0, 0 },
+	{ "err_mul", s_err_mul, h_err_mul, 0, 0 },
+	{ "err_div", s_err_div, h_err_div, 0, 0 },
+	{ "err_to_f32", s_err_f32, h_err_f32, 0, 0 },
 };
+
+/* the error numbers of the library are those of the VM */
+_Static_assert(F64_E_ZERODIV == SOP_ERR_ZERODIV && F64_E_OVER == SOP_ERR_FLTOVER && F64_E_UNDER == SOP_ERR_FLTUNDER,
+			   "f64_soft.inc error numbers differ from scan_vm_ops.inc");
 #define NOPS ((int)(sizeof(ops) / sizeof(ops[0])))
 
 /* the operands an operation is given (from_i64 and from_f32 take an integer pattern) */

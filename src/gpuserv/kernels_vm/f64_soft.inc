@@ -11,6 +11,8 @@
 //   f64_eq f64_ne f64_lt f64_le f64_gt f64_ge     (float8_eq ... float8_ge of PostgreSQL)
 //   f64_rint f64_fits_i64 f64_to_i64_rint f64_from_i64
 //   f64_from_f32 f64_to_f32(mode)   mode 0: nearest even, 1: toward -inf, 2: toward +inf (the last two for PostGIS bounding boxes)
+//   f64_arith f64_arith_err f64_to_f32_err      PostgreSQL's float8pl/mi/mul/div and float8 -> float4: the result and the
+//                                   error (overflow, underflow, division by zero) the CPU would raise for it
 //
 // The source is the common subset of C and Slang, so the same text is checked against the host's hardware double in
 // bulk (src/gpuserv/f64soft_check.c, which defines F64SOFT_C) and compiled into the kernels. Shift counts are always
@@ -479,4 +481,51 @@ F64S_FN uint f64_to_f32(uint64_t a, uint mode)
 	if ((mode == 1u && sign == 0u) || (mode == 2u && sign != 0u))
 		return sgn | 0x7F7FFFFFu;
 	return sgn | 0x7F800000u;
+}
+
+// ---- PostgreSQL's float8 operators: result and error rules (float.c, PostgreSQL 15 - 19) ----
+
+// error reasons returned by f64_arith_err (the same numbers as SCANVM_ERR_ZERODIV, _FLTOVER, _FLTUNDER of scan_vm_ops.inc)
+#define F64_E_ZERODIV	1u
+#define F64_E_OVER		3u
+#define F64_E_UNDER		4u
+
+F64S_FN bool f64_isinf(uint64_t a) { return (a & F64_MAG) == F64_INF; }
+F64S_FN bool f64_iszero(uint64_t a) { return (a & F64_MAG) == 0ull; }
+
+// op: 0 float8pl, 1 float8mi, 2 float8mul, 3 float8div (SCANVM_ARITH_PL ... SCANVM_ARITH_DIV)
+F64S_FN uint64_t f64_arith(uint op, uint64_t a, uint64_t b)
+{
+	if (op == 0u)
+		return f64_add(a, b);
+	if (op == 1u)
+		return f64_sub(a, b);
+	if (op == 2u)
+		return f64_mul(a, b);
+	return f64_div(a, b);
+}
+
+// 0, or the error PostgreSQL raises for a op b = r: division by zero (not for a NaN dividend: NaN / 0 is NaN), then
+// overflow (an infinite result from finite operands), then underflow (mul, div: a zero result from non-zero operands)
+F64S_FN uint f64_arith_err(uint op, uint64_t a, uint64_t b, uint64_t r)
+{
+	if (op == 3u && f64_iszero(b) && (a & F64_MAG) <= F64_INF)
+		return F64_E_ZERODIV;
+	if (f64_isinf(r) && !f64_isinf(a) && !f64_isinf(b))
+		return F64_E_OVER;
+	if (op == 2u && f64_iszero(r) && !f64_iszero(a) && !f64_iszero(b))
+		return F64_E_UNDER;
+	if (op == 3u && f64_iszero(r) && !f64_iszero(a) && !f64_isinf(b))
+		return F64_E_UNDER;
+	return 0u;
+}
+
+// dtof(): r is f64_to_f32(a, 0)
+F64S_FN uint f64_to_f32_err(uint64_t a, uint r)
+{
+	if ((r & 0x7FFFFFFFu) == 0x7F800000u && !f64_isinf(a))
+		return F64_E_OVER;
+	if ((r & 0x7FFFFFFFu) == 0u && !f64_iszero(a))
+		return F64_E_UNDER;
+	return 0u;
 }

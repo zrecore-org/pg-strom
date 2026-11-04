@@ -383,6 +383,7 @@ echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported
 . "${0%/*}/types_tests.inc"
 . "${0%/*}/numeric_tests.inc"
 . "${0%/*}/jsonb_tests.inc"
+. "${0%/*}/float8_tests.inc"
 . "${0%/*}/fuzz_regress.inc"
 . "${0%/*}/gpusort_tests.inc"
 . "${0%/*}/gpucache_tests.inc"

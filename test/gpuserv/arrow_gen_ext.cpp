@@ -5,7 +5,8 @@
 //                                                               (k, grp, pay with NULLs, txt, k8; duplicate keys)
 //   arrow_gen_ext dim2  <out.arrow> <rows-per-batch>            the data of sd2 (k2, g2, p2)
 //   arrow_gen_ext types <out.arrow> <nrows> <rows-per-batch>    timestamps of every unit, dates, times of every unit,
-//                                                               utf8, large_utf8, fixed_size_binary(5), a key and a value
+//                                                               utf8, large_utf8, fixed_size_binary(5), a key and a value,
+//                                                               and a double (NULLs, NaN, infinities, -0, subnormals)
 //
 // Build: c++ -std=c++20 -O2 arrow_gen_ext.cpp -o arrow_gen_ext $(pkg-config --cflags --libs arrow parquet)
 #include <arrow/api.h>
@@ -15,6 +16,7 @@
 #include <parquet/arrow/writer.h>
 #endif
 #include <cstdint>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -180,10 +182,12 @@ main(int argc, char **argv)
 			arrow::field("fx", arrow::fixed_size_binary(5)),
 			arrow::field("g", arrow::int32()),
 			arrow::field("v", arrow::int64()),
+			arrow::field("x", arrow::float64()),
 		});
 		for (int64_t base = 0; base < nrows; base += per_batch)
 		{
 			int64_t		n = std::min(per_batch, nrows - base);
+			arrow::DoubleBuilder bx;
 			arrow::Int64Builder bi, bv;
 			arrow::TimestampBuilder bts(arrow::timestamp(arrow::TimeUnit::SECOND), arrow::default_memory_pool());
 			arrow::TimestampBuilder btms(arrow::timestamp(arrow::TimeUnit::MILLI), arrow::default_memory_pool());
@@ -224,13 +228,25 @@ main(int argc, char **argv)
 				}
 				OK(bg.Append((int32_t)(i % 5)));
 				OK(bv.Append(i * 1000003LL % 100000007LL - 50000000LL));
+				switch (i % 20)
+				{
+					case 0:  OK(bx.AppendNull()); break;
+					case 1:  OK(bx.Append(std::numeric_limits<double>::quiet_NaN())); break;
+					case 2:  OK(bx.Append(std::numeric_limits<double>::infinity())); break;
+					case 3:  OK(bx.Append(-std::numeric_limits<double>::infinity())); break;
+					case 4:  OK(bx.Append(-0.0)); break;
+					case 5:  OK(bx.Append(4.9406564584124654e-324)); break;
+					case 6:  OK(bx.Append(2.5)); break;
+					case 7:  OK(bx.Append(-2.5)); break;
+					default: OK(bx.Append((double)((i * 7919LL) % 200001 - 100000) / 37.0)); break;
+				}
 			}
-			std::shared_ptr<arrow::Array> a[15];
+			std::shared_ptr<arrow::Array> a[16];
 			OK(bi.Finish(&a[0])); OK(bts.Finish(&a[1])); OK(btms.Finish(&a[2])); OK(btus.Finish(&a[3]));
 			OK(btns.Finish(&a[4])); OK(bd.Finish(&a[5])); OK(bt_s.Finish(&a[6])); OK(bt_ms.Finish(&a[7]));
 			OK(bt_us.Finish(&a[8])); OK(bt_ns.Finish(&a[9])); OK(bu8.Finish(&a[10])); OK(blu.Finish(&a[11]));
-			OK(bfx.Finish(&a[12])); OK(bg.Finish(&a[13])); OK(bv.Finish(&a[14]));
-			std::vector<std::shared_ptr<arrow::Array>> cols(a, a + 15);
+			OK(bfx.Finish(&a[12])); OK(bg.Finish(&a[13])); OK(bv.Finish(&a[14])); OK(bx.Finish(&a[15]));
+			std::vector<std::shared_ptr<arrow::Array>> cols(a, a + 16);
 			batches.push_back(arrow::RecordBatch::Make(schema, n, cols));
 		}
 		write_out(path, schema, batches, per_batch);

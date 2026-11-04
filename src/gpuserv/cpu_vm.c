@@ -64,6 +64,38 @@ f_to_bits(float f)
 	return u;
 }
 
+/* A10: float8 (the registers hold the 64 bits of the double) */
+static double
+bits_to_d(uint64_t u)
+{
+	double		d;
+
+	memcpy(&d, &u, 8);
+	return d;
+}
+
+static uint64_t
+d_to_bits(double d)
+{
+	uint64_t	u;
+
+	memcpy(&u, &d, 8);
+	return u;
+}
+
+/* -1, 0, +1; NaN is equal to NaN and larger than everything else (float8_cmp_internal) */
+static int
+f8cmp(double a, double b)
+{
+	int na = isnan(a), nb = isnan(b);
+
+	if (na)
+		return nb ? 0 : 1;
+	if (nb)
+		return -1;
+	return a < b ? -1 : (a > b ? 1 : 0);
+}
+
 /*
  * A6: strings. A string register is { offset | length << 32 | source << 60 }; here the source is 0
  * (the heap tuple's page: offsets are relative to the tuple header) or 3 (the program's constant pool).
@@ -1006,7 +1038,7 @@ vm_run(const vm_env *env, const uint32_t *insn, uint32_t ip, uint32_t end, vm_re
 							why = SOP_ERR_FLTUNDER;
 						break;
 					default:
-						if (b == 0)
+						if (b == 0 && !isnan(a))		/* float4div: NaN / 0 is NaN */
 						{
 							bad = 1;
 							why = SOP_ERR_ZERODIV;
@@ -1024,6 +1056,121 @@ vm_run(const vm_env *env, const uint32_t *insn, uint32_t ip, uint32_t end, vm_re
 					return k1 | (why << 16);
 				regs[dst].v = (int64_t) f_to_bits(r);
 				regs[dst].isnull = 0;
+				break;
+			}
+			case SOP_CMPD:
+			{
+				vm_reg	x = regs[ra], y = regs[rb];
+
+				if (x.isnull || y.isnull)
+					regs[dst].isnull = 1;
+				else
+				{
+					regs[dst].isnull = 0;
+					regs[dst].v = cmp_result(f8cmp(bits_to_d((uint64_t) x.v), bits_to_d((uint64_t) y.v)), k0);
+				}
+				break;
+			}
+			case SOP_DARITH:
+			{
+				vm_reg	x = regs[ra], y = regs[rb];
+				volatile double a, b, r = 0;		/* volatile: separate operations, never fused */
+				uint32_t why = 0;
+
+				if (x.isnull || y.isnull)
+				{
+					regs[dst].isnull = 1;
+					break;
+				}
+				a = bits_to_d((uint64_t) x.v);
+				b = bits_to_d((uint64_t) y.v);
+				if (k0 == SOP_ARITH_DIV && b == 0.0 && !isnan(a))		/* float8div: NaN / 0 is NaN */
+					why = SOP_ERR_ZERODIV;
+				else
+				{
+					switch (k0)
+					{
+						case SOP_ARITH_PL: r = a + b; break;
+						case SOP_ARITH_MI: r = a - b; break;
+						case SOP_ARITH_MUL: r = a * b; break;
+						default: r = a / b; break;
+					}
+					if (isinf(r) && !isinf(a) && !isinf(b))
+						why = SOP_ERR_FLTOVER;
+					else if (k0 == SOP_ARITH_MUL && r == 0.0 && a != 0.0 && b != 0.0)
+						why = SOP_ERR_FLTUNDER;
+					else if (k0 == SOP_ARITH_DIV && r == 0.0 && a != 0.0 && !isinf(b))
+						why = SOP_ERR_FLTUNDER;
+				}
+				if (why)
+					return k1 | (why << 16);
+				regs[dst].v = (int64_t) d_to_bits(r);
+				regs[dst].isnull = 0;
+				break;
+			}
+			case SOP_DUNARY:
+			{
+				vm_reg	x = regs[ra];
+
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+					regs[dst].v = (int64_t) (k0 == 0 ? ((uint64_t) x.v ^ 0x8000000000000000ull)
+												 : ((uint64_t) x.v & 0x7fffffffffffffffull));
+				break;
+			}
+			case SOP_I2D:
+			{
+				vm_reg	x = regs[ra];
+
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+					regs[dst].v = (int64_t) d_to_bits((double) x.v);
+				break;
+			}
+			case SOP_D2I:
+			{
+				vm_reg	x = regs[ra];
+
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+				{
+					double	d = rint(bits_to_d((uint64_t) x.v));
+					int64_t	r;
+
+					if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))	/* false for NaN */
+						return k1 | (SOP_ERR_INTRANGE << 16);
+					r = (int64_t) d;
+					if (out_of_range(r, k0))
+						return k1 | (SOP_ERR_INTRANGE << 16);
+					regs[dst].v = r;
+				}
+				break;
+			}
+			case SOP_F2D:
+			{
+				vm_reg	x = regs[ra];
+
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+					regs[dst].v = (int64_t) d_to_bits((double) bits_to_f((uint32_t) x.v));
+				break;
+			}
+			case SOP_D2F:
+			{
+				vm_reg	x = regs[ra];
+
+				regs[dst].isnull = x.isnull;
+				if (!x.isnull)
+				{
+					double	d = bits_to_d((uint64_t) x.v);
+					float	f = (float) d;
+
+					if (isinf(f) && !isinf(d))
+						return k1 | (SOP_ERR_FLTOVER << 16);
+					if (f == 0.0f && d != 0.0)
+						return k1 | (SOP_ERR_FLTUNDER << 16);
+					regs[dst].v = (int64_t) f_to_bits(f);
+				}
 				break;
 			}
 			case SOP_I2F:

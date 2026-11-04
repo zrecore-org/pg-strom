@@ -1287,6 +1287,8 @@ __gpuCacheColumnVt(Form_pg_attribute attr)
 									   attr->attlen == 4 || attr->attlen == 8)) ? GCVT_INT : GCVT_NONE;
 		case TypeOpCode__float4:
 			return (attr->attbyval && attr->attlen == 4) ? GCVT_FLOAT4 : GCVT_NONE;
+		case TypeOpCode__float8:
+			return (attr->attbyval && attr->attlen == 8) ? GCVT_FLOAT8 : GCVT_NONE;
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:
 			return (attr->attlen == -1) ? GCVT_STR : GCVT_NONE;
