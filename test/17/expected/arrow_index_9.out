@@ -175,16 +175,17 @@ EXPLAIN (ANALYZE,COSTS OFF,TIMING OFF,SUMMARY OFF,BUFFERS OFF)
 SELECT count(*)
   FROM regtest_arrow
  WHERE float_num between -2000 and 2000;
-                                                           QUERY PLAN                                                           
---------------------------------------------------------------------------------------------------------------------------------
+                                                               QUERY PLAN                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------
  Aggregate (actual rows=1 loops=1)
-   ->  Foreign Scan on regtest_arrow (actual rows=199780 loops=1)
-         Filter: ((float_num >= '-2000'::double precision) AND (float_num <= '2000'::double precision))
-         Rows Removed by Filter: 110909
+   ->  Custom Scan (GpuPreAgg) on regtest_arrow (actual rows=1 loops=1)
+         GPU Projection: pgstrom.nrows()
          referenced: float_num
+         GPU Scan Quals: ((float_num >= '-2000'::double precision) AND (float_num <= '2000'::double precision)) [exec: 310689 -> 199780]
+         GPU Group Key: 
          Stats-Hint: (float_num >= '-2000'::double precision), (float_num <= '2000'::double precision)  [loaded: 1, skipped: 3]
          file0: test_arrow_index.data (read: 7812.50KB, size: 51.50MB)
-(7 rows)
+(8 rows)
 
 SELECT count(*)
   FROM regtest_arrow

@@ -85,11 +85,11 @@ SELECT id, a::float4, e::float4, x::float4, y::float4, z::float4, p::float4
   INTO test02g
   FROM rt_float
  WHERE x < 0;
-                                                              QUERY PLAN                                                               
----------------------------------------------------------------------------------------------------------------------------------------
+                                                                  QUERY PLAN                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a)::real, (e)::real, ((x)::real), ((y)::real), ((z)::real), ((p)::real)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.e, (rt_float.x)::real, (rt_float.y)::real, (rt_float.z)::real, (rt_float.p)::real
+   Output: id, (a)::real, ((e)::real), ((x)::real), ((y)::real), ((z)::real), ((p)::real)
+   GPU Projection: rt_float.id, rt_float.a, (rt_float.e)::real, (rt_float.x)::real, (rt_float.y)::real, (rt_float.z)::real, (rt_float.p)::real
    GPU Scan Quals: (rt_float.x < 0)
 (4 rows)
 
@@ -119,11 +119,11 @@ SELECT id, a::float8, c::float8, x::float8, y::float8, z::float8, p::float8
   INTO test03g
   FROM rt_float
  WHERE x > 0;
-                                                                       QUERY PLAN                                                                       
---------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                QUERY PLAN                                                                                                 
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a)::double precision, (c)::double precision, (x)::double precision, (y)::double precision, (z)::double precision, (p)::double precision
-   GPU Projection: rt_float.id, rt_float.a, rt_float.c, rt_float.x, rt_float.y, rt_float.z, rt_float.p
+   Output: id, (a)::double precision, ((c)::double precision), ((x)::double precision), ((y)::double precision), ((z)::double precision), ((p)::double precision)
+   GPU Projection: rt_float.id, rt_float.a, (rt_float.c)::double precision, (rt_float.x)::double precision, (rt_float.y)::double precision, (rt_float.z)::double precision, (rt_float.p)::double precision
    GPU Scan Quals: (rt_float.x > 0)
 (4 rows)
 
@@ -156,11 +156,11 @@ SELECT id, a+b v1, a+c v2, a+e v3,
   INTO test10g
   FROM rt_float
  WHERE y BETWEEN -16000 AND 16000;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                        QUERY PLAN                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a + b), (a + c), (a + e), (c + b), ((c + d)), (c + e), (e + b), (e + d), (e + f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.c, rt_float.e, (rt_float.c + rt_float.d), rt_float.d, rt_float.f
+   Output: id, (a + b), (a + c), (a + e), (c + b), ((c + d)), ((c + e)), (e + b), ((e + d)), ((e + f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.c, rt_float.e, (rt_float.c + rt_float.d), (rt_float.c + rt_float.e), (rt_float.e + rt_float.d), (rt_float.e + rt_float.f)
    GPU Scan Quals: ((rt_float.y >= '-16000'::integer) AND (rt_float.y <= 16000))
 (4 rows)
 
@@ -197,11 +197,11 @@ SELECT id, a-b v1, a-c v2, a-e v3,
   INTO test11g
   FROM rt_float
  WHERE y < 0;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                        QUERY PLAN                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a - b), (a - c), (a - e), (c - b), ((c - d)), (c - e), (e - b), (e - d), (e - f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.c, rt_float.e, (rt_float.c - rt_float.d), rt_float.d, rt_float.f
+   Output: id, (a - b), (a - c), (a - e), (c - b), ((c - d)), ((c - e)), (e - b), ((e - d)), ((e - f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.c, rt_float.e, (rt_float.c - rt_float.d), (rt_float.c - rt_float.e), (rt_float.e - rt_float.d), (rt_float.e - rt_float.f)
    GPU Scan Quals: (rt_float.y < 0)
 (4 rows)
 
@@ -238,11 +238,11 @@ SELECT id, a*b v1, a*c v2, a*e v3,
   INTO test12g
   FROM rt_float
  WHERE y > 0;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                        QUERY PLAN                                                                                         
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a * b), (a * c), (a * e), (c * b), ((c * d)), (c * e), (e * b), (e * d), (e * f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.c, rt_float.e, (rt_float.c * rt_float.d), rt_float.d, rt_float.f
+   Output: id, (a * b), (a * c), (a * e), (c * b), ((c * d)), ((c * e)), (e * b), ((e * d)), ((e * f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.c, rt_float.e, (rt_float.c * rt_float.d), (rt_float.c * rt_float.e), (rt_float.e * rt_float.d), (rt_float.e * rt_float.f)
    GPU Scan Quals: (rt_float.y > 0)
 (4 rows)
 
@@ -280,13 +280,13 @@ SELECT id, a/b v1, a/d v2, a/f v3,
   FROM rt_float
  WHERE z BETWEEN -16000 AND 16000
    AND b != 0.0 AND d != 0.0 AND f != 0.0;
-                                                              QUERY PLAN                                                               
----------------------------------------------------------------------------------------------------------------------------------------
+                                                                             QUERY PLAN                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
    Output: id, (a / b), (a / d), (a / f), (c / b), (c / d), (c / f), (e / b), (e / d), (e / f)
-   Filter: ((rt_float.b <> '0'::double precision) AND (rt_float.d <> '0'::double precision) AND (rt_float.f <> '0'::double precision))
+   Filter: (rt_float.b <> '0'::double precision)
    GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, rt_float.e
-   GPU Scan Quals: ((rt_float.z >= '-16000'::integer) AND (rt_float.z <= 16000))
+   GPU Scan Quals: ((rt_float.z >= '-16000'::integer) AND (rt_float.z <= 16000) AND (rt_float.d <> '0'::double precision) AND (rt_float.f <> '0'::double precision))
 (5 rows)
 
 SELECT id, a/b v1, a/d v2, a/f v3,
@@ -324,11 +324,11 @@ SELECT id, +a v1, -b v2, @(a+b) v3,
   INTO test14g
   FROM rt_float
  WHERE z < 0;
-                                                      QUERY PLAN                                                       
------------------------------------------------------------------------------------------------------------------------
+                                                                          QUERY PLAN                                                                          
+--------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (+ a), (- b), (@ (a + b)), ((+ c)), (- d), (@ (c + d)), (+ e), (- f), (@ (e + f))
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, (+ rt_float.c), rt_float.d, rt_float.c, rt_float.e, rt_float.f
+   Output: id, (+ a), (- b), (@ (a + b)), ((+ c)), (- d), (@ (c + d)), ((+ e)), ((- f)), ((@ (e + f)))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, (+ rt_float.c), rt_float.d, rt_float.c, (+ rt_float.e), (- rt_float.f), (@ (rt_float.e + rt_float.f))
    GPU Scan Quals: (rt_float.z < 0)
 (4 rows)
 
@@ -365,11 +365,11 @@ SELECT id, a=b v1, a=d v2, a=f v3,
   INTO test20g
   FROM rt_float
  WHERE id % 6 = 0;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                                    QUERY PLAN                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a = b), (a = d), (a = f), (c = b), ((c = d)), (c = f), (e = b), (e = d), (e = f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c = rt_float.d), rt_float.e
+   Output: id, (a = b), (a = d), (a = f), (c = b), ((c = d)), ((c = f)), (e = b), ((e = d)), ((e = f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c = rt_float.d), (rt_float.c = rt_float.f), rt_float.e, (rt_float.e = rt_float.d), (rt_float.e = rt_float.f)
    GPU Scan Quals: ((rt_float.id % 6) = 0)
 (4 rows)
 
@@ -406,11 +406,11 @@ SELECT id, a<>b v1, a<>d v2, a<>f v3,
   INTO test21g
   FROM rt_float
  WHERE id % 6 = 1;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                      QUERY PLAN                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a <> b), (a <> d), (a <> f), (c <> b), ((c <> d)), (c <> f), (e <> b), (e <> d), (e <> f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c <> rt_float.d), rt_float.e
+   Output: id, (a <> b), (a <> d), (a <> f), (c <> b), ((c <> d)), ((c <> f)), (e <> b), ((e <> d)), ((e <> f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c <> rt_float.d), (rt_float.c <> rt_float.f), rt_float.e, (rt_float.e <> rt_float.d), (rt_float.e <> rt_float.f)
    GPU Scan Quals: ((rt_float.id % 6) = 1)
 (4 rows)
 
@@ -447,11 +447,11 @@ SELECT id, a>b v1, a>d v2, a>f v3,
   INTO test22g
   FROM rt_float
  WHERE id % 6 = 2;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                                    QUERY PLAN                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a > b), (a > d), (a > f), (c > b), ((c > d)), (c > f), (e > b), (e > d), (e > f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c > rt_float.d), rt_float.e
+   Output: id, (a > b), (a > d), (a > f), (c > b), ((c > d)), ((c > f)), (e > b), ((e > d)), ((e > f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c > rt_float.d), (rt_float.c > rt_float.f), rt_float.e, (rt_float.e > rt_float.d), (rt_float.e > rt_float.f)
    GPU Scan Quals: ((rt_float.id % 6) = 2)
 (4 rows)
 
@@ -488,11 +488,11 @@ SELECT id, a<b v1, a<d v2, a<f v3,
   INTO test23g
   FROM rt_float
  WHERE id % 6 = 3;
-                                                            QUERY PLAN                                                            
-----------------------------------------------------------------------------------------------------------------------------------
+                                                                                                    QUERY PLAN                                                                                                     
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a < b), (a < d), (a < f), (c < b), ((c < d)), (c < f), (e < b), (e < d), (e < f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c < rt_float.d), rt_float.e
+   Output: id, (a < b), (a < d), (a < f), (c < b), ((c < d)), ((c < f)), (e < b), ((e < d)), ((e < f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c < rt_float.d), (rt_float.c < rt_float.f), rt_float.e, (rt_float.e < rt_float.d), (rt_float.e < rt_float.f)
    GPU Scan Quals: ((rt_float.id % 6) = 3)
 (4 rows)
 
@@ -529,11 +529,11 @@ SELECT id, a>=b v1, a>=d v2, a>=f v3,
   INTO test24g
   FROM rt_float
  WHERE id % 6 = 4;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                      QUERY PLAN                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a >= b), (a >= d), (a >= f), (c >= b), ((c >= d)), (c >= f), (e >= b), (e >= d), (e >= f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c >= rt_float.d), rt_float.e
+   Output: id, (a >= b), (a >= d), (a >= f), (c >= b), ((c >= d)), ((c >= f)), (e >= b), ((e >= d)), ((e >= f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c >= rt_float.d), (rt_float.c >= rt_float.f), rt_float.e, (rt_float.e >= rt_float.d), (rt_float.e >= rt_float.f)
    GPU Scan Quals: ((rt_float.id % 6) = 4)
 (4 rows)
 
@@ -570,11 +570,11 @@ SELECT id, a<=b v1, a<=d v2, a<=f v3,
   INTO test25g
   FROM rt_float
  WHERE id % 6 = 5;
-                                                            QUERY PLAN                                                             
------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                      QUERY PLAN                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a <= b), (a <= d), (a <= f), (c <= b), ((c <= d)), (c <= f), (e <= b), (e <= d), (e <= f)
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c <= rt_float.d), rt_float.e
+   Output: id, (a <= b), (a <= d), (a <= f), (c <= b), ((c <= d)), ((c <= f)), (e <= b), ((e <= d)), ((e <= f))
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c <= rt_float.d), (rt_float.c <= rt_float.f), rt_float.e, (rt_float.e <= rt_float.d), (rt_float.e <= rt_float.f)
    GPU Scan Quals: ((rt_float.id % 6) = 5)
 (4 rows)
 
