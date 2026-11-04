@@ -314,12 +314,12 @@ SELECT id, a/(b%100) v1, a/(d%100) v2, a/(f%100) v3,
   FROM rt_int
  WHERE x BETWEEN -20000.0 AND 10000.0
    AND (b%100) <> 0 AND (d%100) <> 0 AND (f%100) <> 0;
-                                                                                                                                                                                                                                                  QUERY PLAN                                                                                                                                                                                                                                                   
----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                                                                                                                  QUERY PLAN                                                                                                                                                  
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((a / ((b)::integer % 100))), ((a / (d % 100))), ((a / (f % '100'::bigint))), ((c / ((b)::integer % 100))), ((c / (d % 100))), ((c / (f % '100'::bigint))), ((e / ((b)::integer % 100))), ((e / (d % 100))), ((e / (f % '100'::bigint))), ((g / ((b)::integer % 100))), ((g / (d % 100))), ((g / (f % '100'::bigint)))
+   Output: id, (a / ((b)::integer % 100)), (a / (d % 100)), (a / (f % '100'::bigint)), (c / ((b)::integer % 100)), (c / (d % 100)), (c / (f % '100'::bigint)), (e / ((b)::integer % 100)), (e / (d % 100)), (e / (f % '100'::bigint)), (g / ((b)::integer % 100)), (g / (d % 100)), (g / (f % '100'::bigint))
    Filter: ((rt_int.x >= '-20000'::double precision) AND (rt_int.x <= '10000'::double precision))
-   GPU Projection: rt_int.id, (rt_int.a / ((rt_int.b)::integer % 100)), (rt_int.a / (rt_int.d % 100)), (rt_int.a / (rt_int.f % '100'::bigint)), (rt_int.c / ((rt_int.b)::integer % 100)), (rt_int.c / (rt_int.d % 100)), (rt_int.c / (rt_int.f % '100'::bigint)), (rt_int.e / ((rt_int.b)::integer % 100)), (rt_int.e / (rt_int.d % 100)), (rt_int.e / (rt_int.f % '100'::bigint)), (rt_int.g / ((rt_int.b)::integer % 100)), (rt_int.g / (rt_int.d % 100)), (rt_int.g / (rt_int.f % '100'::bigint)), rt_int.x
+   GPU Projection: rt_int.id, rt_int.a, rt_int.b, rt_int.d, rt_int.f, rt_int.c, rt_int.e, rt_int.g, rt_int.x
    GPU Scan Quals: (((rt_int.d % 100) <> 0) AND ((rt_int.f % '100'::bigint) <> 0) AND (((rt_int.b)::integer % 100) <> 0))
 (5 rows)
 
@@ -394,12 +394,12 @@ SELECT id, +a v1, -b v2, @(a+b) v3,
   FROM rt_int
  WHERE y BETWEEN -10000.0 AND 20000.0
    AND n <> -128;	-- avoid out of range
-                                                                                  QUERY PLAN                                                                                   
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                                                           QUERY PLAN                                                           
+--------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_int_temp.rt_int
-   Output: id, ((+ a)), ((- b)), (@ (a + b)), (+ c), (- d), (@ (c + d)), (+ e), (- f), (@ (e + f)), ((+ g)), ((- n)), (@ (g - (n / 2)))
+   Output: id, (+ a), (- b), (@ (a + b)), (+ c), (- d), (@ (c + d)), (+ e), (- f), (@ (e + f)), (+ g), (- n), (@ (g - (n / 2)))
    Filter: ((rt_int.y >= '-10000'::double precision) AND (rt_int.y <= '20000'::double precision))
-   GPU Projection: rt_int.id, (+ rt_int.a), (- rt_int.b), rt_int.a, rt_int.b, rt_int.c, rt_int.d, rt_int.e, rt_int.f, (+ rt_int.g), (- rt_int.n), rt_int.g, rt_int.n, rt_int.y
+   GPU Projection: rt_int.id, rt_int.a, rt_int.b, rt_int.c, rt_int.d, rt_int.e, rt_int.f, rt_int.g, rt_int.n, rt_int.y
    GPU Scan Quals: (rt_int.n <> '-128'::integer)
 (5 rows)
 

@@ -283,9 +283,9 @@ SELECT id, a/b v1, a/d v2, a/f v3,
                                                               QUERY PLAN                                                               
 ---------------------------------------------------------------------------------------------------------------------------------------
  Custom Scan (GpuScan) on regtest_dtype_float_temp.rt_float
-   Output: id, (a / b), (a / d), (a / f), (c / b), ((c / d)), (c / f), (e / b), (e / d), (e / f)
+   Output: id, (a / b), (a / d), (a / f), (c / b), (c / d), (c / f), (e / b), (e / d), (e / f)
    Filter: ((rt_float.b <> '0'::double precision) AND (rt_float.d <> '0'::double precision) AND (rt_float.f <> '0'::double precision))
-   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, (rt_float.c / rt_float.d), rt_float.e
+   GPU Projection: rt_float.id, rt_float.a, rt_float.b, rt_float.d, rt_float.f, rt_float.c, rt_float.e
    GPU Scan Quals: ((rt_float.z >= '-16000'::integer) AND (rt_float.z <= 16000))
 (5 rows)
 

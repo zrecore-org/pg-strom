@@ -46,10 +46,10 @@ gcagg() { # table, label, query-with-%T; the plan must use GpuPreAgg over the ca
 	if [ "$n1" -ge 1 ] && [ "$n2" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label"
 	else echo "  FAIL  $tbl: $label (GpuPreAgg=$n1 cache=$n2)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
-gcjoin() { # table, label, query-with-%T and %D; the plan must use GpuJoin over the cache
+gcjoin() { # table, label, query-with-%T and %D; the plan must join on the GPU (GpuJoin, or GpuPreAgg with the join folded in) over the cache
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g")
 	plan=$($PSQL -d scantest -c "$GPU $JOINSET explain $qry" 2>&1)
-	n1=$(echo "$plan" | grep -c "Custom Scan (GpuJoin)"); n2=$(echo "$plan" | grep -c "GPU Cache:")
+	n1=$(echo "$plan" | grep -c -E "Custom Scan \(GpuJoin\)|GPU Join Quals"); n2=$(echo "$plan" | grep -c "GPU Cache:")
 	g=$(q "$GPU $JOINSET" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$n1" -ge 1 ] && [ "$n2" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
 	else echo "  FAIL  $tbl: $label (GpuJoin=$n1 cache=$n2)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
