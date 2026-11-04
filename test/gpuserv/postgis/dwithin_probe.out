@@ -1,0 +1,59 @@
+-- shapes: 2D/3D/M point, empty, other SRID, multipoint, line; ST_DWithin(a, b, 5) and ST_Distance(a, b)
+p00|big|false|NULL
+p00|empty|false|NULL
+p00|inf|false|NULL
+p00|line|true|5
+p00|multi|true|5
+p00|nan|false|NULL
+p00|ninf|false|NULL
+p00|p00|true|0
+p00|p34|true|5
+p00|p34m|true|5
+p00|p34z|true|5
+p00|p34zm|true|5
+p00|srid|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:ST_Distance: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)
+p00|tiny|true|0
+empty|empty|false|NULL
+empty|p00|false|NULL
+empty|p34|false|NULL
+empty|srid|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:ST_Distance: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)
+p34z|empty|false|NULL
+p34z|p00|true|5
+p34z|p34|true|0
+p34z|srid|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:ST_Distance: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)
+srid|empty|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_Distance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p00|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_Distance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p34|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_Distance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|srid|true|0
+-- tolerance: zero, negative, NULL, NaN, Infinity, huge
+0|false
+-1|ERR[XX000]:Tolerance cannot be less than zero
+-0|false
+5|true
+4.999999999999999|false
+5.000000000000001|true
+NULL|NULL
+'NaN'|false
+'Infinity'|true
+'-Infinity'|ERR[XX000]:Tolerance cannot be less than zero
+1e308|true
+true
+-- exactly at the boundary: (3,4) vs 5; (0.3,0.4) vs 0.5; 1 ulp either side of r
+true
+0.5
+-- does the CPU answer equal sqrt(dx*dx+dy*dy) <= r (separate multiply, add, sqrt) over many near-boundary pairs?
+300000|24304|24304|12111|12193|2.2203595948738612e-16
+300000|0|0|287807
+0|0
+82369|0
+-- boundary: is the test on d <= r or d*d <= r*r? pairs whose d*d <= r*r is true but sqrt(d*d) > r (and the reverse)
+287807|0|73630
+-- geography and the 3D variants are different functions
+true
+false
+st_distance|geog1 geography, geog2 geography, use_spheroid boolean
+st_distance|geom1 geometry, geom2 geometry
+st_distance|text, text
+st_dwithin|geog1 geography, geog2 geography, tolerance double precision, use_spheroid boolean
+st_dwithin|geom1 geometry, geom2 geometry, double precision
+st_dwithin|text, text, double precision

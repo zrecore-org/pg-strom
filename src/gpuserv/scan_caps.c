@@ -1275,6 +1275,9 @@ classify_geometry(const char *name)
 		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_POINT_POLY; }
 	else if (!strcmp(name, "st_intersects"))
 		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_EITHER; }
+	/* ST_DWithin(geometry, geometry, float8) of two points (A11 part 3): the planner checks the argument shapes */
+	else if (!strcmp(name, "st_dwithin"))
+		{ fc.cls = SOP_GEOMDWITHIN; fc.kind = 0; }
 	/* st_makepoint(x, y), st_point(x, y): only as the point of the above (fused); st_setsrid(point, const) likewise */
 	else if (!strcmp(name, "st_makepoint2") || !strcmp(name, "st_point"))
 		{ fc.cls = SOP_GEOMMK; fc.kind = 0; }

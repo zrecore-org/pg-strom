@@ -101,6 +101,16 @@
  *            geodetic, Z or M polygon and every other geometry type return SCANVM_RECHECK_CODE: the three predicates
  *            differ only on the boundary, which the backend always decides. An empty operand (same SRID) is false.
  *
+ *   GEOMDWITHIN  dst = ST_DWithin(point, point, tolerance) (2D; Z and M are ignored, as PostGIS does). a and b are the
+ *            points: a string register (a column, constant or parameter), or with k0 & SOP_GDW_FUSED_A / _B the float8
+ *            register of x (a / b) and of y (byte 1 / byte 2 of k0, bits 8..15 and 16..23) of a fused st_makepoint(x, y);
+ *            the tolerance is the float8 register in bits 24..31 of k0; k1 is the SRID of the fused point(s). PostGIS
+ *            tests sqrt(dx*dx + dy*dy) <= r with a distance that differs from plain binary64 in 8% of random pairs (it
+ *            fuses in places), so the instruction decides only when dx*dx + dy*dy is beyond r*r by a relative 2^-47 and
+ *            otherwise (the boundary), for a SRID mismatch (PostGIS raises), a negative, NaN or infinite tolerance, a
+ *            non-finite coordinate or intermediate, an underflow, a multipoint, a line or a geodetic operand returns
+ *            SCANVM_RECHECK_CODE. An empty point is false.
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -152,12 +162,16 @@ SCANVM_OP(GEOMBOX,    130)
 SCANVM_OP(GEOMPIP,    131)
 /* never emitted: the class of st_makepoint / st_point (kind 0) and st_setsrid (kind 1), which only a GEOMPIP argument may use */
 SCANVM_OP(GEOMMK,     132)
+SCANVM_OP(GEOMDWITHIN, 133)
 /* GEOMPIP: the operands of the function (kind) and the flags of k0 */
 SCANVM_OP(GPIP_POLY_POINT,  0)
 SCANVM_OP(GPIP_POINT_POLY,  1)
 SCANVM_OP(GPIP_EITHER,      2)
 SCANVM_OP(GPIP_FUSED,       1)
 SCANVM_OP(GPIP_SYMM,        2)
+/* GEOMDWITHIN: the flags of k0 */
+SCANVM_OP(GDW_FUSED_A,      1)
+SCANVM_OP(GDW_FUSED_B,      2)
 /* DUNARY kinds (k0) */
 SCANVM_OP(DUN_NEG,   0)
 SCANVM_OP(DUN_ABS,   1)

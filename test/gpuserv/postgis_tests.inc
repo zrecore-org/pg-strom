@@ -184,4 +184,91 @@ run_any pg_gc "GPU-Cache table: fused ST_Contains" "select id from %T where ST_C
 run_any pg_gc "GPU-Cache table: ST_Intersects on a point column" "select id from %T where ST_Intersects(g, $SQ)"
 run_any pg_gc "GPU-Cache table: && on a point column" "select id from %T where g && $SQ"
 run_any pg_gc "GPU-Cache table: a plain qual next to ST_Contains" "select id from %T where x > 0 and ST_Contains($SQ, ST_MakePoint(x, y))"
+
+# ---- A11 part 3: ST_DWithin of two points. PostGIS tests its own distance (which differs from plain binary64 in 8% of random
+# pairs) against the tolerance, so the instruction decides only beyond a relative 2^-47 of r*r and hands the boundary, a SRID
+# mismatch, a bad tolerance and every non-point back to the backend. ----
+errq() { # settings, query -> the first ERROR line without the prefix
+	$PSQL -d scantest -c "$1 $2" 2>&1 | sed -n 's/^.*ERROR:  *//p' | head -1
+}
+runerr_pg() { # table, label, query-with-%T, expected message; the GPU plan must be a GpuScan
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g")
+	plan=$($PSQL -d scantest -c "$GPU explain $qry" | grep -c "Custom Scan (GpuScan)")
+	g=$(errq "$GPU" "$qry"); c=$(errq "$CPU" "$qry")
+	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && [ "$g" = "$4" ]; then echo "  ok    $tbl: $label ($g)"
+	else echo "  FAIL  $tbl: $label (plan GpuScan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; echo "        want: $4"; fail=$((fail+1)); fi
+}
+P55="'POINT(5 5)'::geometry"
+for t in pg_1 pg_2; do
+	run $t "ST_DWithin(point column, point constant, 3), every shape" "select id from %T where id % 20 <> 1 and ST_DWithin(g, $P55, 3)"
+	run $t "ST_DWithin(constant, column, 3): the other order" "select id from %T where id % 20 <> 1 and ST_DWithin($P55, g, 3)"
+	run $t "ST_DWithin(fused point, constant, 2.5)" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 2.5)"
+	run $t "ST_DWithin(constant, fused point, 2.5)" "select id from %T where ST_DWithin($P55, ST_MakePoint(x, y), 2.5)"
+	run $t "ST_DWithin(two fused points, tolerance from a column)" "select id from %T where ST_DWithin(ST_MakePoint(x, y), ST_MakePoint(y, x), a::float8 / 100)"
+	run $t "ST_DWithin(fused point, point column, 4), SRID 0" "select id from %T where id % 20 <> 1 and ST_DWithin(ST_MakePoint(x, y), g, 4)"
+	run $t "ST_DWithin(g, g2, 5): two columns" "select id from %T where id % 20 <> 1 and ST_DWithin(g, g2, 5)"
+	run $t "ST_DWithin with a computed tolerance" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, abs(x) / 4 + 0.5)"
+	run $t "ST_DWithin with a SRID on both fused points" "select id from %T where ST_DWithin(ST_SetSRID(ST_MakePoint(x, y), 4326), ST_SetSRID(ST_MakePoint(y, x), 4326), 3)"
+	run $t "ST_DWithin(fused with SRID, g with SRID 4326)" "select id from %T where id % 20 = 1 and ST_DWithin(ST_SetSRID(ST_MakePoint(x, y), 4326), g, 6)"
+	run $t "NOT ST_DWithin, with other quals and a projection" "select id, a, x * 2 from %T where not ST_DWithin(ST_MakePoint(x, y), $P55, 6) and a % 3 = 0"
+	run $t "ST_DWithin, tolerance 0" "select id from %T where ST_DWithin(ST_MakePoint(x, y), ST_MakePoint(x, y), 0)"
+	run $t "ST_DWithin, tolerance 0, other point" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 0) or a = 7"
+	run $t "ST_DWithin, tolerance Infinity" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 'Infinity'::float8) and a = 3"
+	run $t "ST_DWithin, tolerance NaN" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 'NaN'::float8) or a = 3"
+	run $t "ST_DWithin, tolerance NULL" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, null) or a = 3"
+	run $t "ST_DWithin, huge coordinates" "select id from %T where ST_DWithin(ST_MakePoint(x * 1e300, y * 1e300), ST_MakePoint(0, 0), 1e300)"
+	run $t "ST_DWithin, coordinates whose squares overflow" "select id from %T where ST_DWithin(ST_MakePoint(x * 1e160, y * 1e160), ST_MakePoint(0, 0), 5e160) or a = 5"
+	run $t "ST_DWithin, tiny coordinates" "select id from %T where ST_DWithin(ST_MakePoint(x * 1e-200, y * 1e-200), ST_MakePoint(0, 0), 3e-200) or a = 5"
+	run $t "ST_DWithin, ST_Distance on the CPU next to it" "select id, ST_Distance(ST_MakePoint(x, y), $P55) from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 1.5)"
+done
+runerr_pg pg_1 "ST_DWithin, a negative tolerance" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, a::float8 - 500)" "Tolerance cannot be less than zero"
+runerr_pg pg_1 "ST_DWithin, -Infinity as the tolerance" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, '-Infinity'::float8)" "Tolerance cannot be less than zero"
+runerr_pg pg_1 "ST_DWithin, mixed SRID (a column with SRID 4326 against SRID 0)" "select id from %T where ST_DWithin(g, $P55, 3)" "LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)"
+runerr_pg pg_1 "ST_DWithin, mixed SRID (fused point with SRID against SRID 0)" "select id from %T where ST_DWithin(ST_SetSRID(ST_MakePoint(x, y), 3857), $P55, 3)" "LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 3857) != (Point, 0)"
+
+# Boundaries: half-integer grid points at distances exactly r (the 3-4-5 triangle, 0.5 steps), tolerances one and a few ulps
+# either side of the distance, and the tolerance the plain binary64 distance gives (PostGIS's own distance is above or below
+# it in 8% of the pairs: the kernel must not decide those).
+for r in 0 0.5 1.5 2.5 5 5.0000000000000009 4.999999999999999 10; do
+	run pg_grid "grid: ST_DWithin(fused, POINT(3 4), $r)" "select id from %T where ST_DWithin(ST_MakePoint(x, y), 'POINT(3 4)'::geometry, $r)"
+	run pg_grid "grid: ST_DWithin(POINT(0 0), fused, $r)" "select id from %T where ST_DWithin('POINT(0 0)'::geometry, ST_MakePoint(x, y), $r)"
+done
+# The tolerance is a stored column (the plain binary64 distance, computed by SQL's separate multiply, add and sqrt), so the
+# expression stays shallow enough for the VM's temporary registers and the kernel really runs.
+sql "create table pg_ulpd as select id, x, y, sqrt(x * x + y * y) as d from pg_ulp"
+sql "create table pg_dw as select id, x, y, a, sqrt((x - 5) * (x - 5) + (y - 5) * (y - 5)) as d from pg_1"
+sql "analyze pg_ulpd"; sql "analyze pg_dw"
+# coordinates of infinity and NaN in a stored column (a CASE inside the call would be too deep for the VM and stay on the CPU)
+sql "create table pg_inf as select id, case a % 4 when 0 then 'Infinity'::float8 when 1 then '-Infinity'::float8 when 2 then 'NaN'::float8 else x end as x, y, a from pg_1"
+sql "analyze pg_inf"
+run pg_inf "ST_DWithin, point coordinates of infinity and NaN" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 3) or a = 5"
+run pg_inf "ST_DWithin, infinite and NaN coordinates, tolerance Infinity" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 'Infinity'::float8) or a = 5"
+for k in -3 -1 0 1 3; do
+	run pg_ulpd "ulp: ST_DWithin(fused, POINT(0 0), plain distance + $k ulp)" "select id from %T where ST_DWithin(ST_MakePoint(x, y), 'POINT(0 0)'::geometry, d * (1 + $k * 2.220446049250313e-16))"
+done
+run pg_dw "ST_DWithin, the tolerance is the plain binary64 distance" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, d)"
+run pg_dw "ST_DWithin, the tolerance is 2 ulp above the plain distance" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, d * (1 + 4.440892098500626e-16)) and a % 7 = 1"
+runagg pg_grid "count of a ST_DWithin test" "select count(*) from %T where ST_DWithin(ST_MakePoint(x, y), 'POINT(3 4)'::geometry, 5)"
+runagg pg_2 "count, min and max over points near a point" "select count(*), min(a), max(a) from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 4)"
+runagg_any pg_2 "count by a, the points near a point" "select a, count(*) from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 4) group by a order by a"
+
+# The recheck is the escape hatch: random pairs may hand back only the rows within 2^-47 of the boundary (almost none); the
+# grid, full of pairs exactly at r, must hand back many, or the counter is not being read.
+for t in pg_1 pg_2; do
+	nrows=$(sql "select count(*) from $t")
+	n=$(recheck_rows $t "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 3.3)")
+	[ "$n" -le $((nrows / 100)) ]; check "$t: random points against ST_DWithin: $n of $nrows rows rechecked (at most 1%)" $?
+	n=$(recheck_rows $t "select id from %T where ST_DWithin(ST_MakePoint(x, y), ST_MakePoint(y, x), 4.4)")
+	[ "$n" -le $((nrows / 100)) ]; check "$t: two fused points: $n of $nrows rows rechecked (at most 1%)" $?
+done
+n=$(recheck_rows pg_grid "select id from %T where ST_DWithin(ST_MakePoint(x, y), 'POINT(3 4)'::geometry, 5)")
+[ "$n" -gt 0 ]; check "pg_grid: pairs exactly at the tolerance are rechecked (counter read: $n rows)" $?
+n=$(recheck_rows pg_dw "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, d)")
+[ "$n" -gt 0 ]; check "pg_dw: a tolerance equal to the plain distance is rechecked (counter read: $n rows)" $?
+
+# GPU-Cache table: the same gates as the point-in-polygon predicates (no recheck path there yet), the answers are PostGIS's.
+run_any pg_gc "GPU-Cache table: fused ST_DWithin" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 3)"
+run_any pg_gc "GPU-Cache table: ST_DWithin on a point column" "select id from %T where ST_DWithin(g, $P55, 6)"
+# the register-pressure ladder of the fused-point instructions (a program the builder refuses has no CPU fallback)
+. "${0%/*}/postgis_ladder.inc"
 fi

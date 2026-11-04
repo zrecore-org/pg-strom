@@ -455,6 +455,77 @@ emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *n
 }
 
 /*
+ * A11: st_dwithin(point, point, tolerance). Each point is a string register (a column, constant or parameter) or fused
+ * from st_makepoint(x, y) under an optional st_setsrid(., constant): then the instruction takes the registers of x and y
+ * and the SRID. Two fused points share their SRID (codegen.c refuses the program otherwise: a refused program has no
+ * CPU fallback). The tolerance is any float8 expression.
+ */
+static int
+emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
+{
+	const kern_expression *ka = KEXP_FIRST_ARG(kexp);
+	const kern_expression *kb = KEXP_NEXT_ARG(ka);
+	const kern_expression *kt = KEXP_NEXT_ARG(kb);
+	const kern_expression *kmk[2];
+	int32_t		srid[2] = {0, 0};
+	int			mark = *next;
+	int			ra, rb, rya = 0, ryb = 0, rt, dst;
+	uint32_t	flags = 0;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 3)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	kmk[0] = geom_fused_point(ka, &srid[0]);
+	kmk[1] = geom_fused_point(kb, &srid[1]);
+	if (kmk[0] && kmk[1] && srid[0] != srid[1])
+		return fail(b, "%s of two points with different SRIDs", scan_vm_opcode_name(kexp->opcode));
+	if (kmk[0])
+	{
+		ra = expr_to_reg(b, KEXP_FIRST_ARG(kmk[0]), next);
+		if (ra < 0)
+			return -1;
+		rya = expr_to_reg(b, KEXP_NEXT_ARG(KEXP_FIRST_ARG(kmk[0])), next);
+		if (rya < 0 || rya > 0xff)
+			return -1;
+		flags |= SOP_GDW_FUSED_A;
+	}
+	else
+	{
+		ra = expr_to_reg(b, ka, next);
+		if (ra < 0)
+			return -1;
+	}
+	if (kmk[1])
+	{
+		rb = expr_to_reg(b, KEXP_FIRST_ARG(kmk[1]), next);
+		if (rb < 0)
+			return -1;
+		ryb = expr_to_reg(b, KEXP_NEXT_ARG(KEXP_FIRST_ARG(kmk[1])), next);
+		if (ryb < 0 || ryb > 0xff)
+			return -1;
+		flags |= SOP_GDW_FUSED_B;
+	}
+	else
+	{
+		rb = expr_to_reg(b, kb, next);
+		if (rb < 0)
+			return -1;
+	}
+	rt = expr_to_reg(b, kt, next);
+	if (rt < 0 || rt > 0xff)
+		return -1;
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 ||
+		emit(b, SOP_GEOMDWITHIN, dst, ra, rb,
+			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16) | ((uint32_t) rt << 24),
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1])) < 0)
+		return -1;
+	return dst;
+}
+
+/*
  * A8: jsonb expressions. "x -> key", "x -> idx" are one JSONGET; "->>" adds JSONTXT, the planner's
  * "(x ->> key)::numeric / intN" shortcut JSONNUM / JSONINT; "?", jsonb_typeof and "@>" are single instructions.
  * The literals the instructions return (true/false, the type names) and the compiled pattern of @> live in the
@@ -701,6 +772,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 
 	if (fc.cls == SOP_GEOMPIP)
 		return emit_geompip(b, kexp, fc, next);
+	if (fc.cls == SOP_GEOMDWITHIN)
+		return emit_geomdwithin(b, kexp, next);
 	if (fc.cls == SOP_GEOMMK)
 		return fail(b, "%s is only supported as the point of ST_Contains and the like", scan_vm_opcode_name(kexp->opcode));
 

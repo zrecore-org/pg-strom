@@ -1673,6 +1673,98 @@ GHead geom_head(uint src, uint base, uint len)
     return h;
 }
 
+// ST_DWithin of two points (GEOMDWITHIN), the same as geom_dwithin() of cpu_vm.c. PostGIS compares its distance (which
+// differs from plain binary64 in 8% of random pairs: it fuses in places) with the tolerance, so the squares are compared
+// with a relative margin of 2^-47 (the distance is within 2 ulp, the squares within 2^-50) and the boundary is rechecked.
+#define GDW_LO    0x3FEFFFFFFFFFFFC0ull    // 1 - 2^-47
+#define GDW_HI    0x3FF0000000000020ull    // 1 + 2^-47
+#define GDW_TINY  0x07B0000000000000ull    // 2^-900: below it a square may have lost precision
+
+// a point from its string register: 0, or SOP_RECHECK_CODE (not a plain 2D-or-Z/M POINT)
+uint gdw_load(Reg r, inout uint srid, inout uint64_t px, inout uint64_t py, inout bool empty)
+{
+    uint s = str_src(r);
+    uint b = str_off(r);
+    uint l = str_len(r);
+    GHead h = geom_head(s, b, l);
+    if (h.bad != 0u || h.gtype != 1u || (h.flags & 0x0cu) != 0u || h.pos + 8u > l)
+        return SOP_RECHECK_CODE;
+    srid = h.srid;
+    uint npts = ldw_s(s, b + h.pos + 4u);
+    empty = (npts == 0u);
+    if (!empty)
+    {
+        uint nd = 2u + (h.flags & 1u) + ((h.flags >> 1) & 1u);
+        if (npts != 1u || h.pos + 8u + 8u * nd > l)
+            return SOP_RECHECK_CODE;
+        px = ld64s(s, b + h.pos + 8u);
+        py = ld64s(s, b + h.pos + 16u);
+    }
+    return 0u;
+}
+
+uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    Reg a = regs[ra];
+    Reg b = regs[rb];
+    bool fa = (k0 & SOP_GDW_FUSED_A) != 0u;
+    bool fb = (k0 & SOP_GDW_FUSED_B) != 0u;
+    Reg ya = regs[(k0 >> 8) & 0xffu];
+    Reg yb = regs[(k0 >> 16) & 0xffu];
+    Reg t = regs[k0 >> 24];
+    if ((a.isnull | b.isnull | t.isnull) != 0u || (fa && ya.isnull != 0u) || (fb && yb.isnull != 0u))
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint sa = k1;
+    uint sb = k1;
+    uint64_t ax = uint64_t(a.v);
+    uint64_t ay = uint64_t(ya.v);
+    uint64_t bx = uint64_t(b.v);
+    uint64_t by = uint64_t(yb.v);
+    bool ea = false;
+    bool eb = false;
+    if (!fa && gdw_load(a, sa, ax, ay, ea) != 0u)
+        return SOP_RECHECK_CODE;
+    if (!fb && gdw_load(b, sb, bx, by, eb) != 0u)
+        return SOP_RECHECK_CODE;
+    if (sa != sb)
+        return SOP_RECHECK_CODE;                        // PostGIS raises "mixed SRID": the backend does
+    uint64_t tol = uint64_t(t.v);
+    if (f64_nonfinite(tol) || ((tol >> 63) != 0ull && (tol & F64_MAG) != 0ull))
+        return SOP_RECHECK_CODE;                        // negative (PostGIS raises), NaN or infinite
+    bool res = false;
+    if (!(ea || eb))
+    {
+        if (f64_nonfinite(ax) || f64_nonfinite(ay) || f64_nonfinite(bx) || f64_nonfinite(by))
+            return SOP_RECHECK_CODE;
+        uint64_t dx = f64_sub(ax, bx);
+        uint64_t dy = f64_sub(ay, by);
+        if (f64_nonfinite(dx) || f64_nonfinite(dy))
+            return SOP_RECHECK_CODE;
+        if (((dx | dy) & F64_MAG) == 0ull)
+            res = true;                                 // the same point: distance 0 <= tolerance
+        else
+        {
+            uint64_t d2 = f64_add(f64_mul(dx, dx), f64_mul(dy, dy));
+            uint64_t r2 = f64_mul(tol, tol);
+            if (f64_nonfinite(d2) || f64_nonfinite(r2) || (d2 & F64_MAG) < GDW_TINY ||
+                ((r2 & F64_MAG) != 0ull && (r2 & F64_MAG) < GDW_TINY))
+                return SOP_RECHECK_CODE;
+            if (f64_le(d2, f64_mul(r2, GDW_LO)))
+                res = true;
+            else if (f64_lt(f64_mul(r2, GDW_HI), d2))
+                res = false;
+            else
+                return SOP_RECHECK_CODE;                // within 2^-47 of the boundary
+        }
+    }
+    regs[dst].isnull = 0u;
+    regs[dst].v = res ? 1 : 0;
+    return 0u;
+}
+
 // Returns 0 (res set), or SOP_RECHECK_CODE. a: the polygon register; b: the point register, or with SOP_GPIP_FUSED
 // the float8 x (xv) and y (yv) of a point with SRID fsrid.
 uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
@@ -1992,6 +2084,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_geom(op, dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMPIP)
             return vm_geom_pip(dst, ra, rb, k0, k1, regs);
+        if (op == SOP_GEOMDWITHIN)
+            return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;

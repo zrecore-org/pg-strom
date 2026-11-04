@@ -1983,6 +1983,42 @@ vulkan_geom_pip_args_ok(scan_func_class fc, List *func_args)
 }
 
 /*
+ * A11: the SRID a fused point carries: st_setsrid(st_makepoint(x, y), constant) -> the constant, st_makepoint -> 0.
+ * Only meaningful for an operand vulkan_geom_operand_shape() answered 1 for.
+ */
+static int32
+vulkan_geom_fused_srid(Expr *arg)
+{
+	if (IsA(arg, FuncExpr) && list_length(((FuncExpr *) arg)->args) == 2 &&
+		IsA(lsecond(((FuncExpr *) arg)->args), Const) &&
+		!((Const *) lsecond(((FuncExpr *) arg)->args))->constisnull)
+		return DatumGetInt32(((Const *) lsecond(((FuncExpr *) arg)->args))->constvalue);
+	return 0;
+}
+
+/*
+ * A11: st_dwithin(point, point, tolerance): each point is a column, parameter, constant or a fused st_makepoint(x, y);
+ * two fused points must carry the same SRID (the instruction has room for one; the program builder refuses otherwise
+ * and a refused program has no CPU fallback). The tolerance is whatever float8 expression the VM can compute.
+ */
+static bool
+vulkan_geom_dwithin_args_ok(List *func_args)
+{
+	int			s0, s1;
+
+	if (list_length(func_args) != 3)
+		return false;
+	s0 = vulkan_geom_operand_shape(linitial(func_args));
+	s1 = vulkan_geom_operand_shape(lsecond(func_args));
+	if (s0 < 0 || s1 < 0)
+		return false;
+	if (s0 && s1 &&
+		vulkan_geom_fused_srid(linitial(func_args)) != vulkan_geom_fused_srid(lsecond(func_args)))
+		return false;
+	return true;
+}
+
+/*
  * Vulkan service: when may a text function run on the GPU? Equality compares bytes, which is what
  * the database does for every deterministic collation; the ordering operators are LOCALE_AWARE and
  * need the C collation (checked by the function lookup). LIKE is limited to a constant pattern that is
@@ -1997,11 +2033,13 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 	scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
 	/* PostGIS (A11): the geometry operators read a string register; a join program loads none */
-	if ((fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMMK) &&
+	if ((fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK) &&
 		((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN || !vulkan_geom_source_ok(context)))
 		return false;
 	if (fc.cls == SOP_GEOMPIP)
 		return vulkan_geom_pip_args_ok(fc, func_args);
+	if (fc.cls == SOP_GEOMDWITHIN)
+		return vulkan_geom_dwithin_args_ok(func_args);
 	if (fc.cls == SOP_GEOMMK)
 		return codegen_geom_mk_ok;
 	/* numeric: not in a join program (its registers are not loaded there) */
@@ -2137,7 +2175,7 @@ __codegen_func_expression(codegen_context *context,
 		scan_func_class gfc = scan_vm_classify_func(dfunc->func_code);
 
 		/* the arguments of a point-in-polygon function may be the fused point; those of st_setsrid, its st_makepoint */
-		codegen_geom_mk_ok = (gfc.cls == SOP_GEOMPIP || (gfc.cls == SOP_GEOMMK && gfc.kind == 1));
+		codegen_geom_mk_ok = (gfc.cls == SOP_GEOMPIP || gfc.cls == SOP_GEOMDWITHIN || (gfc.cls == SOP_GEOMMK && gfc.kind == 1));
 	}
 	foreach (lc, func_args)
 	{
@@ -5154,7 +5192,7 @@ geometry_func_walker(Node *node, void *context)
 		{
 			scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
-			if (fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMMK)
+			if (fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK)
 				return true;
 		}
 	}
