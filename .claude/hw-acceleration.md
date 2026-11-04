@@ -656,6 +656,17 @@ The kernel never decides a boundary: an edge's side of the point is taken only w
 
 **Tests.** An inner table large enough for several index levels (internal pages and right-links), deleted and updated inner rows (dead index entries), an inner qual, NULL and empty geometries, each query compared with `pg_strom.enabled=off`; the plan must show a GpuJoin using the GiST index.
 
+
+**Slice 1 design constraints (2026-11-04; probes in `test/gpuserv/postgis/gist_probe.sql`, `gist_srid_probe.sql`; tests first in `gist_tests.inc` / `gist_dev.sh`).**
+
+- Index layout (pageinspect, PostGIS 3.7): key `box2df` = 4 floats (xmin, xmax, ymin, ymax) at index tuple +8; internal entries ctid `(child, 65535)`, 24 bytes; leaf entries carry the heap TID; an empty geometry's key is four NaNs; a NULL geometry has a leaf entry with the null flag (`t_info` bit 0x8000) and no key; coordinates beyond float range clamp to +-FLT_MAX.
+- `&&` between different SRIDs does not error (it compares the boxes), so the GPU ignores the SRID.
+- HOT chains: a leaf entry points at the chain root, the visible tuple may be a later member. Key the inner row lookup on `(block, root offset)` (`heap_get_root_tuples()` per loaded page), not on the visible tuple's `t_self`; otherwise HOT-updated rows vanish silently. The test asserts `n_tup_hot_upd > 0`.
+- The walker follows downlinks only. Following rightlinks too would visit leaves twice on a consistent tree; PostgreSQL follows them only after a concurrent split (NSN against the parent LSN), and that check needs the real `pd_lsn`, which the preload overwrites with parent metadata. Copy consistency against concurrent inserts is an open item that must be closed before the GUC can default on.
+- A walk that reaches the step limit raises a task error (`pg_strom.gpugist_max_steps`); a refused or truncated program has no CPU fallback, so a short result would look valid.
+- The box overlap test is a conjunction of `<=` comparisons, so a NaN key (empty geometry) never matches; the query box reuses GEOMBOX's outward float4 rounding and clamping, one copy of that code.
+- Planner scope: the inner side is the plain heap base relation that owns the index (no partitioned parents, inheritance children, subqueries); both argument orders of `&&` are accepted.
+
 ## Effort (an estimate, not measured)
 
 About **20-35 engineer-months** in total: the architect's 17-30 for a Vulkan-only product, minus vendor-hardware work, plus Arrow/Parquet and jsonb that were not in that figure. The largest uncertainties are the expression and type library, the lock-free PreAgg redesign, and jsonb. A rough split: A0-A2 about 5-7, A3 2-4, A4 3-5, A5 2-3, A6 3-6, A7 2-4, A8 2-4, A9 1-2.
