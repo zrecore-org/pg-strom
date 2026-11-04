@@ -289,3 +289,101 @@ jobs:
         run: |
           PKGLIB="$("$(brew --prefix postgresql@17)/bin/pg_config" --pkglibdir)"
           PGBIN="$(brew --prefix postgresql@17)/bin" GPUSERV_BIN="$PKGLIB/pgstrom-gpuserv" sh test/gpuserv/service_test.sh
+
+  linux-gpu:
+    # A real NVIDIA GPU (GitHub-hosted GPU larger runner, Tesla T4, or any self-hosted Linux runner with a GPU).
+    # Off until the repository variable GPU_RUNNER_LABEL names the runner (Settings > Secrets and variables >
+    # Actions > Variables); GPU larger runners need an organization on the Team or Enterprise Cloud plan, see
+    # doc/ci-gpu-runners.md. Unlike the lavapipe job this runs the full GPU path with ALLOW_CPU off: the service
+    # must pick the GPU, and the differential tests compare it with the CPU.
+    name: Linux x86_64, real GPU (${{ vars.GPU_RUNNER_LABEL }}), PostgreSQL 17
+    if: vars.GPU_RUNNER_LABEL != ''
+    runs-on: ${{ vars.GPU_RUNNER_LABEL }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A slow mirror once spent 36 minutes in the PostgreSQL install and the job ran out of its 120 minutes before
+      # any test started: the install steps fail fast instead, and apt retries a stalled download.
+      - name: Install build and runtime packages
+        timeout-minutes: 10
+        run: |
+          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl wget lsb-release gnupg build-essential pkgconf \
+            libvulkan-dev mesa-vulkan-drivers vulkan-tools \
+            libnuma-dev libkrb5-dev libicu-dev postgresql-common
+
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
+        timeout-minutes: 10
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
+          # the build installs into the PostgreSQL tree: let the runner user write there
+          sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
+
+      - name: Install Apache Arrow and Parquet (Apache apt repository)
+        timeout-minutes: 10
+        run: |
+          wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
+          sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
+          sudo apt-get update
+          sudo apt-get install -y libarrow-dev libparquet-dev
+
+      - name: Install Slang ${{ env.SLANG_VERSION }}
+        run: |
+          D="$HOME/tools/slang-${SLANG_VERSION}"
+          mkdir -p "$D"
+          curl -fsSL -o /tmp/slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-2026.20-linux-x86_64.tar.gz"
+          echo "e863e568c204810d6e8bc31852f056aef6763c55ea9925db2db7affa060347c9  /tmp/slang.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/slang.tar.gz -C "$D"
+          SLANGC=$(find "$D" -type f -name slangc | head -n 1)
+          test -x "$SLANGC"
+          echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
+          "$SLANGC" -v
+
+      - name: What the GPU runner has (informational)
+        continue-on-error: true
+        run: |
+          nvidia-smi || echo "no nvidia-smi: the image has no NVIDIA driver"
+          vulkaninfo --summary | head -60
+          ls /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
+
+      - name: Build and install
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+          make -C src PG_CONFIG=$PG_CONFIG WITH_GPUSERV=1 -j"$(nproc)" install
+
+      - name: Service lifecycle test (the GPU, not lavapipe)
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "off"
+        run: sh test/gpuserv/service_test.sh
+
+      - name: Differential tests (float8, PostGIS, GiST join, GPU-Cache)
+        timeout-minutes: 60
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "off"
+        run: |
+          sh test/gpuserv/float8_dev.sh
+          sh test/gpuserv/postgis_dev.sh
+          sh test/gpuserv/gist_dev.sh
+          sh test/gpuserv/gpucache_dev.sh
+
+      - name: Upload the PostgreSQL logs of the failed tests
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgstrom-test-logs-gpu
+          path: |
+            /tmp/f8_dev/log
+            /tmp/pg_dev/log
+            /tmp/pg_gist_dev/log
+            /tmp/gc_dev/log
+          if-no-files-found: ignore
