@@ -267,7 +267,11 @@
             {
                 hits += 1;
 #ifdef SPEC_PROG
-                spec_acc(regs, an, aa, ab);
+                {
+                    uint ae = spec_acc(regs, an, aa, ab);
+                    if (ae != 0u)
+                        report_error(page, lp, ae);
+                }
 #else
                 for (uint k = 0; k < naggs; k++)
                 {
@@ -284,6 +288,12 @@
                         int64_t v = regs[ra].v;
                         if (cls == AC_COUNT_COND)
                             an[k] += 1;
+                        else if (cls >= AC_FSUM)
+                        {
+                            uint ae = fagg_acc(cls, uint64_t(v), an[k], aa[k]);
+                            if (ae != 0u)
+                                report_error(page, lp, ae);
+                        }
                         else if (cls == AC_SUM)
                         {
                             an[k] += 1;

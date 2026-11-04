@@ -1386,6 +1386,13 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 						 */
 						if (strstr(cat->aggfn_signature, "(money)") != NULL)
 							break;
+						/*
+						 * sum(float4) adds in float4 on the CPU: the device adds the values as float8, which gives
+						 * another result. float2 has no device type.
+						 */
+						if (strcmp(cat->aggfn_signature, "sum(float4)") == 0 ||
+							strstr(cat->aggfn_signature, "(float2)") != NULL)
+							break;
 						__setup_aggfunc_catalog_entry(entry, cat, proc);
 						break;
 					}
@@ -1614,6 +1621,13 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	if (!aggfn_cat)
 	{
 		elog(DEBUG2, "Aggregate function '%s' is not device executable",
+			 format_procedure(aggref->aggfnoid));
+		return NULL;
+	}
+	/* the float8 aggregates run in the kernels without GROUP BY only */
+	if (con->groupby_keys != NIL && scan_vm_agg_action_nogroup(aggfn_cat->partial_func_action))
+	{
+		elog(DEBUG2, "Aggregate function '%s' is not device executable with GROUP BY",
 			 format_procedure(aggref->aggfnoid));
 		return NULL;
 	}

@@ -1369,6 +1369,28 @@ scan_vm_agg_action_supported(int action)
 		case KAGG_ACTION__PAVG_INT64:		/* avg(int8) */
 		case KAGG_ACTION__PSUM_NUMERIC:		/* sum(numeric) of a known scale */
 		case KAGG_ACTION__PAVG_NUMERIC:
+		/* A10: float8, integer software binary64 in the kernel; only without GROUP BY (scan_vm_agg_action_nogroup) */
+		case KAGG_ACTION__PMIN_FP64:		/* min(float4/float8) */
+		case KAGG_ACTION__PMAX_FP64:
+		case KAGG_ACTION__PSUM_FP:			/* sum(float8), avg(float4/float8) */
+		case KAGG_ACTION__PAVG_FP:
+			return true;
+		default:
+			break;
+	}
+	return false;
+}
+
+/* the aggregate runs in the kernels without GROUP BY only (the GROUP BY kernels combine states with integer atomics) */
+bool
+scan_vm_agg_action_nogroup(int action)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__PMIN_FP64:
+		case KAGG_ACTION__PMAX_FP64:
+		case KAGG_ACTION__PSUM_FP:
+		case KAGG_ACTION__PAVG_FP:
 			return true;
 		default:
 			break;

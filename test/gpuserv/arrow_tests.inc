@@ -103,7 +103,8 @@ for t in a1 a2 a3 p1; do
 	aagg_any $t "date key (with the NULL group), two keys" "select dt, a % 2 as k2, count(*), max(b) from %T where a > 9990 group by 1, 2 order by 1, 2"
 	aagg_any $t "timestamp key" "select ts, count(*) from %T where a > 9995 group by 1 order by 1"
 	aagg_cpu $t "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
-	aagg_cpu $t "float8 aggregate stays on the CPU" "select count(*), sum(d::float8) from %T where a > 9000"
+	aagg $t "sum and min of a float4 column cast to float8 (exact in a double)" "select count(*), sum(d::float8), min(d::float8), max(d::float8) from %T where a > 9000"
+	aagg_cpu $t "sum(float4) stays on the CPU (it adds in float4)" "select count(*), sum(d) from %T where a > 9000"
 done
 aagg a1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "$APAR"
 aagg a1 "GROUP BY, parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "$APAR"
@@ -204,6 +205,9 @@ for t in at1 at2; do
 	run $t "float8 (Arrow double) compare incl. NaN, Infinity, -0" "select i, x from %T where x > 100.5 or x = 'NaN' or x = '-Infinity' or x = 0"
 	run $t "float8 column arithmetic" "select i, x * 2.5 + 1, x / 3, -x, abs(x) from %T where i % 7 = 3 and abs(x) < 1e6 and abs(x) > 1e-100"
 	run $t "float8 cast to int and float4" "select i, x::int4, (x / 7)::float4 from %T where i % 5 = 1 and abs(x) < 1e9 and x = x"
+	aagg $t "float8 (Arrow double): count, min, max with NaN and Infinity" "select count(x), min(x), max(x) from %T"
+	aagg $t "float8 (Arrow double): sum and avg of exact values" "select sum(x), avg(x), count(x) from %T where i % 20 = 6 or i % 20 = 7"
+	aagg $t "float8 aggregate of a computed value" "select max(x * 2 + 1), min(x - 1) from %T where i % 20 > 7"
 	run $t "float8 IS NULL and a float8 / int8 mix" "select i, x + v::float8 from %T where x is not null and v > 0 and i % 3 = 0 and abs(x) < 1e9"
 done
 adim=sd; adim2=sd2

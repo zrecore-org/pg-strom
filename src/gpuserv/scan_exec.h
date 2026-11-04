@@ -102,7 +102,8 @@ typedef struct agg_state
 	int			nagg;
 	uint64_t	n[SCAN_AGG_MAX];		/* count, number of values, or "has a value" (min/max) */
 	__int128	sum[SCAN_AGG_MAX];		/* sums, exact */
-	int64_t		val[SCAN_AGG_MAX];		/* current min/max */
+	int64_t		val[SCAN_AGG_MAX];		/* current min/max (float8: the bits of the min, max or sum) */
+	uint8_t		fovf[SCAN_AGG_MAX];		/* a float8 sum overflowed (PostgreSQL raises an error for it) */
 	uint64_t	nitems_raw, nitems_in;	/* statistics */
 	uint32_t	npages_vfs_read;
 } agg_state;

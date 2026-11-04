@@ -1343,6 +1343,63 @@ uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs
     return 0;
 }
 
+// float8 aggregates without GROUP BY (A10). Classes 6 (sum, avg), 7 (min) and 8 (max); a partial is (n, a): a the bits of the
+// double, n the number of values (sum) or 1 (min, max), n == 0 when there is no value yet. The order of additions is fixed
+// (per thread, then the tree of the workgroup, then the service), so the result is deterministic, but not the order of a
+// serial scan: the sum can differ from PostgreSQL's in the last bits. Returns 0, or SOP_ERR_FLTOVER << 16 when a sum of
+// finite values overflows (float8pl raises an error for it).
+uint fagg_acc(uint cls, uint64_t v, inout uint n, inout int64_t a)
+{
+    if (cls == 6u)
+    {
+        if (n == 0u)
+            a = int64_t(v);
+        else
+        {
+            uint64_t s = f64_add(uint64_t(a), v);
+            if (f64_arith_err(0u, uint64_t(a), v, s) != 0u)
+                return SOP_ERR_FLTOVER << 16;
+            a = int64_t(s);
+        }
+        n += 1u;
+        return 0u;
+    }
+    uint64_t kv = f64_key(v);
+    uint64_t ka = f64_key(uint64_t(a));
+    if (n == 0u || (cls == 7u ? (kv < ka) : (kv > ka)))
+        a = int64_t(v);
+    n = 1u;
+    return 0u;
+}
+
+// add the partial (n2, a2) into (n, a)
+uint fagg_merge(uint cls, uint n2, int64_t a2, inout uint n, inout int64_t a)
+{
+    if (n2 == 0u)
+        return 0u;
+    if (n == 0u)
+    {
+        n = n2;
+        a = a2;
+        return 0u;
+    }
+    if (cls == 6u)
+    {
+        uint64_t s = f64_add(uint64_t(a), uint64_t(a2));
+        if (f64_arith_err(0u, uint64_t(a), uint64_t(a2), s) != 0u)
+            return SOP_ERR_FLTOVER << 16;
+        a = int64_t(s);
+        n += n2;
+        return 0u;
+    }
+    uint64_t kv = f64_key(uint64_t(a2));
+    uint64_t ka = f64_key(uint64_t(a));
+    if (cls == 7u ? (kv < ka) : (kv > ka))
+        a = a2;
+    n = 1u;
+    return 0u;
+}
+
 uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     switch (op)

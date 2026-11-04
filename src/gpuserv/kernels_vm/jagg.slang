@@ -27,6 +27,9 @@ static const uint AC_COUNT_COND = 2;
 static const uint AC_SUM        = 3;
 static const uint AC_MIN        = 4;
 static const uint AC_MAX        = 5;
+static const uint AC_FSUM       = 6;            // float8 sum / avg, min, max (A10): see fagg_acc()
+static const uint AC_FMIN       = 7;
+static const uint AC_FMAX       = 8;
 static const uint NONE_REG      = 0xffffffffu;
 
 groupshared uint    sh_h[SCAN_WG];
@@ -97,7 +100,17 @@ void jagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint x = k * SCAN_WG + lid.x;
                 uint y = x + stride;
 
-                if (cls == AC_MIN || cls == AC_MAX)
+                if (cls >= AC_FSUM)
+                {
+                    uint nx = sh_n[x];
+                    int64_t ax = sh_a[x];
+                    uint ae = fagg_merge(cls, sh_n[y], sh_a[y], nx, ax);
+                    sh_n[x] = nx;
+                    sh_a[x] = ax;
+                    if (ae != 0u)
+                        report_error(0u, 0u, ae);
+                }
+                else if (cls == AC_MIN || cls == AC_MAX)
                 {
                     if (sh_n[y] != 0)
                     {

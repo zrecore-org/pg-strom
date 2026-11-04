@@ -29,6 +29,8 @@ const char *scan_vm_opcode_name(uint32_t opcode);
 int		scan_vm_like_shape(const unsigned char *pat, int plen, unsigned char *lit, int *p_litlen);
 /* true if the VM implements this function opcode */
 bool	scan_vm_func_supported(uint32_t opcode);
+/* an aggregate action the kernels implement without GROUP BY only (float8) */
+bool	scan_vm_agg_action_nogroup(int action);
 
 /*
  * A6 numeric: a register is { unscaled int64, scale }. These helpers are shared by the planner (a numeric

@@ -98,3 +98,37 @@ for t in f8_1 f8_2; do
 	ANYPLAN=1
 	runjoin $t "float8 join key stays on the CPU" "select t.i, d.grp from %T t join f8_dim d on t.x = d.v"
 done
+
+# aggregates without GROUP BY (the GROUP BY kernels do not do float8). The GPU adds in another order than a serial scan, so the
+# sums are checked on data whose sums are exact in any order (w: multiples of 1/16; float4 values; halves) or rounded to
+# 6 significant decimals; min and max are exact. A float8 sum that overflows raises PostgreSQL's error on both paths.
+runerr_agg() { # table, label, query-with-%T, text of the error: the plan must use GpuPreAgg
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); want=$4
+	plan=$($PSQL -d scantest -c "$GPU set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
+	g=$($PSQL -d scantest -c "$GPU set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
+	if [ "$plan" -ge 1 ] && echo "$g" | grep -q "$want" && echo "$c" | grep -q "$want"; then echo "  ok    $tbl: $label ($want)"
+	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan, expected '$want')"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+for t in f8_1 f8_2; do
+	echo "aggregates, table $t"
+	runagg $t "count, sum, min, max, avg of exact values" "select count(*), count(w), sum(w), min(w), max(w), avg(w) from %T"
+	runagg $t "min, max of float8 with NULLs" "select min(x), max(x), min(y), max(y), count(x) from %T"
+	runagg $t "min, max with NaN and Infinity (NaN is the largest)" "select min(z), max(z), count(z) from %T"
+	runagg $t "sum and avg rounded (inexact values)" "select round(sum(x)::numeric, 3), round(avg(y)::numeric, 6), count(y) from %T"
+	runagg $t "sum of exact values with halves and big integers" "select sum(z), count(z) from %T where abs(z) < 1e10 and z <> 3.0000000000000004 and (abs(z) > 1e-300 or z = 0)"
+	runagg $t "aggregates with a qual" "select sum(w), min(x), max(y), avg(w) from %T where i % 7 = 1 and a > 0"
+	runagg $t "aggregates with FILTER" "select sum(w) filter (where i % 3 = 0), max(x) filter (where b > 0), min(y) filter (where a < 0), count(*) from %T"
+	runagg $t "aggregate of a computed float8 argument" "select sum(w * 2 + 1), max(x * 2.5 - y), min(w / 4) from %T where i % 5 = 2"
+	runagg $t "no row qualifies (NULL results)" "select sum(w), min(x), max(y), avg(w), count(*) from %T where a > 30000"
+	runagg $t "float4: min, max, avg (double accumulation, exact)" "select min(d), max(d), avg(d), count(d) from %T"
+	runagg_any $t "sum(float4) stays on the CPU" "select sum(d) from %T where d > 1000 and d < 'Infinity'"
+	runagg_any $t "float8 aggregates with GROUP BY stay on the CPU" "select a % 5, sum(w), max(x), avg(w) from %T group by 1 order by 1"
+	runagg $t "count and an int aggregate next to float8 ones" "select count(*), sum(b), max(c), sum(w), min(x) from %T"
+	runerr_agg $t "sum overflows" "select sum(z) from %T where z = 1.7976931348623157e308" "value out of range: overflow"
+done
+echo "join aggregates (float8, no GROUP BY)"
+for t in f8_1 f8_2; do
+	runagg $t "float8 aggregates over a join" "select sum(d.v), min(t.x), max(d.u), avg(d.v), count(*) from %T t join f8_dim d on t.b = d.k" "$JOINSET"
+	runagg $t "float8 aggregates over a join with a float8 qual and a FILTER" "select sum(d.v) filter (where d.grp < 3), max(t.y), min(d.u) from %T t join f8_dim d on t.b = d.k where t.x > d.v" "$JOINSET"
+	runagg $t "float8 aggregate of a computed value across the join" "select sum(d.v * 2 + d.u), max(t.x - d.v) from %T t join f8_dim d on t.b = d.k where t.i % 3 = 0" "$JOINSET"
+done

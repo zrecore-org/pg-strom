@@ -450,12 +450,13 @@ gen_acc(gen_ctx *g, sbuf *o)
 	const uint32_t *w = g->w;
 	uint32_t	naggs = w[10], aggoff = w[11];
 
-	sb_printf(o, "void spec_acc(inout Reg regs[VM_MAX_REGS], inout uint an[AGG_MAX], inout int64_t aa[AGG_MAX], inout int64_t ab[AGG_MAX])\n{\n");
+	/* the first error (an overflowing float8 sum), 0 if none */
+	sb_printf(o, "uint spec_acc(inout Reg regs[VM_MAX_REGS], inout uint an[AGG_MAX], inout int64_t aa[AGG_MAX], inout int64_t ab[AGG_MAX])\n{\n    uint fe = 0u;\n");
 	for (uint32_t k = 0; k < naggs; k++)
 	{
 		uint32_t	cls = w[aggoff + 4 * k], ra = w[aggoff + 4 * k + 1], rf = w[aggoff + 4 * k + 2];
 
-		if (cls < 1 || cls > 5 || (cls != 1 && reg_ok(g, ra)) || (rf != 0xffffffffu && reg_ok(g, rf)))
+		if (cls < 1 || cls > 8 || (cls != 1 && reg_ok(g, ra)) || (rf != 0xffffffffu && reg_ok(g, rf)))
 		{
 			gen_fail(g, "aggregate %u: unexpected class %u or register", k, cls);
 			return;
@@ -471,6 +472,9 @@ gen_acc(gen_ctx *g, sbuf *o)
 			sb_printf(o, "            if (regs[%u].isnull == 0)\n            {\n                int64_t v = regs[%u].v;\n", ra, ra);
 			if (cls == 2)
 				sb_printf(o, "                an[%u] += 1;\n", k);
+			else if (cls >= 6)
+				sb_printf(o, "                uint e%u = fagg_acc(%uu, uint64_t(v), an[%u], aa[%u]);\n"
+						  "                if (fe == 0u)\n                    fe = e%u;\n", k, cls, k, k, k);
 			else if (cls == 3)
 				sb_printf(o,
 						  "                an[%u] += 1;\n"
@@ -484,7 +488,7 @@ gen_acc(gen_ctx *g, sbuf *o)
 		}
 		sb_printf(o, "        }\n    }\n");
 	}
-	sb_printf(o, "}\n\n");
+	sb_printf(o, "    return fe;\n}\n\n");
 }
 
 /* the staging of a row for the group table (gagg.slang A, join_walk.inc mode 2) */

@@ -16,6 +16,8 @@
 #include <unistd.h>
 #include "xpu_common.h"
 #include "kernels_spv.h"
+#define F64SOFT_C 1
+#include "kernels_vm/f64_soft.inc"
 #include "scan_exec.h"
 #include "scan_caps.h"
 #include "cpu_vm.h"
@@ -1223,6 +1225,35 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 					if (rec[0])
 						st->n[k] = 1;
 					break;
+				case KAGG_ACTION__PSUM_FP:		/* A10: float8, the partial of a workgroup is the bits of a double */
+				case KAGG_ACTION__PAVG_FP:
+					if (rec[0])
+					{
+						if (st->n[k])
+						{
+							uint64_t	r = f64_add((uint64_t) st->val[k], (uint64_t) a);
+
+							if (f64_arith_err(0, (uint64_t) st->val[k], (uint64_t) a, r) != 0)
+								st->fovf[k] = 1;
+							st->val[k] = (int64_t) r;
+						}
+						else
+							st->val[k] = a;
+						st->n[k] += rec[0];
+					}
+					break;
+				case KAGG_ACTION__PMIN_FP64:
+				case KAGG_ACTION__PMAX_FP64:
+					if (rec[0])
+					{
+						uint64_t	kn = f64_key((uint64_t) a), ko = f64_key((uint64_t) st->val[k]);
+
+						if (!st->n[k] ||
+							(prog->agg_action[k] == KAGG_ACTION__PMIN_FP64 ? kn < ko : kn > ko))
+							st->val[k] = a;
+						st->n[k] = 1;
+					}
+					break;
 				default:		/* PMAX_* */
 					if (rec[0] && (!st->n[k] || a > st->val[k]))
 						st->val[k] = a;
@@ -1294,6 +1325,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 		memset(st->n, 0, sizeof(st->n));
 		memset(st->sum, 0, sizeof(st->sum));
 		memset(st->val, 0, sizeof(st->val));
+		memset(st->fovf, 0, sizeof(st->fovf));
 	}
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
@@ -1431,6 +1463,7 @@ typedef struct
 	uint64_t	n;
 	__int128	sum;
 	int64_t		val;
+	int			fovf;			/* a float8 sum overflowed */
 } agg_acc;
 
 /* add the contribution of one GPU record { n, A, B } to an accumulator */
@@ -1651,6 +1684,46 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 			r->attrs = (uint32_t)(scale < 0 ? 0 : scale) & __PAGG_NUMERIC_ATTRS__WEIGHT;
 			r->nitems = acc->n;
 			__store_int128_packed(&r->sum, (int128_t) acc->sum);
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		case KAGG_ACTION__PSUM_FP:
+		case KAGG_ACTION__PAVG_FP:
+		{
+			kagg_state__psum_fp_packed *r = (kagg_state__psum_fp_packed *) cv->data;
+
+			if (acc->n == 0)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			if (acc->fovf)
+			{
+				snprintf(err, errlen, "value out of range: overflow");
+				return -1;
+			}
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = 0;
+			r->nitems = (int64_t) acc->n;
+			memcpy(&r->sum, &acc->val, sizeof(r->sum));
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		case KAGG_ACTION__PMIN_FP64:
+		case KAGG_ACTION__PMAX_FP64:
+		{
+			kagg_state__pminmax_fp64_packed *r = (kagg_state__pminmax_fp64_packed *) cv->data;
+
+			if (!acc->n)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = __PAGG_MINMAX_ATTRS__VALID;
+			memcpy(&r->value, &acc->val, sizeof(r->value));
 			cv->len = sizeof(*r);
 			break;
 		}
@@ -2279,6 +2352,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 					acc.n = st->n[j];
 					acc.sum = st->sum[j];
 					acc.val = st->val[j];
+					acc.fovf = st->fovf[j];
 					pacc = &acc;
 				}
 				if (agg_col_value(action, (prog && prog->words && prog->agg_of_col[j] >= 0) ? prog->agg_scale[(int) prog->agg_of_col[j]] : -1, pacc, &cols[j], err, errlen) != 0)
@@ -3132,6 +3206,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		memset(st->n, 0, sizeof(st->n));
 		memset(st->sum, 0, sizeof(st->sum));
 		memset(st->val, 0, sizeof(st->val));
+		memset(st->fovf, 0, sizeof(st->fovf));
 	}
 	variant = (prog->nregs <= 16 ? 0 : 1);
 	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
@@ -3318,6 +3393,7 @@ scan_agg_state_prepare(agg_state *st, int nagg)
 		memset(st->n, 0, sizeof(st->n));
 		memset(st->sum, 0, sizeof(st->sum));
 		memset(st->val, 0, sizeof(st->val));
+		memset(st->fovf, 0, sizeof(st->fovf));
 	}
 }
 

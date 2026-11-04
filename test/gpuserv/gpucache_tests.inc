@@ -121,6 +121,7 @@ for t in gc1 gc2; do
 	gcrun $t "float8 arithmetic and a cast" "select id, x * 2 + 1, x::int8 from %T where x < 500 and a = 7"
 	gcrun_any $t "uuid qual" "select id from %T where u > '80000000-0000-0000-0000-000000000000'::uuid"
 	gcagg $t "count, sum, min, max, avg of int4 with NULLs" "select count(*), count(b), sum(b), min(b), max(b), avg(b) from %T"
+	gcagg $t "float8: count, min, max, and exact sum and avg" "select count(x), min(x), max(x), sum((a % 100)::float8), avg((a % 100)::float8) from %T"
 	gcagg $t "int2 and int8 columns, quals" "select sum(a), min(a), max(a), sum(c), max(c) from %T where a > 0 and b is not null"
 	gcagg $t "GROUP BY an integer expression" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1"
 	gcagg $t "GROUP BY date and timestamp aggregates" "select b % 5 as k, count(*), min(g), max(h) from %T group by 1 order by 1"
