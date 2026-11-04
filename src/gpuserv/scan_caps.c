@@ -1244,6 +1244,26 @@ classify_float8(const char *name)
 	return fc;
 }
 
+/* ----------------------------------------------------------------
+ * A11: PostGIS
+ * ----------------------------------------------------------------
+ */
+
+/* geometry_overlaps (&&), geometry_contains (~), geometry_within (@): the 2D float boxes */
+static scan_func_class
+classify_geometry(const char *name)
+{
+	scan_func_class fc = {0, 0, 0};
+
+	if (!strcmp(name, "geometry_overlaps"))
+		{ fc.cls = SOP_GEOMBOX; fc.kind = SOP_GBOX_OVERLAPS; }
+	else if (!strcmp(name, "geometry_contains"))
+		{ fc.cls = SOP_GEOMBOX; fc.kind = SOP_GBOX_CONTAINS; }
+	else if (!strcmp(name, "geometry_within"))
+		{ fc.cls = SOP_GEOMBOX; fc.kind = SOP_GBOX_WITHIN; }
+	return fc;
+}
+
 /* "int4lt", "int48pl", "float4mul", "int4_to_int8", "booleq", "int4um" ... */
 scan_func_class
 scan_vm_classify_func(uint32_t opcode)
@@ -1263,6 +1283,8 @@ scan_vm_classify_func(uint32_t opcode)
 	if ((fc = classify_string(name)).cls != 0)
 		return fc;
 	if ((fc = classify_float8(name)).cls != 0)
+		return fc;
+	if ((fc = classify_geometry(name)).cls != 0)
 		return fc;
 	if (!strcmp(name, "booleq")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_EQ; return fc; }
 	if (!strcmp(name, "boolne")) { fc.cls = SOP_CMPI; fc.kind = SOP_CMP_NE; return fc; }

@@ -125,6 +125,8 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		/* A6: strings are registers that point into a buffer */
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:      *p_bytes = 0; return SOP_VT_STR;
+		/* A11: a geometry is the payload of a varlena (GSERIALIZED), read like a string */
+		case TypeOpCode__geometry:    *p_bytes = 0; return SOP_VT_STR;
 		/* A6: numeric is { unscaled int64, scale } when the value fits (otherwise the row is rechecked) */
 		case TypeOpCode__numeric:     *p_bytes = 0; return SOP_VT_NUM;
 		/* A8: a jsonb value is a register that points at its container */
@@ -744,6 +746,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		case SOP_CMPF:
 		case SOP_NUMCMP:
 		case SOP_CMPD:
+		case SOP_GEOMBOX:
 			if (emit(b, fc.cls, dst, ra, rb, fc.kind, 0) < 0)
 				return -1;
 			break;

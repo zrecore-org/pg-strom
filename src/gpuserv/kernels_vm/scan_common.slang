@@ -1400,6 +1400,121 @@ uint fagg_merge(uint cls, uint n2, int64_t a2, inout uint n, inout int64_t a)
     return 0u;
 }
 
+// PostGIS (A11): a geometry register is a string register over a GSERIALIZED payload (v1 and v2, xpu_postgis.h).
+// The 2D float box of a geometry as gserialized_datum_get_box2df_p() makes it: the cached box if there is one, the
+// coordinates of a point rounded outward to float4 (next_float_down / next_float_up = f64_to_f32 mode 1 / 2);
+// st 1: an empty point (no box: the operators are false), st 2: the VM cannot tell (geodetic, NaN, a small line or
+// polygon without a cached box, a malformed value): the backend decides.
+struct GBox
+{
+    uint st;
+    uint xmin;
+    uint xmax;
+    uint ymin;
+    uint ymax;
+};
+
+// +-infinity -> +-FLT_MAX (as float4 bits)
+uint gf_clamp(uint f)
+{
+    if ((f & 0x7fffffffu) == 0x7f800000u)
+        return (f & 0x80000000u) | 0x7f7fffffu;
+    return f;
+}
+
+GBox geom_box2d(uint src, uint off, uint len)
+{
+    GBox r;
+    r.st = 2u;
+    r.xmin = 0u;
+    r.xmax = 0u;
+    r.ymin = 0u;
+    r.ymax = 0u;
+    if (len < 12u)
+        return r;
+    uint gflags = ldb_s(src, off + 3u);
+    uint pos = 4u;                                      // after srid[3] and gflags
+    if ((gflags & 0x40u) != 0u && (gflags & 0x10u) != 0u)
+        pos += 8u;                                      // v2: the extended flags
+    if ((gflags & 0x08u) != 0u)
+        return r;                                       // geodetic
+    if ((gflags & 0x04u) != 0u)
+    {
+        if (pos + 16u > len)
+            return r;
+        r.xmin = ldw_s(src, off + pos);
+        r.xmax = ldw_s(src, off + pos + 4u);
+        r.ymin = ldw_s(src, off + pos + 8u);
+        r.ymax = ldw_s(src, off + pos + 12u);
+        if ((r.xmin & 0x7fffffffu) > 0x7f800000u || (r.xmax & 0x7fffffffu) > 0x7f800000u ||
+            (r.ymin & 0x7fffffffu) > 0x7f800000u || (r.ymax & 0x7fffffffu) > 0x7f800000u)
+        {
+            r.st = 2u;
+            return r;
+        }
+        r.st = 0u;
+        return r;
+    }
+    if (pos + 8u > len || ldw_s(src, off + pos) != 1u)
+        return r;                                       // only a point has no cached box we can make
+    if (ldw_s(src, off + pos + 4u) == 0u)
+    {
+        r.st = 1u;                                      // POINT EMPTY
+        return r;
+    }
+    if (pos + 8u + 16u > len)
+        return r;
+    uint64_t xb = uint64_t(ldw_s(src, off + pos + 8u)) | (uint64_t(ldw_s(src, off + pos + 12u)) << 32);
+    uint64_t yb = uint64_t(ldw_s(src, off + pos + 16u)) | (uint64_t(ldw_s(src, off + pos + 20u)) << 32);
+    if ((xb & F64_MAG) > F64_INF || (yb & F64_MAG) > F64_INF)
+        return r;
+    // next_float_down / next_float_up of PostGIS never give infinity: a value beyond the float range becomes +-FLT_MAX
+    r.xmin = gf_clamp(f64_to_f32(xb, 1u));
+    r.xmax = gf_clamp(f64_to_f32(xb, 2u));
+    r.ymin = gf_clamp(f64_to_f32(yb, 1u));
+    r.ymax = gf_clamp(f64_to_f32(yb, 2u));
+    r.st = 0u;
+    return r;
+}
+
+// a <= b on float4 bit patterns (no NaN here; Metal's float compare flushes denormals, so the bits are ordered)
+bool gf_le(uint a, uint b) { return f4cmpbits(a, b) <= 0; }
+
+// The PostGIS instructions. Returns 0, or SOP_RECHECK_CODE.
+uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    Reg y = regs[rb];
+
+    if ((x.isnull | y.isnull) != 0u)
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    GBox a = geom_box2d(str_src(x), str_off(x), str_len(x));
+    GBox b = geom_box2d(str_src(y), str_off(y), str_len(y));
+    bool res = false;
+    if (a.st == 1u || b.st == 1u)
+    {
+        // an empty operand decides: && is false, ~ and @ are true (PostGIS 3.7: box2df_contains of an empty box)
+        res = (k0 != SOP_GBOX_OVERLAPS);
+    }
+    else if (a.st == 2u || b.st == 2u)
+        return SOP_RECHECK_CODE;
+    else
+    {
+        if (k0 == SOP_GBOX_OVERLAPS)
+            res = gf_le(a.xmin, b.xmax) && gf_le(b.xmin, a.xmax) && gf_le(a.ymin, b.ymax) && gf_le(b.ymin, a.ymax);
+        else if (k0 == SOP_GBOX_CONTAINS)
+            res = gf_le(a.xmin, b.xmin) && gf_le(b.xmax, a.xmax) && gf_le(a.ymin, b.ymin) && gf_le(b.ymax, a.ymax);
+        else
+            res = gf_le(b.xmin, a.xmin) && gf_le(a.xmax, b.xmax) && gf_le(b.ymin, a.ymin) && gf_le(a.ymax, b.ymax);
+    }
+    regs[dst].isnull = 0u;
+    regs[dst].v = b2l(res);
+    return 0u;
+}
+
 uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     switch (op)
@@ -1590,6 +1705,8 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_json(op, dst, ra, rb, k0, regs);
         if (op >= SOP_CMPD && op <= SOP_D2F)
             return vm_f8(op, dst, ra, rb, k0, k1, regs);
+        if (op == SOP_GEOMBOX)
+            return vm_geom(op, dst, ra, rb, k0, k1, regs);
         return op | 0x80000000u;    // malformed program
     }
     return 0;

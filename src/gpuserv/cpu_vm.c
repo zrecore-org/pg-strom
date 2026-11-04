@@ -8,6 +8,8 @@
 #include <string.h>
 #include "xpu_common.h"
 #include "scan_caps.h"
+#define F64SOFT_C 1
+#include "kernels_vm/f64_soft.inc"
 #include "cpu_vm.h"
 
 static int
@@ -518,6 +520,92 @@ vm_json(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, 
 	return op | 0x80000000u;
 }
 
+/* ---- A11: PostGIS. The same as vm_geom() of scan_common.slang (the 2D float box of a geometry) ---- */
+typedef struct
+{
+	uint32_t	st;			/* 0 ok, 1 empty point, 2 undecided (the backend decides) */
+	uint32_t	b[4];		/* float4 bits of xmin, xmax, ymin, ymax */
+} gbox;
+
+static uint32_t
+ld32u(const unsigned char *p)
+{
+	uint32_t	u;
+
+	memcpy(&u, p, 4);
+	return u;
+}
+
+/* +-infinity -> +-FLT_MAX (float4 bits) */
+static uint32_t
+gf_clamp(uint32_t f)
+{
+	if ((f & 0x7fffffffu) == 0x7f800000u)
+		return (f & 0x80000000u) | 0x7f7fffffu;
+	return f;
+}
+
+static gbox
+geom_box2d(const unsigned char *p, uint32_t len)
+{
+	gbox		r;
+	uint32_t	gflags, pos = 4;
+
+	memset(&r, 0, sizeof(r));
+	r.st = 2;
+	if (len < 12)
+		return r;
+	gflags = p[3];
+	if ((gflags & 0x40) && (gflags & 0x10))
+		pos += 8;
+	if (gflags & 0x08)
+		return r;
+	if (gflags & 0x04)
+	{
+		if (pos + 16 > len)
+			return r;
+		for (int i = 0; i < 4; i++)
+		{
+			r.b[i] = ld32u(p + pos + 4 * i);
+			if ((r.b[i] & 0x7fffffffu) > 0x7f800000u)
+				return r;
+		}
+		r.st = 0;
+		return r;
+	}
+	if (pos + 8 > len || ld32u(p + pos) != 1)
+		return r;
+	if (ld32u(p + pos + 4) == 0)
+	{
+		r.st = 1;
+		return r;
+	}
+	if (pos + 8 + 16 > len)
+		return r;
+	{
+		uint64_t	xb, yb;
+
+		memcpy(&xb, p + pos + 8, 8);
+		memcpy(&yb, p + pos + 16, 8);
+		if ((xb & 0x7fffffffffffffffull) > 0x7ff0000000000000ull || (yb & 0x7fffffffffffffffull) > 0x7ff0000000000000ull)
+			return r;
+		/* next_float_down / next_float_up of PostGIS never give infinity: beyond the float range it is +-FLT_MAX */
+		r.b[0] = gf_clamp(f64_to_f32(xb, 1));
+		r.b[1] = gf_clamp(f64_to_f32(xb, 2));
+		r.b[2] = gf_clamp(f64_to_f32(yb, 1));
+		r.b[3] = gf_clamp(f64_to_f32(yb, 2));
+	}
+	r.st = 0;
+	return r;
+}
+
+/* a <= b on float4 bit patterns */
+static int
+gf_le(uint32_t a, uint32_t b)
+{
+	return f4cmp(bits_to_f(a), bits_to_f(b)) <= 0;
+}
+
 /* the instructions that A6 added; the same as vm_ext() of scan_common.slang */
 static uint32_t
 vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
@@ -525,6 +613,36 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 {
 	switch (op)
 	{
+		case SOP_GEOMBOX:
+		{
+			vm_reg		x = regs[ra], y = regs[rb];
+			gbox		a, b;
+			int			res = 0;
+
+			if (x.isnull || y.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			a = geom_box2d(str_ptr(env, x.v), str_len(x.v));
+			b = geom_box2d(str_ptr(env, y.v), str_len(y.v));
+			if (a.st == 1 || b.st == 1)
+				res = (k0 != SOP_GBOX_OVERLAPS);		/* an empty operand: && false, ~ and @ true */
+			else if (a.st == 2 || b.st == 2)
+				return SOP_RECHECK_CODE;
+			else
+			{
+				if (k0 == SOP_GBOX_OVERLAPS)
+					res = gf_le(a.b[0], b.b[1]) && gf_le(b.b[0], a.b[1]) && gf_le(a.b[2], b.b[3]) && gf_le(b.b[2], a.b[3]);
+				else if (k0 == SOP_GBOX_CONTAINS)
+					res = gf_le(a.b[0], b.b[0]) && gf_le(b.b[1], a.b[1]) && gf_le(a.b[2], b.b[2]) && gf_le(b.b[3], a.b[3]);
+				else
+					res = gf_le(b.b[0], a.b[0]) && gf_le(a.b[1], b.b[1]) && gf_le(b.b[2], a.b[2]) && gf_le(a.b[3], b.b[3]);
+			}
+			regs[dst].isnull = 0;
+			regs[dst].v = res;
+			return 0;
+		}
 		case SOP_D2TS:
 		{
 			vm_reg		x = regs[ra];

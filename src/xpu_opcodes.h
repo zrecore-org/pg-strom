@@ -40,6 +40,7 @@ TYPE_OPCODE(macaddr, NULL, DEVTYPE__HAS_COMPARE)
 TYPE_OPCODE(inet, NULL, DEVTYPE__HAS_COMPARE)
 TYPE_OPCODE(jsonb, NULL, 0)
 TYPE_OPCODE(cube, "cube", 0)
+TYPE_OPCODE(geometry, "postgis", 0)
 
 #ifndef TYPE_ALIAS
 #define TYPE_ALIAS(NAME,EXTENSION,BASE,BASE_EXTENSION)
@@ -789,6 +790,25 @@ DEVONLY_FUNC_OPCODE(float2, jsonb_array_element_as_float2,  jsonb/text, DEVKIND_
 DEVONLY_FUNC_OPCODE(float4, jsonb_array_element_as_float4,  jsonb/text, DEVKIND__ANY, 10)
 DEVONLY_FUNC_OPCODE(float8, jsonb_array_element_as_float8,  jsonb/text, DEVKIND__ANY, 10)
 
+
+/*
+ * PostGIS (A11). Only what the Vulkan scan VM implements is pushed down (scan_caps.c); the rest of the names are
+ * registered so that the planner finds them, and stay on the CPU.
+ */
+FUNC_OPCODE(st_point,     float8/float8,               DEVKIND__ANY, st_point,      5, "postgis")
+FUNC_OPCODE(st_makepoint, float8/float8,               DEVKIND__ANY, st_makepoint2, 5, "postgis")
+__FUNC_OPCODE(st_setsrid,        geometry/int4,             5, "postgis")
+__FUNC_OPCODE(st_srid,           geometry,                  5, "postgis")
+__FUNC_OPCODE(st_isempty,        geometry,                  5, "postgis")
+__FUNC_OPCODE(st_distance,       geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(st_dwithin,        geometry/geometry/float8, 99, "postgis")
+__FUNC_OPCODE(st_contains,       geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(st_within,         geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(st_covers,         geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(st_intersects,     geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(geometry_overlaps, geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(geometry_contains, geometry/geometry,        99, "postgis")
+__FUNC_OPCODE(geometry_within,   geometry/geometry,        99, "postgis")
 
 /* cube/earthdistance */
 __FUNC_OPCODE(cube_eq,        cube/cube,  5, "cube")

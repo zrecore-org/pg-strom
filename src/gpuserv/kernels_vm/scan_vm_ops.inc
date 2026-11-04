@@ -79,6 +79,15 @@
  *   F2D      dst = (float8) a (a float4, exact)
  *   D2F      dst = (float4) a (nearest even; overflow and underflow errors, error id k1)
  *
+ * PostGIS (A11): a geometry is a string register (the payload of the varlena: GSERIALIZED v1/v2, xpu_postgis.h), so the
+ * loaders, constants and the recheck of compressed or external values are the strings'.
+ *
+ *   GEOMBOX  dst = a && b (k0 = 0), a ~ b (a contains b: 1), a @ b (a within b: 2) on the 2D float bounding boxes
+ *            (gserialized_overlaps_2d ...): the cached box, or for a point the box of its coordinates rounded outward
+ *            to float4 (a value beyond the float range becomes +-FLT_MAX, as PostGIS stores it); an empty operand
+ *            decides: && is false, ~ and @ are true; whatever else the VM cannot box (geodetic, a small line or
+ *            polygon without a cached box) returns SCANVM_RECHECK_CODE.
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -126,6 +135,11 @@ SCANVM_OP(I2D,        123)
 SCANVM_OP(D2I,        124)
 SCANVM_OP(F2D,        125)
 SCANVM_OP(D2F,        126)
+SCANVM_OP(GEOMBOX,    130)
+/* GEOMBOX kinds */
+SCANVM_OP(GBOX_OVERLAPS, 0)
+SCANVM_OP(GBOX_CONTAINS, 1)
+SCANVM_OP(GBOX_WITHIN,   2)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
 /* unary numeric operations (NUMARITH k0) */

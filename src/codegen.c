@@ -840,6 +840,14 @@ devtype_jsonb_hash(bool isnull, Datum value)
 
 
 static uint32_t
+devtype_geometry_hash(bool isnull, Datum value)
+{
+	if (isnull)
+		return 0;
+	return hash_any((unsigned char *)VARDATA_ANY(DatumGetPointer(value)), VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
+}
+
+static uint32_t
 devtype_cube_hash(bool isnull, Datum value)
 {
 	if (isnull)
@@ -1879,6 +1887,9 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 {
 	scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
+	/* PostGIS (A11): the geometry operators read a string register; a join program loads none */
+	if (fc.cls == SOP_GEOMBOX && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+		return false;
 	/* numeric: not in a join program (its registers are not loaded there) */
 	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
 	{

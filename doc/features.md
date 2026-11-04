@@ -148,6 +148,8 @@ PostgreSQL's parallel scan on the same machine, not to CUDA.
 | GPU-Cache | Works, see the section above; differences from the CUDA product are listed there |
 | Numeric in joins, numeric `min`/`max` | Not done (plan A6 "known gaps") |
 | Specialized kernels for opcodes the generator does not list (new ones until reviewed), for jsonb | They run on the interpreter (plan A6 "kernel specialization") |
+| PostGIS `geometry` | The 2D bounding-box operators `&&`, `~`, `@` (also with an empty, infinite or huge-coordinate operand, exactly as PostGIS 3.7 answers them) in quals of heap tables; the geometry value passes through; whatever the VM cannot box (geodetic values, a small line or polygon PostGIS keeps no box for) is re-checked on the CPU | `ST_Contains`, `ST_Intersects`, `ST_DWithin`, `ST_Distance`, ..., Arrow and GPU-Cache sources, joins |
 | jsonb | Quals, aggregate arguments and number extraction run on the GPU; computed jsonb/text results in the target list, equality, `#>` and the other operators stay on the CPU (plan A8 status) |
-| GPU-Direct Storage, `heterodb-extra`, PostGIS, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
+| GPU-Direct Storage, `heterodb-extra`, SELECT INTO direct, multi-GPU | Removed or never present on this branch |
+| PostGIS geometry functions other than the three box operators, geometry on Arrow and in the GPU-Cache, spatial joins | Not on the GPU yet (plan A11) |
 | fp64 hardware, 64-bit-atomic kernels for devices that have them | Not used (plan A3b); `float8` is computed in integer arithmetic on every device |

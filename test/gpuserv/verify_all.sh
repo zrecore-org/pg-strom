@@ -18,8 +18,10 @@ LOGDIR=${LOGDIR:-$REPO/test-data/logs/$STAMP}
 mkdir -p "$LOGDIR"
 cd "$REPO" || exit 2
 rc=0
+n=0
 for st in $STAGES; do
-	log=$LOGDIR/$st.log
+	n=$((n+1))
+	log=$LOGDIR/$n-$st.log
 	case $st in
 		installcheck) cmd="test/vulkan_installcheck.sh" ;;
 		scan)         cmd="scan_test.sh" ;;
