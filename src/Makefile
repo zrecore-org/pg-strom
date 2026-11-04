@@ -14,7 +14,7 @@ STROM_OBJS = main.o githash.o codegen.o \
              arrow_fdw.o arrow_meta.o \
              parquet_read.o parquet_cache.o \
              misc.o float2.o tinyint.o aggfuncs.o \
-             pg_portable.o gpu_launcher.o gpuserv/gpuserv_proto.o gpuserv/scan_caps.o gpuserv/scan_prog.o
+             pg_portable.o gpu_launcher.o svc_proto.o svc_caps.o svc_prog.o
 GENERATED-HEADERS = githash.c
 STROM_HEADERS = arrow_defs.h float2.h
 
@@ -100,9 +100,12 @@ MODULEDIR  = pg_strom
 DATA = $(STROM_SQL) ../LICENSE $(STROM_HEADERS)
 OBJS = $(STROM_OBJS)
 
-EXTRA_CLEAN = $(GENERATED-HEADERS)
+EXTRA_CLEAN = $(GENERATED-HEADERS) $(OBJS:.o=.d)
 EXTENSION = pg_strom
 PG_CPPFLAGS := $(PGSTROM_FLAGS)
+# Header dependencies: PGXS tracks them only if PostgreSQL was configured with --enable-depend, and an object
+# left over from before a change of a struct (scan_prog.h) crashed the server with a stack overflow.
+PG_CPPFLAGS += -MMD -MP
 # (+=, not :=: the pkgconf --cflags added above must survive; Homebrew's headers are
 #  not in the default search path)
 PG_CXXFLAGS += -std=c++20 -Wno-sign-compare
@@ -161,3 +164,6 @@ githash.c:
 	(echo "extern const char *pgstrom_githash_cstring;"; \
 	 echo ""; \
 	 echo "const char *pgstrom_githash_cstring = \"$(PGSTROM_GITHASH)\";") > githash.c
+
+# the .d files written by -MMD (after the PGXS include, so that they do not become the default goal)
+-include $(OBJS:.o=.d)

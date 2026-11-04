@@ -17,3 +17,5 @@ arrow-tools/vcf2arrow
 
 # throwaway test clusters and datasets
 /test-data/
+/src/*.d
+/src/gpuserv/*.d
