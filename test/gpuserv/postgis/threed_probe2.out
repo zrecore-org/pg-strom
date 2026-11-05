@@ -1,0 +1,52 @@
+1|POINT Z (1 2 3)|POINT Z (1 2 3)|true|true
+2|POINT Z (1 2 3)|POINT Z (1 2 4)|false|false
+3|POINT Z (0 0 0)|POINT Z (-0 0 0)|true|true
+4|POINT Z (1e-200 0 0)|POINT Z (0 0 0)|true|true
+5|POINT Z (1e-160 0 0)|POINT Z (0 0 0)|false|false
+6|POINT Z (1e-155 0 0)|POINT Z (0 0 0)|false|false
+7|POINT Z (1 2 3)|POINT (1 2)|true|true
+8|POINT (1 2)|POINT (1 2)|true|true
+9|POINT (1 2)|POINT (1 3)|false|false
+10|POINT Z (1 2 3)|POINT M (1 2 3)|true|true
+11|POINT ZM (1 2 3 4)|POINT Z (1 2 3)|true|true
+12|POINT ZM (1 2 3 4)|POINT ZM (1 2 3 9)|true|true
+13|POINT Z EMPTY|POINT Z (1 2 3)|false|false
+14|POINT Z (NaN 2 3)|POINT Z (NaN 2 3)|false|false
+15|POINT Z (Infinity 2 3)|POINT Z (Infinity 2 3)|ERROR: parse error - invalid geometry|ERROR: parse error - invalid geometry
+16|POINT Z (1e308 0 0)|POINT Z (-1e308 0 0)|false|false
+17|SRID=4326;POINT Z (1 2 3)|SRID=3857;POINT Z (1 2 3)|ERROR: ST_3DIntersects: Operation on mixed SRID geometries (Point, 4326) != (Point, 3857)|ERROR: LWGEOM_dwithin3d: 
+18|SRID=4326;POINT Z (1 2 3)|POINT Z (1 2 3)|ERROR: ST_3DIntersects: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERROR: LWGEOM_dwithin3d: Operation on 
+POINT (1 2)|false|false|2|0|2
+POINT Z (1 2 3)|true|false|3|2|3
+POINT M (1 2 3)|false|true|3|1|3
+POINT ZM (1 2 3 4)|true|true|4|3|4
+POINT EMPTY|false|false|2|0|2
+POINT Z EMPTY|true|false|3|2|3
+LINESTRING Z (0 0 0, 1 1 1)|true|false|3|2|3
+POLYGON M ((0 0 1, 1 0 1, 1 1 1, 0 0 1))|false|true|3|1|3
+GEOMETRYCOLLECTION EMPTY|false|false|2|0|2
+NULL input||
+return types|boolean|smallint|smallint|smallint
+2|3|t|f
+2|8|t|f
+3|6|t|f
+3|7|t|f
+3|11|t|f
+3|13|t|f
+4|5|t|f
+4|6|t|f
+4|7|t|f
+4|8|t|f
+5|6|t|f
+5|7|t|f
+5|8|t|f
+5|15|t|f
+6|7|t|f
+6|8|t|f
+7|8|t|f
+7|15|t|f
+8|11|t|f
+8|13|t|f
+pairs total|105
+pairs where &&& differs from &&|20
+float4 edge|t|t

@@ -2053,6 +2053,28 @@ vulkan_geom_3ddwithin_args_ok(List *func_args)
 }
 
 /*
+ * ST_3DIntersects(point, point): ST_3DDWithin with the tolerance 0 (the program builder adds the constant), so the same operand
+ * shapes; a fused point needs a Z.
+ */
+static bool
+vulkan_geom_3dintersects_args_ok(List *func_args)
+{
+	int			s0, s1;
+
+	if (list_length(func_args) != 2)
+		return false;
+	s0 = vulkan_geom_operand_shape(linitial(func_args));
+	s1 = vulkan_geom_operand_shape(lsecond(func_args));
+	if (s0 < 0 || s1 < 0)
+		return false;
+	if (s0 && s1 &&
+		vulkan_geom_fused_srid(linitial(func_args)) != vulkan_geom_fused_srid(lsecond(func_args)))
+		return false;
+	return ((s0 != 1 || vulkan_geom_fused_nargs(linitial(func_args)) >= 3) &&
+			(s1 != 1 || vulkan_geom_fused_nargs(lsecond(func_args)) >= 3));
+}
+
+/*
  * Vulkan service: when may a text function run on the GPU? Equality compares bytes, which is what
  * the database does for every deterministic collation; the ordering operators are LOCALE_AWARE and
  * need the C collation (checked by the function lookup). LIKE is limited to a constant pattern that is
@@ -2068,12 +2090,14 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 
 	/* PostGIS (A11): the geometry operators read a string register; a join program loads none */
 	if ((fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK ||
-		 fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW) &&
+		 fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG) &&
 		((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN || !vulkan_geom_source_ok(context)))
 		return false;
 	/* st_z / st_m of a column, parameter or constant point (a fused st_makepoint has no register to read) */
-	if (fc.cls == SOP_GEOMZM)
+	if (fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOMFLAG)
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0);
+	if (fc.cls == SOP_GEOM3DDW && fc.kind == SOP_G3DDW_INTERSECTS)
+		return vulkan_geom_3dintersects_args_ok(func_args);
 	if (fc.cls == SOP_GEOM3DDW)
 		return vulkan_geom_3ddwithin_args_ok(func_args);
 	if (fc.cls == SOP_GEOMPIP)
@@ -5241,7 +5265,7 @@ geometry_func_walker(Node *node, void *context)
 			scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
 			if (fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK ||
-				fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW)
+				fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG)
 				return true;
 		}
 	}

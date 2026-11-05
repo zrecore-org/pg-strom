@@ -95,7 +95,7 @@ emit(builder *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0
 		b->feat |= SCAN_FEAT_JSON;
 	else if (op >= SOP_CMPD && op <= SOP_D2F)
 		b->feat |= SCAN_FEAT_F8;
-	else if (op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW)
+	else if ((op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW) || op == SOP_GEOMFLAG)		/* not NULLMRG (136): always compiled in */
 		b->feat |= SCAN_FEAT_GEOM;
 	p = b->insn + 6 * b->ninsn++;
 	p[0] = op; p[1] = dst; p[2] = a; p[3] = rb; p[4] = k0; p[5] = k1;
@@ -606,6 +606,29 @@ emit_geomzm(builder *b, const kern_expression *kexp, scan_func_class fc, int *ne
 }
 
 /*
+ * st_hasz / st_hasm / st_ndims / st_zmflag / st_coorddim: one string register in, a boolean or smallint register out.
+ */
+static int
+emit_geomflag(builder *b, const kern_expression *kexp, scan_func_class fc, int *next)
+{
+	int			mark = *next;
+	int			ra, dst;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 1)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	ra = expr_to_reg(b, KEXP_FIRST_ARG(kexp), next);
+	if (ra < 0)
+		return -1;
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 || emit(b, SOP_GEOMFLAG, dst, ra, 0, fc.kind, 0) < 0)
+		return -1;
+	return dst;
+}
+
+/*
  * A11 part 4: st_3ddwithin(point, point, tolerance): like st_dwithin, a fused point (st_makepoint(x, y, z[, m]), at least
  * three arguments: PostGIS measures a point without Z in 2D and raises a NOTICE) also gives the register of its Z; the SRID
  * (bits 0..19 of k1) and the two Z registers (bits 20..24 and 25..29) share k1.
@@ -624,7 +647,7 @@ emit_geom3ddw(builder *b, const kern_expression *kexp, int *next)
 
 	if (b->no_strings)
 		return fail(b, "a geometry is not supported in a join");
-	if (kexp->nr_args != 3)
+	if (kexp->nr_args != 3 && kexp->nr_args != 2)		/* 2: st_3dintersects, the tolerance is 0 */
 		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 	kmk[0] = geom_fused_point(ka, &srid[0]);
 	kmk[1] = geom_fused_point(kb, &srid[1]);
@@ -664,7 +687,15 @@ emit_geom3ddw(builder *b, const kern_expression *kexp, int *next)
 		if (rb < 0)
 			return -1;
 	}
-	rt = expr_to_reg(b, kt, next);
+	if (kexp->nr_args == 2)
+	{
+		/* the tolerance 0.0: a float8 constant register (not NULL, bits 0) */
+		rt = new_reg(b, next);
+		if (rt < 0 || rt > 0xff || emit(b, SOP_CONST, rt, 0, 0, 0, 0) < 0)
+			return -1;
+	}
+	else
+		rt = expr_to_reg(b, kt, next);
 	if (rt < 0 || rt > 0xff)
 		return -1;
 	*next = mark;
@@ -928,6 +959,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		return emit_geomdwithin(b, kexp, next);
 	if (fc.cls == SOP_GEOMZM)
 		return emit_geomzm(b, kexp, fc, next);
+	if (fc.cls == SOP_GEOMFLAG)
+		return emit_geomflag(b, kexp, fc, next);
 	if (fc.cls == SOP_GEOM3DDW)
 		return emit_geom3ddw(b, kexp, next);
 	if (fc.cls == SOP_GEOMMK)

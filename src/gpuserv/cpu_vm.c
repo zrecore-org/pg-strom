@@ -525,6 +525,8 @@ typedef struct
 {
 	uint32_t	st;			/* 0 ok, 1 empty point, 2 undecided (the backend decides) */
 	uint32_t	b[4];		/* float4 bits of xmin, xmax, ymin, ymax */
+	uint32_t	hz, z[2];	/* &&& only: has a Z; float4 bits of zmin, zmax */
+	uint32_t	hm, m[2];	/* &&& only: has an M; float4 bits of mmin, mmax */
 } gbox;
 
 static uint32_t
@@ -546,16 +548,18 @@ gf_clamp(uint32_t f)
 }
 
 static gbox
-geom_box2d(const unsigned char *p, uint32_t len)
+geom_box2d(const unsigned char *p, uint32_t len, int nd)
 {
 	gbox		r;
-	uint32_t	gflags, pos = 4;
+	uint32_t	gflags, pos = 4, hzf, hmf;
 
 	memset(&r, 0, sizeof(r));
 	r.st = 2;
 	if (len < 12)
 		return r;
 	gflags = p[3];
+	hzf = nd ? (gflags & 1) : 0;
+	hmf = nd ? ((gflags >> 1) & 1) : 0;
 	if ((gflags & 0x40) && (gflags & 0x10))
 		pos += 8;
 	if (gflags & 0x08)
@@ -570,6 +574,31 @@ geom_box2d(const unsigned char *p, uint32_t len)
 			if ((r.b[i] & 0x7fffffffu) > 0x7f800000u)
 				return r;
 		}
+		{
+			uint32_t	zp = pos + 16;
+
+			if (hzf)
+			{
+				if (zp + 8 > len)
+					return r;
+				r.hz = 1;
+				r.z[0] = ld32u(p + zp);
+				r.z[1] = ld32u(p + zp + 4);
+				zp += 8;
+				if ((r.z[0] & 0x7fffffffu) > 0x7f800000u || (r.z[1] & 0x7fffffffu) > 0x7f800000u)
+					return r;
+			}
+			if (hmf)
+			{
+				if (zp + 8 > len)
+					return r;
+				r.hm = 1;
+				r.m[0] = ld32u(p + zp);
+				r.m[1] = ld32u(p + zp + 4);
+				if ((r.m[0] & 0x7fffffffu) > 0x7f800000u || (r.m[1] & 0x7fffffffu) > 0x7f800000u)
+					return r;
+			}
+		}
 		r.st = 0;
 		return r;
 	}
@@ -580,7 +609,7 @@ geom_box2d(const unsigned char *p, uint32_t len)
 		r.st = 1;
 		return r;
 	}
-	if (pos + 8 + 16 > len)
+	if (pos + 8 + 16 + 8 * (hzf + hmf) > len)
 		return r;
 	{
 		uint64_t	xb, yb;
@@ -589,6 +618,33 @@ geom_box2d(const unsigned char *p, uint32_t len)
 		memcpy(&yb, p + pos + 16, 8);
 		if ((xb & 0x7fffffffffffffffull) > 0x7ff0000000000000ull || (yb & 0x7fffffffffffffffull) > 0x7ff0000000000000ull)
 			return r;
+		/* &&& (n-D box, gidx): a coordinate beyond the float4 range is the backend's (see scan_common.slang) */
+		if (nd && ((xb & 0x7fffffffffffffffull) > 0x47EFFFFFE0000000ull || (yb & 0x7fffffffffffffffull) > 0x47EFFFFFE0000000ull))
+			return r;
+		if (hzf)
+		{
+			uint64_t	zb;
+
+			memcpy(&zb, p + pos + 24, 8);
+			if ((zb & 0x7fffffffffffffffull) > 0x7ff0000000000000ull ||
+				(nd && (zb & 0x7fffffffffffffffull) > 0x47EFFFFFE0000000ull))
+				return r;
+			r.hz = 1;
+			r.z[0] = gf_clamp(f64_to_f32(zb, 1));
+			r.z[1] = gf_clamp(f64_to_f32(zb, 2));
+		}
+		if (hmf)
+		{
+			uint64_t	mb;
+
+			memcpy(&mb, p + pos + 24 + 8 * hzf, 8);
+			if ((mb & 0x7fffffffffffffffull) > 0x7ff0000000000000ull ||
+				(nd && (mb & 0x7fffffffffffffffull) > 0x47EFFFFFE0000000ull))
+				return r;
+			r.hm = 1;
+			r.m[0] = gf_clamp(f64_to_f32(mb, 1));
+			r.m[1] = gf_clamp(f64_to_f32(mb, 2));
+		}
 		/* next_float_down / next_float_up of PostGIS never give infinity: beyond the float range it is +-FLT_MAX */
 		r.b[0] = gf_clamp(f64_to_f32(xb, 1));
 		r.b[1] = gf_clamp(f64_to_f32(xb, 2));
@@ -1000,6 +1056,27 @@ geom_zm(const unsigned char *p, uint32_t len, uint32_t k0, int *isnull, uint64_t
 	return 0;
 }
 
+/* ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim: the same as vm_geom_flag() of scan_common.slang */
+static uint32_t
+geom_flag(const unsigned char *p, uint32_t len, uint32_t k0, int64_t *val)
+{
+	uint32_t	hz, hm, v;
+
+	if (len < 8 || (p[0] & 0xe0) != 0)
+		return SOP_RECHECK_CODE;
+	hz = p[3] & 1;
+	hm = (p[3] >> 1) & 1;
+	v = 2 + hz + hm;
+	if (k0 == SOP_GFLAG_HASZ)
+		v = hz;
+	else if (k0 == SOP_GFLAG_HASM)
+		v = hm;
+	else if (k0 == SOP_GFLAG_ZMFLAG)
+		v = 2 * hz + hm;
+	*val = (int64_t) v;
+	return 0;
+}
+
 /* the same as vm_geom_3ddwithin() of scan_common.slang */
 static uint32_t
 geom_3ddwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1, int *res)
@@ -1112,6 +1189,24 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				regs[dst].v = (int64_t) val;
 			return 0;
 		}
+		case SOP_GEOMFLAG:
+		{
+			vm_reg		a = regs[ra];
+			int64_t		val = 0;
+			uint32_t	rc;
+
+			if (a.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			rc = geom_flag(str_ptr(env, a.v), str_len(a.v), k0, &val);
+			if (rc != 0)
+				return rc;
+			regs[dst].isnull = 0;
+			regs[dst].v = val;
+			return 0;
+		}
 		case SOP_GEOM3DDW:
 		{
 			vm_reg		a = regs[ra], b = regs[rb];
@@ -1167,16 +1262,23 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				regs[dst].isnull = 1;
 				return 0;
 			}
-			a = geom_box2d(str_ptr(env, x.v), str_len(x.v));
-			b = geom_box2d(str_ptr(env, y.v), str_len(y.v));
+			a = geom_box2d(str_ptr(env, x.v), str_len(x.v), k0 == SOP_GBOX_OVERLAPS_ND);
+			b = geom_box2d(str_ptr(env, y.v), str_len(y.v), k0 == SOP_GBOX_OVERLAPS_ND);
 			if (a.st == 1 || b.st == 1)
-				res = (k0 != SOP_GBOX_OVERLAPS);		/* an empty operand: && false, ~ and @ true */
+				res = (k0 != SOP_GBOX_OVERLAPS && k0 != SOP_GBOX_OVERLAPS_ND);	/* an empty operand: && and &&& false, ~ and @ true */
 			else if (a.st == 2 || b.st == 2)
 				return SOP_RECHECK_CODE;
 			else
 			{
-				if (k0 == SOP_GBOX_OVERLAPS)
+				if (k0 == SOP_GBOX_OVERLAPS || k0 == SOP_GBOX_OVERLAPS_ND)
+				{
 					res = gf_le(a.b[0], b.b[1]) && gf_le(b.b[0], a.b[1]) && gf_le(a.b[2], b.b[3]) && gf_le(b.b[2], a.b[3]);
+					/* &&& compares a dimension only when both operands have it */
+					if (k0 == SOP_GBOX_OVERLAPS_ND && res && a.hz && b.hz)
+						res = gf_le(a.z[0], b.z[1]) && gf_le(b.z[0], a.z[1]);
+					if (k0 == SOP_GBOX_OVERLAPS_ND && res && a.hm && b.hm)
+						res = gf_le(a.m[0], b.m[1]) && gf_le(b.m[0], a.m[1]);
+				}
 				else if (k0 == SOP_GBOX_CONTAINS)
 					res = gf_le(a.b[0], b.b[0]) && gf_le(b.b[1], a.b[1]) && gf_le(a.b[2], b.b[2]) && gf_le(b.b[3], a.b[3]);
 				else

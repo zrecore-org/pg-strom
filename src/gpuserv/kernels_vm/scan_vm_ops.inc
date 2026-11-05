@@ -116,6 +116,10 @@
  *            geometry type (PostGIS raises "Argument to ST_Z() must have type POINT"), a geodetic point and a malformed value
  *            return SCANVM_RECHECK_CODE: the backend evaluates the row and raises the error in its own order.
  *
+ *   GEOMFLAG dst = the flags of a geometry of any type (empty or not): k0 0 ST_HasZ, 1 ST_HasM (boolean), 2 ST_NDims (2 + Z + M),
+ *            3 ST_Zmflag (2 * Z + M), 4 ST_CoordDim (= ST_NDims) as smallint. Only the header is read; NULL in, NULL out; a value
+ *            shorter than a header returns SCANVM_RECHECK_CODE.
+ *
  *   GEOM3DDW dst = ST_3DDWithin(point, point, tolerance), the layout of GEOMDWITHIN with the Z of a fused point in a register
  *            too: bits 0..19 of k1 are the SRID, bits 20..24 the register of the Z of a (fused), bits 25..29 that of b. PostGIS
  *            raises a NOTICE when an operand has no Z value ("the unknown z-value will be regarded as any value") and the
@@ -182,6 +186,7 @@ SCANVM_OP(GEOMDWITHIN, 133)
 SCANVM_OP(GEOMZM,     134)
 SCANVM_OP(GEOM3DDW,   135)
 SCANVM_OP(NULLMRG,    136)
+SCANVM_OP(GEOMFLAG,   137)
 /* GEOMPIP: the operands of the function (kind) and the flags of k0 */
 SCANVM_OP(GPIP_POLY_POINT,  0)
 SCANVM_OP(GPIP_POINT_POLY,  1)
@@ -204,6 +209,16 @@ SCANVM_OP(DUN_SIGN,  7)
 SCANVM_OP(GBOX_OVERLAPS, 0)
 SCANVM_OP(GBOX_CONTAINS, 1)
 SCANVM_OP(GBOX_WITHIN,   2)
+/* &&& (geometry_overlaps_nd): the 2D boxes, and the Z ranges when both operands have a Z, the M ranges when both have an M */
+SCANVM_OP(GBOX_OVERLAPS_ND, 3)
+/* GEOM3DDW kind 1: ST_3DIntersects(point, point) = ST_3DDWithin with the constant tolerance 0 (the program builder adds it) */
+SCANVM_OP(G3DDW_INTERSECTS, 1)
+/* GEOMFLAG kinds: ST_HasZ, ST_HasM (boolean), ST_NDims, ST_Zmflag, ST_CoordDim (smallint) */
+SCANVM_OP(GFLAG_HASZ,     0)
+SCANVM_OP(GFLAG_HASM,     1)
+SCANVM_OP(GFLAG_NDIMS,    2)
+SCANVM_OP(GFLAG_ZMFLAG,   3)
+SCANVM_OP(GFLAG_COORDDIM, 4)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
 SCANVM_OP(GIST_NONFINITE_CODE, 0x7ffffffd)  /* A13: a GiST join probe point has a non-finite coordinate (an error, not a recheck) */

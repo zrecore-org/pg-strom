@@ -1419,7 +1419,19 @@ struct GBox
     uint xmax;
     uint ymin;
     uint ymax;
+    // &&& (nd): the Z and M ranges when the geometry has them (float4 bits)
+    uint hz;
+    uint zmin;
+    uint zmax;
+    uint hm;
+    uint mmin;
+    uint mmax;
 };
+
+uint64_t ld64s(uint src, uint o)
+{
+    return uint64_t(ldw_s(src, o)) | (uint64_t(ldw_s(src, o + 4u)) << 32);
+}
 
 // +-infinity -> +-FLT_MAX (as float4 bits)
 uint gf_clamp(uint f)
@@ -1429,7 +1441,7 @@ uint gf_clamp(uint f)
     return f;
 }
 
-GBox geom_box2d(uint src, uint off, uint len)
+GBox geom_box2d(uint src, uint off, uint len, bool nd)
 {
     GBox r;
     r.st = 2u;
@@ -1437,9 +1449,17 @@ GBox geom_box2d(uint src, uint off, uint len)
     r.xmax = 0u;
     r.ymin = 0u;
     r.ymax = 0u;
+    r.hz = 0u;
+    r.zmin = 0u;
+    r.zmax = 0u;
+    r.hm = 0u;
+    r.mmin = 0u;
+    r.mmax = 0u;
     if (len < 12u)
         return r;
     uint gflags = ldb_s(src, off + 3u);
+    uint hzf = nd ? (gflags & 1u) : 0u;
+    uint hmf = nd ? ((gflags >> 1u) & 1u) : 0u;
     uint pos = 4u;                                      // after srid[3] and gflags
     if ((gflags & 0x40u) != 0u && (gflags & 0x10u) != 0u)
         pos += 8u;                                      // v2: the extended flags
@@ -1459,6 +1479,28 @@ GBox geom_box2d(uint src, uint off, uint len)
             r.st = 2u;
             return r;
         }
+        uint zp = pos + 16u;
+        if (hzf != 0u)
+        {
+            if (zp + 8u > len)
+                return r;
+            r.hz = 1u;
+            r.zmin = ldw_s(src, off + zp);
+            r.zmax = ldw_s(src, off + zp + 4u);
+            zp += 8u;
+            if ((r.zmin & 0x7fffffffu) > 0x7f800000u || (r.zmax & 0x7fffffffu) > 0x7f800000u)
+                return r;
+        }
+        if (hmf != 0u)
+        {
+            if (zp + 8u > len)
+                return r;
+            r.hm = 1u;
+            r.mmin = ldw_s(src, off + zp);
+            r.mmax = ldw_s(src, off + zp + 4u);
+            if ((r.mmin & 0x7fffffffu) > 0x7f800000u || (r.mmax & 0x7fffffffu) > 0x7f800000u)
+                return r;
+        }
         r.st = 0u;
         return r;
     }
@@ -1469,12 +1511,34 @@ GBox geom_box2d(uint src, uint off, uint len)
         r.st = 1u;                                      // POINT EMPTY
         return r;
     }
-    if (pos + 8u + 16u > len)
+    if (pos + 8u + 16u + 8u * (hzf + hmf) > len)
         return r;
     uint64_t xb = uint64_t(ldw_s(src, off + pos + 8u)) | (uint64_t(ldw_s(src, off + pos + 12u)) << 32);
     uint64_t yb = uint64_t(ldw_s(src, off + pos + 16u)) | (uint64_t(ldw_s(src, off + pos + 20u)) << 32);
     if ((xb & F64_MAG) > F64_INF || (yb & F64_MAG) > F64_INF)
         return r;
+    // &&& goes through PostGIS' n-D box (gidx), which treats a coordinate beyond the float4 range differently from the 2D box
+    // (a Z of 1e300 overlapped a Z range of [7, 7]): such a point is the backend's. 0x47EFFFFFE0000000 is FLT_MAX as a double.
+    if (nd && ((xb & F64_MAG) > 0x47EFFFFFE0000000ull || (yb & F64_MAG) > 0x47EFFFFFE0000000ull))
+        return r;
+    if (hzf != 0u)
+    {
+        uint64_t zb = ld64s(src, off + pos + 24u);
+        if ((zb & F64_MAG) > F64_INF || (nd && (zb & F64_MAG) > 0x47EFFFFFE0000000ull))
+            return r;
+        r.hz = 1u;
+        r.zmin = gf_clamp(f64_to_f32(zb, 1u));
+        r.zmax = gf_clamp(f64_to_f32(zb, 2u));
+    }
+    if (hmf != 0u)
+    {
+        uint64_t mb = ld64s(src, off + pos + 24u + 8u * hzf);
+        if ((mb & F64_MAG) > F64_INF || (nd && (mb & F64_MAG) > 0x47EFFFFFE0000000ull))
+            return r;
+        r.hm = 1u;
+        r.mmin = gf_clamp(f64_to_f32(mb, 1u));
+        r.mmax = gf_clamp(f64_to_f32(mb, 2u));
+    }
     // next_float_down / next_float_up of PostGIS never give infinity: a value beyond the float range becomes +-FLT_MAX
     r.xmin = gf_clamp(f64_to_f32(xb, 1u));
     r.xmax = gf_clamp(f64_to_f32(xb, 2u));
@@ -1498,20 +1562,28 @@ uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg re
         regs[dst].isnull = 1u;
         return 0u;
     }
-    GBox a = geom_box2d(str_src(x), str_off(x), str_len(x));
-    GBox b = geom_box2d(str_src(y), str_off(y), str_len(y));
+    bool nd = (k0 == SOP_GBOX_OVERLAPS_ND);
+    GBox a = geom_box2d(str_src(x), str_off(x), str_len(x), nd);
+    GBox b = geom_box2d(str_src(y), str_off(y), str_len(y), nd);
     bool res = false;
     if (a.st == 1u || b.st == 1u)
     {
-        // an empty operand decides: && is false, ~ and @ are true (PostGIS 3.7: box2df_contains of an empty box)
-        res = (k0 != SOP_GBOX_OVERLAPS);
+        // an empty operand decides: && and &&& are false, ~ and @ are true (PostGIS 3.7: box2df_contains of an empty box)
+        res = (k0 != SOP_GBOX_OVERLAPS && !nd);
     }
     else if (a.st == 2u || b.st == 2u)
         return SOP_RECHECK_CODE;
     else
     {
-        if (k0 == SOP_GBOX_OVERLAPS)
+        if (k0 == SOP_GBOX_OVERLAPS || nd)
+        {
             res = gf_le(a.xmin, b.xmax) && gf_le(b.xmin, a.xmax) && gf_le(a.ymin, b.ymax) && gf_le(b.ymin, a.ymax);
+            // &&& compares a dimension only when both operands have it (a Z against an M is not compared)
+            if (nd && res && a.hz != 0u && b.hz != 0u)
+                res = gf_le(a.zmin, b.zmax) && gf_le(b.zmin, a.zmax);
+            if (nd && res && a.hm != 0u && b.hm != 0u)
+                res = gf_le(a.mmin, b.mmax) && gf_le(b.mmin, a.mmax);
+        }
         else if (k0 == SOP_GBOX_CONTAINS)
             res = gf_le(a.xmin, b.xmin) && gf_le(b.xmax, a.xmax) && gf_le(a.ymin, b.ymin) && gf_le(b.ymax, a.ymax);
         else
@@ -1531,10 +1603,6 @@ uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg re
 #define PIP_UNSURE  2u
 #define PIP_ERRBOUND 0x3CE0000000000000ull
 
-uint64_t ld64s(uint src, uint o)
-{
-    return uint64_t(ldw_s(src, o)) | (uint64_t(ldw_s(src, o + 4u)) << 32);
-}
 bool f64_nonfinite(uint64_t a) { return (a & F64_MAG) >= F64_INF; }
 
 // the winding number of a ring of n points at off (16 bytes each) around (px, py)
@@ -1822,6 +1890,33 @@ uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
         return SOP_RECHECK_CODE;
     regs[dst].isnull = 0u;
     regs[dst].v = int64_t(ld64s(s, b + h.pos + 8u + 8u * idx));
+    return 0u;
+}
+
+// ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim (GEOMFLAG): the flags byte of any geometry, the same as geom_flag()
+// of cpu_vm.c
+uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    if (x.isnull != 0u)
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    if (str_len(x) < 8u || (ldb_s(str_src(x), str_off(x)) & 0xe0u) != 0u)
+        return SOP_RECHECK_CODE;                        // not a header we know
+    uint gflags = ldb_s(str_src(x), str_off(x) + 3u);
+    uint hz = gflags & 1u;
+    uint hm = (gflags >> 1u) & 1u;
+    uint v = 2u + hz + hm;                              // NDims, CoordDim
+    if (k0 == SOP_GFLAG_HASZ)
+        v = hz;
+    else if (k0 == SOP_GFLAG_HASM)
+        v = hm;
+    else if (k0 == SOP_GFLAG_ZMFLAG)
+        v = 2u * hz + hm;
+    regs[dst].isnull = 0u;
+    regs[dst].v = int64_t(v);
     return 0u;
 }
 
@@ -2223,11 +2318,13 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if (op == SOP_GEOMDWITHIN)
             return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
 #endif
-#ifndef WITH_INNER      // the planner keeps these out of join programs; their soft-float code made Metal take minutes
+#if !defined(WITH_INNER) && !defined(VM_NO_GEOM)    // the planner keeps these out of join programs; their soft-float code made Metal take minutes
         if (op == SOP_GEOMZM)
             return vm_geom_zm(dst, ra, k0, regs);
         if (op == SOP_GEOM3DDW)
             return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
+        if (op == SOP_GEOMFLAG)
+            return vm_geom_flag(dst, ra, k0, regs);
 #endif
         if (op == SOP_NULLMRG)
         {

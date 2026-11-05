@@ -102,6 +102,7 @@ op_known(uint32_t op)
 		case SOP_NUMDIV: case SOP_NUMRND:
 		case SOP_CMPD: case SOP_DARITH: case SOP_DUNARY: case SOP_I2D: case SOP_D2I: case SOP_F2D: case SOP_D2F:
 		case SOP_GEOMBOX: case SOP_GEOMPIP: case SOP_GEOMDWITHIN: case SOP_GEOMZM: case SOP_GEOM3DDW: case SOP_NULLMRG:
+		case SOP_GEOMFLAG:
 			return 1;
 	}
 	return 0;

@@ -1289,6 +1289,22 @@ classify_geometry(const char *name)
 		{ fc.cls = SOP_GEOMZM; fc.kind = 1; }
 	else if (!strcmp(name, "st_3ddwithin"))
 		{ fc.cls = SOP_GEOM3DDW; fc.kind = 0; }
+	/* ST_3DIntersects of two points is ST_3DDWithin with the tolerance 0 (probe: threed_probe2.sql); the n-D box operator &&& */
+	else if (!strcmp(name, "st_3dintersects"))
+		{ fc.cls = SOP_GEOM3DDW; fc.kind = SOP_G3DDW_INTERSECTS; }
+	else if (!strcmp(name, "geometry_overlaps_nd"))
+		{ fc.cls = SOP_GEOMBOX; fc.kind = SOP_GBOX_OVERLAPS_ND; }
+	/* the flag functions read the header of any geometry */
+	else if (!strcmp(name, "st_hasz"))
+		{ fc.cls = SOP_GEOMFLAG; fc.kind = SOP_GFLAG_HASZ; }
+	else if (!strcmp(name, "st_hasm"))
+		{ fc.cls = SOP_GEOMFLAG; fc.kind = SOP_GFLAG_HASM; }
+	else if (!strcmp(name, "st_ndims"))
+		{ fc.cls = SOP_GEOMFLAG; fc.kind = SOP_GFLAG_NDIMS; }
+	else if (!strcmp(name, "st_zmflag"))
+		{ fc.cls = SOP_GEOMFLAG; fc.kind = SOP_GFLAG_ZMFLAG; }
+	else if (!strcmp(name, "st_coorddim"))
+		{ fc.cls = SOP_GEOMFLAG; fc.kind = SOP_GFLAG_COORDDIM; }
 	else if (!strcmp(name, "st_setsrid"))
 		{ fc.cls = SOP_GEOMMK; fc.kind = 1; }
 	return fc;

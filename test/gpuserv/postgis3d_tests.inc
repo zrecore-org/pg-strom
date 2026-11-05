@@ -1,6 +1,7 @@
 # PostGIS in 3D: every GPU feature of postgis_tests.inc against Z, M and ZM geometries; the 3D functions that run on the GPU
 # (ST_Z, ST_M, the 3- and 4-argument ST_MakePoint, ST_3DDWithin of two points); and the 3D-only functions that do not
-# (ST_3DDistance, ST_3DIntersects, &&&, ST_NDims, ST_HasZ, ST_3DLength ...), which must stay on the CPU and give the CPU's answer.
+# (ST_3DDistance, ST_3DLength ...), which must stay on the CPU and give the CPU's answer; and ST_3DIntersects of two points, &&& and the
+# flag functions (ST_NDims, ST_HasZ, ST_HasM, ST_Zmflag, ST_CoordDim), which run on the GPU.
 # Sourced by postgis_tests.inc (so by scan_test.sh and postgis_dev.sh); uses run, run_any, runagg_any, q, check, sql, $PSQL, $GPU,
 # $CPU, $JOINSET, $fail. The 2D operators (&&, ~, @, ST_Contains and friends, ST_DWithin) ignore Z and M, as PostGIS does for the
 # 2D forms.
@@ -115,12 +116,50 @@ pushed() { # label, function name (lower case), query-with-%T: the function is i
 	pl=$($PSQL -d scantest -c "$GPU explain $qry" 2>&1 | grep "GPU Scan Quals" | grep -ci "$2")
 	[ "${pl:-0}" -ge 1 ]; check "pg_3d: $1 is in the GPU's scan quals" $?
 }
+# ST_3DDistance returns a float8 that must equal PostGIS' bit for bit; PostGIS 3.7 differs from plain binary64
+# sqrt((dx*dx + dy*dy) + dz*dz) in 10,891 of 100,000 random point pairs (postgis/threed_probe.out: fused multiply-add in its own
+# build), so it stays on the CPU. ST_3DLength needs line parsing and an exact summation order.
 refused "ST_3DDistance" st_3ddistance "select id from %T where ST_3DDistance(g2, ST_MakePoint(x, y, z)) < 5"
-refused "ST_3DIntersects" st_3dintersects "select id from %T where ST_3DIntersects(g2, ST_MakePoint(x + 1, y + 2, z))"
-refused "&&& (n-D bounding boxes)" "&&&" "select id from %T where g &&& ST_Force4D(ST_MakeEnvelope(0, 0, 10, 10), 3, 3)"
-refused "ST_NDims" st_ndims "select id from %T where ST_NDims(g) = 3"
-refused "ST_HasZ" st_hasz "select id from %T where ST_HasZ(g)"
 refused "ST_3DLength" st_3dlength "select id from %T where case when GeometryType(g) like 'LINESTRING%' then ST_3DLength(g) end > 6"
+
+# ST_3DIntersects of two points = ST_3DDWithin(a, b, 0) (postgis/threed_probe2.out); a point without Z, an empty point, another SRID,
+# NaN and the underflow range go back to the CPU
+run pg_3d "ST_3DIntersects(Z point column, fused 3-argument point), all equal" "select id from %T where ST_3DIntersects(g2, ST_MakePoint(x + 1, y + 2, z))"
+run pg_3d "ST_3DIntersects(Z point column, fused point one apart in Z)" "select id from %T where ST_3DIntersects(g2, ST_MakePoint(x + 1, y + 2, z + 1))"
+run pg_3d "ST_3DIntersects(Z point column, fused point, a few equal)" "select id from %T where ST_3DIntersects(g2, ST_MakePoint(x + 1, y + 2, z + (id % 7) / 6))"
+run_any pg_3d "ST_3DIntersects(mixed point column, Z point column) (2D, empty, NaN and M points are re-checked)" "select id from %T where ST_3DIntersects(gp, g2)"
+run pg_3d "NOT ST_3DIntersects" "select id from %T where g2 is not null and not ST_3DIntersects(g2, ST_MakePoint(x + 1, y + 2, z + 1))"
+pushed "ST_3DIntersects" st_3dintersects "select id from %T where ST_3DIntersects(g2, ST_MakePoint(x + 1, y + 2, z))"
+
+# &&& (n-D boxes): the 2D boxes, and Z or M ranges when both operands have them (postgis/threed_probe2.out)
+BOXZ4="ST_Force4D(ST_MakeEnvelope(0, 0, 10, 10), 3, 3)"
+run pg_3d "&&& a ZM polygon (the earlier CPU-only case)" "select id from %T where g &&& $BOXZ4"
+run pg_3d "&&& a Z polygon" "select id from %T where g &&& $BOXZ"
+run pg_3d "&&& an M polygon" "select id from %T where g &&& $BOXM"
+run pg_3d "&&& a 2D polygon" "select id from %T where g &&& $BOXP"
+run pg_3d "&&& a Z point" "select id from %T where g &&& ST_MakePoint(5, 5, 4)"
+run pg_3d "&&& an M point" "select id from %T where g &&& ST_MakePointM(5, 5, 2)"
+run pg_3d "&&& a ZM point" "select id from %T where g &&& ST_MakePoint(5, 5, 4, 2)"
+run pg_3d "&&& between two columns (g, a 3D point)" "select id from %T where g &&& g2"
+run_any pg_3d "&&& between two columns (mixed points, 2D, NaN, empties)" "select id from %T where gp &&& g2"
+run pg_3d "NOT (g &&& Z polygon)" "select id from %T where not (g &&& $BOXZ)"
+run pg_3d "&& and &&& together" "select id from %T where g && $BOXP and g &&& $BOXZ4"
+run pg_3d "&&& in a projection" "select id, g &&& $BOXZ4, g2 &&& $BOXM from %T where id % 5 = 0"
+pushed "&&&" "&&&" "select id from %T where g &&& $BOXZ4"
+
+# the flag functions read the header of any geometry
+run pg_3d "ST_NDims = 3" "select id from %T where ST_NDims(g) = 3"
+run pg_3d "ST_NDims = 4" "select id from %T where ST_NDims(g) = 4"
+run pg_3d "ST_HasZ" "select id from %T where ST_HasZ(g)"
+run pg_3d "ST_HasM" "select id from %T where ST_HasM(g)"
+run pg_3d "ST_HasM and not ST_HasZ" "select id from %T where ST_HasM(g) and not ST_HasZ(g)"
+run pg_3d "ST_Zmflag" "select id from %T where ST_Zmflag(g) = 2"
+run pg_3d "ST_CoordDim of the point column" "select id from %T where ST_CoordDim(gp) = 3"
+run pg_3d "flags in a projection (empty and NULL geometries included)" "select id, ST_NDims(g), ST_HasZ(gp), ST_HasM(gp), ST_Zmflag(g), ST_CoordDim(g2) from %T where id % 3 = 0"
+run pg_3d "flags with arithmetic" "select id, ST_NDims(g) * 10 + ST_Zmflag(g) from %T where ST_NDims(g) + ST_Zmflag(gp) > 4"
+pushed "ST_NDims" st_ndims "select id from %T where ST_NDims(g) = 3"
+pushed "ST_HasZ" st_hasz "select id from %T where ST_HasZ(g)"
+pushed "ST_Zmflag" st_zmflag "select id from %T where ST_Zmflag(g) = 2"
 refused "ST_Force2D(g) && polygon" st_force2d "select id from %T where ST_Force2D(g) && $BOXP"
 
 # ---- 3D functions on the GPU: ST_Z, ST_M, ST_3DDWithin ----

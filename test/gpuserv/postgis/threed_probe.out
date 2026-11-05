@@ -1,0 +1,14 @@
+POSTGIS="3.7.0 0" [EXTENSION] PGSQL="170" GEOS="3.15.0-CAPI-1.21.0" PROJ="9.9.0 NETWORK_ENABLED=OFF URL_ENDPOINT=https://cdn.proj.org USER_WRITABLE_DIRECTORY=/Users/aalbino/Library/Application Support/proj DATABASE_PATH=/opt/homebrew/Cellar/proj/9.9.0/share/proj/proj.db" (compiled against PROJ 9.9.0) LIBXML="2.15.4" LIBJSON="0.19" LIBPROTOBUF="1.5.2" WAGYU="0.5.0 (Internal)"
+st_3ddistance|geom1 geometry, geom2 geometry
+st_3dintersects|geom1 geometry, geom2 geometry
+st_3dlength|geometry
+st_coorddim|geometry geometry
+st_hasarc|geometry geometry
+st_hasm|geometry
+st_hasz|geometry
+st_ndims|geometry
+st_zmflag|geometry
+pairs|100000
+mismatch sqrt((dx2+dy2)+dz2)|10799
+mismatch hypot|10824
+max relative difference|2.98456472877254e-16
