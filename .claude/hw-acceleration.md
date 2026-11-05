@@ -669,6 +669,12 @@ The kernel never decides a boundary: an edge's side of the point is taken only w
 - The box overlap test is a conjunction of `<=` comparisons, so a NaN key (empty geometry) never matches; the query box reuses GEOMBOX's outward float4 rounding and clamping, one copy of that code.
 - Planner scope: the inner side is the plain heap base relation that owns the index (no partitioned parents, inheritance children, subqueries); both argument orders of `&&` are accepted.
 
+## A11 part 4: 3D (2026-11-04)
+
+Standing rule (the user's): every PostGIS slice is tested with Z, M and ZM inputs, and the 3D functions go on the GPU as they are added. `test/gpuserv/postgis3d_tests.inc` (also `postgis3d_dev.sh`; part of `postgis_tests.inc`, so of `scan_test.sh`) runs the 2D features against Z/M/ZM points, lines, polygons (with and without a cached box), multipolygons, collections and empties. Probe: `test/gpuserv/postgis/zm_probe.{sql,out}` (what PostGIS 3.7 answers).
+
+Done: `ST_Z` / `ST_M` (`GEOMZM`), the 3- and 4-argument `ST_MakePoint` (the fused point; Z and M are computed and their null flags merged into y with `NULLMRG`, so a NULL argument makes the point NULL and an error in them reaches the user) and `ST_3DDWithin` of two points (`GEOM3DDW`: the `ST_DWithin` layout plus the Z registers in k1; the 2^-47 band on dx² + dy² + dz², which the probe supports: PostGIS' 3D distance is within 3e-16 of plain binary64, 10.8% of pairs differ in the last digits). Re-checked on the CPU: a point without Z (PostGIS measures in 2D and raises a NOTICE the GPU cannot), an empty point, a SRID mismatch, a negative / NaN / infinite tolerance, non-finite or overflowing coordinates, and for `ST_Z`/`ST_M` every non-point (PostGIS raises). Not on the GPU (stay on the CPU and are tested to give its answer): `ST_3DDistance`, `ST_3DIntersects`, `&&&` (needs the n-D box and the `gist_geometry_ops_nd` opclass), `ST_NDims`, `ST_HasZ`, `ST_3DLength`, `ST_Z(ST_MakePoint(...))`. Geometry in a join program stays refused except in the GiST join.
+
 ## Effort (an estimate, not measured)
 
 About **20-35 engineer-months** in total: the architect's 17-30 for a Vulkan-only product, minus vendor-hardware work, plus Arrow/Parquet and jsonb that were not in that figure. The largest uncertainties are the expression and type library, the lock-free PreAgg redesign, and jsonb. A rough split: A0-A2 about 5-7, A3 2-4, A4 3-5, A5 2-3, A6 3-6, A7 2-4, A8 2-4, A9 1-2.
@@ -968,3 +974,15 @@ Code: `spike/vulkan-apple/zcscan/` (a PostgreSQL module: pins a table's buffers,
 - M2 or newer Apple GPUs (the plan assumed they may add 64-bit atomic min/max; unverified).
 - Subgroup-size behavior under load (`VK_EXT_subgroup_size_control`), pipeline cache persistence, and multi-threaded queue submission.
 - Anything on NVIDIA/Linux (M1a).
+
+## Test speed (2026-11-05)
+
+Findings and changes (all on the vulkan-gpu branch, working tree before the commit of this date):
+
+- **Where the time went.** A full `scan_test.sh` took 70+ minutes and the `installcheck` 35 minutes after a change of the kernels. Both were dominated by the first compile of each interpreter kernel by Metal (join kernel: 6.5 MB of SPIR-V, 4.5 minutes; warm: 13 s), once after every edit of `kernels_vm/`. A failing run could also hang: the receiver thread in `executor.c` set `conn->terminated` when the service socket closed, but the backend's wait loops never looked at it (fixed: "the connection to the GPU service was lost").
+- **Lite kernels.** `scan_common.slang` compiles the numeric, jsonb, float8 and geometry instruction groups out with `-DVM_NO_NUM/JSON/F8/GEOM`; every VM kernel family exists as `<name>_lite` (62 kernels, a fourth to a tenth of the size) and `scan_prog.feat` (set in `emit()`) selects it when the program uses none of the groups. Engine arrays hold both (`pipe[6]`, `agg_pipe[6][3]`, `gagg/jagg/jgagg/aagg/...[4][3]`, `join_pipe[6]`, `ajoin_pipe[4]`). Result: cold installcheck 35 min -> 2.5 min, scan 39 min -> 25 min (warm and cold).
+- **First dispatch.** A pipeline's first dispatch gets 600 s (`first_timeout_ms`) because the driver may compile lazily then; later dispatches keep `PGSTROM_GPUSERV_TIMEOUT_MS` (10 s).
+- **Pipeline cache: dropped.** `VkPipelineCache` through MoltenVK holds ~14 KB for several pipelines (no GPU binaries); Metal has its own cache.
+- **Sharding.** `SHARD=i/n` in `scan_test.sh` and `scan_shards.sh` work, but three services on one Apple GPU got a Metal command buffer killed ("Impacting Interactivity"): opt-in only (default 1 part), meant for Linux/lavapipe/CI.
+- **Pitfalls hit:** the service Makefile did not track headers (stale objects: garbage self-test message, crashes inside MoltenVK) - now `-MMD`; an array enlarged without its `_ready` twin (`pipe_ready[3]`) corrupted the next member; the fuzzer's check mode compares error rows that are racy by nature (do not run `fuzz` through `verify_all.sh`).
+- **Open:** one unkillable `close()` on the service socket (macOS kernel, ended when the service was killed) seen once in the `gpu_cache` installcheck test; one scan run in which the cluster went into crash recovery during the GiST index-split test (not reproduced).
