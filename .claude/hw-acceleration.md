@@ -987,3 +987,20 @@ Findings and changes (all on the vulkan-gpu branch, working tree before the comm
 - **Pitfalls hit:** the service Makefile did not track headers (stale objects: garbage self-test message, crashes inside MoltenVK) - now `-MMD`; an array enlarged without its `_ready` twin (`pipe_ready[3]`) corrupted the next member; the fuzzer's check mode compares error rows that are racy by nature (do not run `fuzz` through `verify_all.sh`).
 - **Resource limits.** `locked_test.sh` builds with 3 jobs and runs tests at `nice -n 10`; test clusters use `pgconf_test.sh` (fsync off, autovacuum off, parallel workers capped). Same wall time as before (installcheck 132 s + scan 1541 s); `taskpolicy -b` made a dev script 5x slower and is opt-in.
 - **Open:** one unkillable `close()` on the service socket (macOS kernel, ended when the service was killed) seen once in the `gpu_cache` installcheck test; one scan run in which the cluster went into crash recovery during the GiST index-split test (not reproduced).
+
+## Smaller items (2026-11-05)
+
+- **EvalPlanQual crash (found by `session_churn.sh`).** Concurrent `UPDATE`s over a GpuScan made the backend segfault in
+  `heap_form_minimal_tuple`: `execCpuFallbackBaseTuple` (fallback.c) copied the columns of the CPU-fallback load list with
+  `attno - 1`, but an UPDATE's scan carries the system column `ctid` (negative attno), so it read outside the slot arrays. It now
+  fetches system columns with `heap_getsysattr`. This was very likely the cause of the unexplained crash recovery seen once in the
+  GiST index-split test.
+- **close() hang.** `xpuClientCloseSession` closed the socket while the session worker sat in `poll()` on it; macOS blocks there.
+  Now `shutdown()`, join the worker, then `close()`.
+- **verify_all.sh** copies the cluster log and any new `postgres-*.ips` / `pgstrom-gpuserv-*.ips` crash report of a failed stage into
+  the stage's log directory.
+- **GPU throttle: not needed.** Trace of a whole dev script: 142 GPU tasks, 1.26 s of GPU time in ~100 s (median 6 ms, max 37 ms), i.e.
+  ~1% busy. The load that slows the machine is CPU (queries, page copies) and Metal's shader compiler, which runs as root (cannot be
+  reniced); the lite kernels shrink the latter.
+- **New on the GPU:** `&&&`, `ST_3DIntersects(point, point)`, `ST_HasZ/HasM/NDims/Zmflag/CoordDim` (probes `postgis/threed_probe*.sql/.out`).
+  `ST_3DDistance` stays on the CPU: PostGIS' result differs from plain binary64 in 10,891 of 100,000 random pairs.

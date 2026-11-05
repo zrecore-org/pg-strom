@@ -28,8 +28,14 @@ and the 3D variants of the function, not just the 2D case. State explicitly what
 4. **Run** `postgis3d_dev.sh` and `postgis_dev.sh` (see the vulkan-verify skill), `spec_compile_check.sh`, then the full verification.
 5. **Docs**: `doc/features.md` (function table, "not yet" cells) and the status section of `.claude/hw-acceleration.md`.
 
-## Known limits (as of 2026-11-04)
+## Known limits (as of 2026-11-05)
 
-On the GPU: ST_Z, ST_M, 3-/4-argument ST_MakePoint (fused), ST_3DDWithin of two points, ST_DWithin, ST_Contains/ST_Intersects
-point-in-polygon, `&&`, GiST join on `&&` (2D opfamily). Still on the CPU: `&&&`, ST_3DIntersects, ST_3DDistance, ST_3DLength,
-ST_NDims, ST_HasZ, GiST join with ST_Contains/ST_DWithin (A13 slices 2-3).
+On the GPU: ST_Z, ST_M, 3-/4-argument ST_MakePoint (fused), ST_3DDWithin and ST_3DIntersects of two points, ST_DWithin, ST_Contains/
+ST_Intersects point-in-polygon, `&&`, `&&&` (n-D boxes), the header functions ST_HasZ/ST_HasM/ST_NDims/ST_Zmflag/ST_CoordDim, GiST
+join on `&&` (2D opfamily). Still on the CPU, with the reason: ST_3DDistance (PostGIS differs from plain binary64 in 10.9% of random
+pairs: `postgis/threed_probe.out`), ST_3DLength (line parsing, exact summation order), GiST join with ST_Contains/ST_DWithin (A13 slices
+2-3, needs inner geometry registers in join programs).
+
+Pitfalls: a new geometry opcode must be in `emit()`'s feature classification in `scan_prog.c` (explicit list, not a range: NULLMRG sits
+at 136) and inside the `VM_NO_GEOM` guard of `scan_common.slang`, or the program runs on a lite kernel and fails with "malformed
+program". PostGIS' n-D box code (`&&&`) treats coordinates beyond the float4 range differently from the 2D box: send them to the CPU.
