@@ -33,3 +33,16 @@ Open questions only a first run answers: whether the GPU image's NVIDIA driver s
 Any Linux machine with an NVIDIA GPU and its Vulkan driver (or an AMD/Intel GPU with Mesa) can register as a runner with a label of
 your choice and be used the same way (`GPU_RUNNER_LABEL`). For Apple silicon use a Mac mini or a bare-metal cloud Mac: Metal works
 there because it is not a virtual machine.
+
+## Without a GPU machine
+
+- **Vulkan validation layer** (`sh test/gpuserv/vk_validation.sh <dev script>`, for example `gist_dev.sh`, `arrow_dev.sh`,
+  `postgis_dev.sh`): runs a dev test with the Khronos validation layer on the service (`brew install vulkan-validationlayers` on
+  macOS) and fails if the layer logs anything. It finds spec violations that one driver tolerates and another does not; the first
+  run found specialized Arrow scan kernels whose push-constant block (20 bytes) was larger than their pipeline layout (16 bytes).
+  The sizes of the tests are for the caller to reduce (validation is slow).
+- **Rented GPU** (`sh test/cloud/gpu_check.sh` on an Ubuntu machine with a GPU, for example AWS g4dn (NVIDIA T4) or g4ad (AMD)):
+  installs the dependencies, builds, runs the service test and the dev scripts with `ALLOW_CPU=off`, and prints one summary. Not
+  run yet.
+- The service does not branch on the capability tier (it only reports it), so forcing a tier on lavapipe would test nothing; the
+  subgroup sizes the CI covers are 4 (lavapipe) and 32 (Apple).
