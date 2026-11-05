@@ -116,11 +116,62 @@ pushed() { # label, function name (lower case), query-with-%T: the function is i
 	pl=$($PSQL -d scantest -c "$GPU explain $qry" 2>&1 | grep "GPU Scan Quals" | grep -ci "$2")
 	[ "${pl:-0}" -ge 1 ]; check "pg_3d: $1 is in the GPU's scan quals" $?
 }
-# ST_3DDistance returns a float8 that must equal PostGIS' bit for bit; PostGIS 3.7 differs from plain binary64
-# sqrt((dx*dx + dy*dy) + dz*dz) in 10,891 of 100,000 random point pairs (postgis/threed_probe.out: fused multiply-add in its own
-# build), so it stays on the CPU. ST_3DLength needs line parsing and an exact summation order.
-refused "ST_3DDistance" st_3ddistance "select id from %T where ST_3DDistance(g2, ST_MakePoint(x, y, z)) < 5"
-refused "ST_3DLength" st_3dlength "select id from %T where case when GeometryType(g) like 'LINESTRING%' then ST_3DLength(g) end > 6"
+# ST_Distance, ST_3DDistance and ST_3DMaxDistance of two points return PostGIS' own float8: sqrt(fma(dz, dz, fma(dx, dx, dy*dy))) (3D) or
+# sqrt(fma(dx, dx, dy*dy)) (2D), which the GPU reproduces bit for bit with the software binary64 (postgis/dist_probe.c: 200,000 pairs; plain
+# binary64 would differ in 10.9% of them). The planner calibrates the function against the installed PostGIS before it pushes it down.
+# The length of a line is the same segment formula added left to right (postgis/len_probe.c: 60,000 lines, no difference).
+run pg_3d "ST_3DDistance(Z point column, fused 3-argument point) < 5" "select id from %T where ST_3DDistance(g2, ST_MakePoint(x, y, z)) < 5"
+run pg_3d "ST_3DDistance as a value" "select id, ST_3DDistance(g2, ST_MakePoint(x, y, z)) from %T where id % 7 = 0"
+run pg_3d "ST_3DDistance of two columns, compared with a column" "select id from %T where ST_3DDistance(g2, g2) <= z"
+run_any pg_3d "ST_3DDistance(mixed point column, Z point column) (2D, empty, NaN and M points are re-checked)" "select id, ST_3DDistance(gp, g2) from %T"
+run pg_3d "ST_Distance (2D) of a Z point column and a fused 2-argument point" "select id, ST_Distance(g2, ST_MakePoint(x, y)) from %T where a < 900"
+run pg_3d "ST_Distance ignores Z (fused 3-argument point)" "select id from %T where ST_Distance(g2, ST_MakePoint(x, y, z)) < 3"
+run pg_3d "ST_3DMaxDistance of two points" "select id, ST_3DMaxDistance(g2, ST_MakePoint(x, y, z)) from %T where id % 5 = 0"
+runagg pg_3d "min and max of ST_3DDistance (a float8 aggregate over the exact distance)" "select min(ST_3DDistance(g2, ST_MakePoint(x, y, z))), max(ST_3DDistance(g2, ST_MakePoint(x, y, z))), count(ST_3DDistance(g2, ST_MakePoint(x, y, z))) from %T"
+run pg_3d "ST_3DDistance with arithmetic" "select id, ST_3DDistance(g2, ST_MakePoint(x, y, z)) * 2 + 1 from %T where ST_3DDistance(g2, ST_MakePoint(x, y, z)) between 1 and 4"
+pushed "ST_3DDistance" st_3ddistance "select id from %T where ST_3DDistance(g2, ST_MakePoint(x, y, z)) < 5"
+pushed "ST_Distance" st_distance "select id from %T where ST_Distance(g2, ST_MakePoint(x, y)) < 5"
+run pg_3d "ST_3DLength of every geometry (lines on the GPU; multi-geometries and collections re-checked)" "select id from %T where ST_3DLength(g) > 6"
+run pg_3d "ST_3DLength, ST_Length and ST_Length2D as values" "select id, ST_3DLength(g), ST_Length(g), ST_Length2D(g) from %T where id % 3 = 0"
+run pg_3d "ST_Length compared with ST_3DLength" "select id from %T where ST_3DLength(g) > ST_Length(g)"
+run pg_3d "ST_3DLength of the mixed point column (always 0)" "select id from %T where ST_3DLength(gp) = 0"
+runagg pg_3d "max of ST_3DLength" "select max(ST_3DLength(g)), count(*) filter (where ST_Length(g) > 3) from %T"
+pushed "ST_3DLength" st_3dlength "select id from %T where ST_3DLength(g) > 6"
+pushed "ST_Length" st_length "select id from %T where ST_Length(g) > 6"
+
+# the edge lines of postgis/dist_probe2.out, many copies of each: empty, one repeated point, overflow, NaN, underflow, 2D, M, ZM, multi-lines
+sql "drop table if exists pg_3dl"
+sql "create table pg_3dl as select (row_number() over ())::int4 as id, g::geometry as g from (values
+	('LINESTRING Z (0 0 0, 3 4 12)'), ('LINESTRING Z (0 0 0, 3 4 12, 3 4 12, 10 10 10)'), ('LINESTRING (0 0, 3 4, 6 8)'),
+	('LINESTRING M (0 0 1, 3 4 2)'), ('LINESTRING ZM (0 0 0 1, 3 4 12 2)'), ('LINESTRING Z EMPTY'), ('LINESTRING EMPTY'),
+	('LINESTRING Z (1 1 1, 1 1 1)'), ('LINESTRING Z (0 0 0, 1e308 0 0)'), ('LINESTRING Z (0 0 0, 1e200 1e200 1e200)'),
+	('LINESTRING Z (0 0 0, NaN 0 0)'), ('LINESTRING Z (1e-200 0 0, 0 0 0)'), ('LINESTRING Z (1e-160 1e-160 1e-160, 0 0 0)'),
+	('MULTILINESTRING Z ((0 0 0, 3 4 12), (1 1 1, 2 2 2))'), ('POINT Z (1 2 3)'), ('POLYGON Z ((0 0 0, 4 0 0, 4 3 0, 0 0 0))'),
+	('GEOMETRYCOLLECTION Z (LINESTRING Z (0 0 0, 3 4 12), POINT Z (1 1 1))'), ('SRID=4326;LINESTRING Z (0 0 0, 3 4 12)'),
+	('LINESTRING Z (0.1 0.2 0.3, 0.4 0.5 0.6, 0.7 0.9 0.2, 1.3 1.1 0.8, 2.1 0.4 0.5, 0.3 0.3 0.3, 9.9 8.8 7.7)')) v(g),
+	generate_series(1, 2500)"
+sql "analyze pg_3dl"
+run_any pg_3dl "ST_3DLength over the edge lines" "select id, ST_3DLength(g) from %T"
+run_any pg_3dl "ST_Length over the edge lines" "select id, ST_Length(g) from %T"
+run_any pg_3dl "ST_Length2D over the edge lines" "select id, ST_Length2D(g) from %T"
+run_any pg_3dl "the edge lengths compared" "select id from %T where ST_3DLength(g) > 10 or ST_Length(g) = 5"
+
+# the edge pairs of postgis/dist_probe2.out, many copies of each: empty, NaN, overflow, underflow, -0, the same point, 2D operands, M, ZM
+sql "drop table if exists pg_3dd"
+sql "create table pg_3dd as select (row_number() over ())::int4 as id, a::geometry as ga, b::geometry as gb from (values
+	('POINT Z (1 2 3)', 'POINT Z (4 6 8)'), ('POINT Z (1 2 3)', 'POINT Z (1 2 3)'), ('POINT (1 2)', 'POINT (4 6)'),
+	('POINT Z (1 2 3)', 'POINT (4 6)'), ('POINT (1 2)', 'POINT Z (4 6 8)'), ('POINT M (1 2 9)', 'POINT M (4 6 9)'),
+	('POINT ZM (1 2 3 4)', 'POINT ZM (4 6 8 9)'), ('POINT Z EMPTY', 'POINT Z (1 2 3)'), ('POINT EMPTY', 'POINT (1 2)'),
+	('POINT Z (NaN 2 3)', 'POINT Z (1 2 3)'), ('POINT Z (1 2 3)', 'POINT Z (1 2 NaN)'), ('POINT Z (1e308 0 0)', 'POINT Z (-1e308 0 0)'),
+	('POINT Z (1e-200 0 0)', 'POINT Z (0 0 0)'), ('POINT Z (1e-160 0 0)', 'POINT Z (0 0 0)'), ('POINT Z (-0 0 0)', 'POINT Z (0 -0 0)'),
+	('SRID=4326;POINT Z (1 2 3)', 'SRID=4326;POINT Z (4 6 8)'), ('POINT Z (1e154 1e154 1e154)', 'POINT Z (-1e154 -1e154 -1e154)'),
+	('POINT Z (1e-170 1e-170 1e-170)', 'POINT Z (-1e-170 -1e-170 -1e-170)'), ('POINT Z (3 4 0)', 'POINT Z (0 0 12)')) v(a, b),
+	generate_series(1, 2500)"
+sql "analyze pg_3dd"
+run_any pg_3dd "ST_3DDistance over the edge pairs" "select id, ST_3DDistance(ga, gb) from %T"
+run_any pg_3dd "ST_Distance over the edge pairs" "select id, ST_Distance(ga, gb) from %T"
+run_any pg_3dd "ST_3DMaxDistance over the edge pairs" "select id, ST_3DMaxDistance(ga, gb) from %T"
+run_any pg_3dd "the edge distances compared" "select id from %T where ST_3DDistance(ga, gb) < 6 or ST_Distance(ga, gb) = 5"
 
 # ST_3DIntersects of two points = ST_3DDWithin(a, b, 0) (postgis/threed_probe2.out); a point without Z, an empty point, another SRID,
 # NaN and the underflow range go back to the CPU

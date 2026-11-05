@@ -1056,6 +1056,106 @@ geom_zm(const unsigned char *p, uint32_t len, uint32_t k0, int *isnull, uint64_t
 	return 0;
 }
 
+/* ST_Distance / ST_3DDistance / ST_3DMaxDistance of two points: the same as vm_geom_dist() of scan_common.slang. *isnull: an empty operand */
+static uint32_t
+geom_dist(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1, int *isnull, uint64_t *val)
+{
+	vm_reg		a = regs[ra], b = regs[rb];
+	vm_reg		ya = regs[(k0 >> 8) & 0xff], yb = regs[(k0 >> 16) & 0xff];
+	vm_reg		za = regs[(k1 >> 20) & 0x1f], zb = regs[(k1 >> 25) & 0x1f];
+	int			fa = (k0 & SOP_GDW_FUSED_A) != 0, fb = (k0 & SOP_GDW_FUSED_B) != 0;
+	int			d3 = (k1 & SOP_GDIST_3D) != 0;
+	uint32_t	sa = k1 & 0xfffff, sb = sa;
+	uint64_t	ax = (uint64_t) a.v, ay = (uint64_t) ya.v, az = (uint64_t) za.v;
+	uint64_t	bx = (uint64_t) b.v, by = (uint64_t) yb.v, bz = (uint64_t) zb.v;
+	uint64_t	dx, dy, q;
+	int			ea = 0, eb = 0, hza = 1, hzb = 1;
+
+	*isnull = 0;
+	if (!fa && gdw3_load(str_ptr(env, a.v), str_len(a.v), &sa, &ax, &ay, &az, &hza, &ea))
+		return SOP_RECHECK_CODE;
+	if (!fb && gdw3_load(str_ptr(env, b.v), str_len(b.v), &sb, &bx, &by, &bz, &hzb, &eb))
+		return SOP_RECHECK_CODE;
+	if (sa != sb)
+		return SOP_RECHECK_CODE;
+	if (ea || eb)
+	{
+		*isnull = 1;
+		return 0;
+	}
+	if (d3 && (!hza || !hzb))
+		return SOP_RECHECK_CODE;
+	if (F64_NONFINITE(ax) || F64_NONFINITE(ay) || F64_NONFINITE(bx) || F64_NONFINITE(by) ||
+		(d3 && (F64_NONFINITE(az) || F64_NONFINITE(bz))))
+		return SOP_RECHECK_CODE;
+	dx = f64_sub(bx, ax);
+	dy = f64_sub(by, ay);
+	q = f64_sqr_add(dx, f64_mul(dy, dy));
+	if (d3)
+	{
+		uint64_t	dz = f64_sub(bz, az);
+
+		if (F64_NONFINITE(dz))
+			return SOP_RECHECK_CODE;
+		q = f64_sqr_add(dz, q);
+	}
+	if (F64_NONFINITE(dx) || F64_NONFINITE(dy) || F64_NONFINITE(q))
+		return SOP_RECHECK_CODE;
+	*val = f64_sqrt(q);
+	return 0;
+}
+
+/* ST_Length / ST_Length2D (k0 = 0), ST_3DLength (k0 = 1): the same as vm_geom_len() of scan_common.slang */
+static uint32_t
+geom_len(const unsigned char *p, uint32_t len, uint32_t k0, uint64_t *val)
+{
+	uint32_t	gflags, hz, hm, nd, o = 4, gtype;
+	uint64_t	tot = 0;
+
+	if (len < 12 || (p[0] & 0xe0) != 0)
+		return SOP_RECHECK_CODE;
+	gflags = p[3];
+	if (gflags & 0x08)
+		return SOP_RECHECK_CODE;
+	hz = gflags & 1;
+	hm = (gflags >> 1) & 1;
+	nd = 2 + hz + hm;
+	if ((gflags & 0x40) && (gflags & 0x10))
+		o += 8;
+	if (gflags & 0x04)
+		o += 8 * nd;
+	if (o + 8 > len)
+		return SOP_RECHECK_CODE;
+	gtype = ld32u(p + o);
+	if (gtype == 2)
+	{
+		uint32_t	npts = ld32u(p + o + 4), base = o + 8;
+		int			d3 = (k0 == 1) && hz;
+
+		if (npts > (len - o - 8) / (8 * nd))
+			return SOP_RECHECK_CODE;
+		for (uint32_t i = 0; i + 1 < npts; i++)
+		{
+			uint32_t	p0 = base + i * 8 * nd, p1 = p0 + 8 * nd;
+			uint64_t	dx = f64_sub(ld64u(p + p1), ld64u(p + p0));
+			uint64_t	dy = f64_sub(ld64u(p + p1 + 8), ld64u(p + p0 + 8));
+			uint64_t	q = f64_sqr_add(dx, f64_mul(dy, dy));
+
+			if (d3)
+				q = f64_sqr_add(f64_sub(ld64u(p + p1 + 16), ld64u(p + p0 + 16)), q);
+			if (F64_NONFINITE(dx) || F64_NONFINITE(dy) || F64_NONFINITE(q))
+				return SOP_RECHECK_CODE;
+			tot = f64_add(tot, f64_sqrt(q));
+			if (F64_NONFINITE(tot))
+				return SOP_RECHECK_CODE;
+		}
+	}
+	else if (gtype != 1 && gtype != 3)
+		return SOP_RECHECK_CODE;
+	*val = tot;
+	return 0;
+}
+
 /* ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim: the same as vm_geom_flag() of scan_common.slang */
 static uint32_t
 geom_flag(const unsigned char *p, uint32_t len, uint32_t k0, int64_t *val)
@@ -1182,6 +1282,46 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				return 0;
 			}
 			rc = geom_zm(str_ptr(env, a.v), str_len(a.v), k0, &isnull, &val);
+			if (rc != 0)
+				return rc;
+			regs[dst].isnull = isnull;
+			if (!isnull)
+				regs[dst].v = (int64_t) val;
+			return 0;
+		}
+		case SOP_GEOMLEN:
+		{
+			vm_reg		a = regs[ra];
+			uint64_t	val = 0;
+			uint32_t	rc;
+
+			if (a.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			rc = geom_len(str_ptr(env, a.v), str_len(a.v), k0, &val);
+			if (rc != 0)
+				return rc;
+			regs[dst].isnull = 0;
+			regs[dst].v = (int64_t) val;
+			return 0;
+		}
+		case SOP_GEOMDIST:
+		{
+			vm_reg		a = regs[ra], b = regs[rb];
+			int			isnull = 0, d3 = (k1 & SOP_GDIST_3D) != 0;
+			uint64_t	val = 0;
+			uint32_t	rc;
+
+			if (a.isnull || b.isnull ||
+				((k0 & SOP_GDW_FUSED_A) && (regs[(k0 >> 8) & 0xff].isnull || (d3 && regs[(k1 >> 20) & 0x1f].isnull))) ||
+				((k0 & SOP_GDW_FUSED_B) && (regs[(k0 >> 16) & 0xff].isnull || (d3 && regs[(k1 >> 25) & 0x1f].isnull))))
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			rc = geom_dist(env, regs, ra, rb, k0, k1, &isnull, &val);
 			if (rc != 0)
 				return rc;
 			regs[dst].isnull = isnull;

@@ -95,7 +95,7 @@ emit(builder *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0
 		b->feat |= SCAN_FEAT_JSON;
 	else if (op >= SOP_CMPD && op <= SOP_D2F)
 		b->feat |= SCAN_FEAT_F8;
-	else if ((op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW) || op == SOP_GEOMFLAG)		/* not NULLMRG (136): always compiled in */
+	else if ((op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW) || op == SOP_GEOMFLAG || op == SOP_GEOMDIST || op == SOP_GEOMLEN)		/* not NULLMRG (136): always compiled in */
 		b->feat |= SCAN_FEAT_GEOM;
 	p = b->insn + 6 * b->ninsn++;
 	p[0] = op; p[1] = dst; p[2] = a; p[3] = rb; p[4] = k0; p[5] = k1;
@@ -606,6 +606,98 @@ emit_geomzm(builder *b, const kern_expression *kexp, scan_func_class fc, int *ne
 }
 
 /*
+ * st_length / st_length2d / st_3dlength: one string register in, a float8 register out (the same shape as st_z).
+ */
+static int
+emit_geomlen(builder *b, const kern_expression *kexp, scan_func_class fc, int *next)
+{
+	int			mark = *next;
+	int			ra, dst;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 1)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	ra = expr_to_reg(b, KEXP_FIRST_ARG(kexp), next);
+	if (ra < 0)
+		return -1;
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 || emit(b, SOP_GEOMLEN, dst, ra, 0, fc.kind, 0) < 0)
+		return -1;
+	return dst;
+}
+
+/*
+ * st_distance / st_3ddistance / st_3dmaxdistance of two points: the operands of st_3ddwithin without the tolerance; the result is a
+ * float8 register. A fused point of the 3D forms needs a Z (the planner checks), the 2D form takes the fused points as they are.
+ */
+static int
+emit_geomdist(builder *b, const kern_expression *kexp, scan_func_class fc, int *next)
+{
+	const kern_expression *ka = KEXP_FIRST_ARG(kexp);
+	const kern_expression *kb = KEXP_NEXT_ARG(ka);
+	const kern_expression *kmk[2];
+	int32_t		srid[2] = {0, 0};
+	int			mark = *next;
+	int			ra, rb, rya = 0, ryb = 0, rza = 0, rzb = 0, dst;
+	int			d3 = (fc.kind == 1);
+	uint32_t	flags = 0;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 2)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	kmk[0] = geom_fused_point(ka, &srid[0]);
+	kmk[1] = geom_fused_point(kb, &srid[1]);
+	if (d3 && ((kmk[0] && kmk[0]->nr_args < 3) || (kmk[1] && kmk[1]->nr_args < 3)))
+		return fail(b, "%s of a point without Z", scan_vm_opcode_name(kexp->opcode));
+	if (kmk[0] && kmk[1] && srid[0] != srid[1])
+		return fail(b, "%s of two points with different SRIDs", scan_vm_opcode_name(kexp->opcode));
+	if (kmk[0])
+	{
+		ra = expr_to_reg(b, KEXP_FIRST_ARG(kmk[0]), next);
+		if (ra < 0)
+			return -1;
+		rya = fused_y_reg(b, kmk[0], next, d3, &rza);
+		if (rya < 0)
+			return -1;
+		flags |= SOP_GDW_FUSED_A;
+	}
+	else
+	{
+		ra = expr_to_reg(b, ka, next);
+		if (ra < 0)
+			return -1;
+	}
+	if (kmk[1])
+	{
+		rb = expr_to_reg(b, KEXP_FIRST_ARG(kmk[1]), next);
+		if (rb < 0)
+			return -1;
+		ryb = fused_y_reg(b, kmk[1], next, d3, &rzb);
+		if (ryb < 0)
+			return -1;
+		flags |= SOP_GDW_FUSED_B;
+	}
+	else
+	{
+		rb = expr_to_reg(b, kb, next);
+		if (rb < 0)
+			return -1;
+	}
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 ||
+		emit(b, SOP_GEOMDIST, dst, ra, rb,
+			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16),
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) rza << 20) | ((uint32_t) rzb << 25) |
+			 (d3 ? SOP_GDIST_3D : 0)) < 0)
+		return -1;
+	return dst;
+}
+
+/*
  * st_hasz / st_hasm / st_ndims / st_zmflag / st_coorddim: one string register in, a boolean or smallint register out.
  */
 static int
@@ -961,6 +1053,10 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		return emit_geomzm(b, kexp, fc, next);
 	if (fc.cls == SOP_GEOMFLAG)
 		return emit_geomflag(b, kexp, fc, next);
+	if (fc.cls == SOP_GEOMDIST)
+		return emit_geomdist(b, kexp, fc, next);
+	if (fc.cls == SOP_GEOMLEN)
+		return emit_geomlen(b, kexp, fc, next);
 	if (fc.cls == SOP_GEOM3DDW)
 		return emit_geom3ddw(b, kexp, next);
 	if (fc.cls == SOP_GEOMMK)

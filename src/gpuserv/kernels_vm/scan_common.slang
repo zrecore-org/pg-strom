@@ -1893,6 +1893,132 @@ uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
     return 0u;
 }
 
+// ST_Distance / ST_3DDistance / ST_3DMaxDistance of two points (GEOMDIST), the same as geom_dist() of cpu_vm.c. PostGIS evaluates
+// sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (3D) / sqrt(fma(dx, dx, dy * dy)) (2D); f64_sqr_add is the fused step, so the value is
+// PostGIS' own, bit for bit (postgis/dist_probe.c), not an approximation to be rechecked at a boundary.
+uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    Reg a = regs[ra];
+    Reg b = regs[rb];
+    bool fa = (k0 & SOP_GDW_FUSED_A) != 0u;
+    bool fb = (k0 & SOP_GDW_FUSED_B) != 0u;
+    bool d3 = (k1 & SOP_GDIST_3D) != 0u;
+    Reg ya = regs[(k0 >> 8) & 0xffu];
+    Reg yb = regs[(k0 >> 16) & 0xffu];
+    Reg za = regs[(k1 >> 20) & 0x1fu];
+    Reg zb = regs[(k1 >> 25) & 0x1fu];
+    if ((a.isnull | b.isnull) != 0u || (fa && (ya.isnull | (d3 ? za.isnull : 0u)) != 0u) ||
+        (fb && (yb.isnull | (d3 ? zb.isnull : 0u)) != 0u))
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint sa = k1 & 0xfffffu;
+    uint sb = sa;
+    uint64_t ax = uint64_t(a.v);
+    uint64_t ay = uint64_t(ya.v);
+    uint64_t az = uint64_t(za.v);
+    uint64_t bx = uint64_t(b.v);
+    uint64_t by = uint64_t(yb.v);
+    uint64_t bz = uint64_t(zb.v);
+    bool ea = false;
+    bool eb = false;
+    bool hza = true;
+    bool hzb = true;
+    if (!fa && gdw3_load(a, sa, ax, ay, az, hza, ea) != 0u)
+        return SOP_RECHECK_CODE;
+    if (!fb && gdw3_load(b, sb, bx, by, bz, hzb, eb) != 0u)
+        return SOP_RECHECK_CODE;
+    if (sa != sb)
+        return SOP_RECHECK_CODE;                        // PostGIS raises "mixed SRID": the backend does
+    if (ea || eb)
+    {
+        regs[dst].isnull = 1u;                          // an empty point has no distance (PostGIS: NULL)
+        return 0u;
+    }
+    if (d3 && (!hza || !hzb))
+        return SOP_RECHECK_CODE;                        // an operand without Z: PostGIS measures in 2D (and may say so)
+    if (f64_nonfinite(ax) || f64_nonfinite(ay) || f64_nonfinite(bx) || f64_nonfinite(by) ||
+        (d3 && (f64_nonfinite(az) || f64_nonfinite(bz))))
+        return SOP_RECHECK_CODE;
+    uint64_t dx = f64_sub(bx, ax);
+    uint64_t dy = f64_sub(by, ay);
+    uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
+    if (d3)
+    {
+        uint64_t dz = f64_sub(bz, az);
+        if (f64_nonfinite(dz))
+            return SOP_RECHECK_CODE;
+        q = f64_sqr_add(dz, q);
+    }
+    if (f64_nonfinite(dx) || f64_nonfinite(dy) || f64_nonfinite(q))
+        return SOP_RECHECK_CODE;                        // an overflow: PostGIS' answer (NULL or Infinity) is the backend's
+    regs[dst].isnull = 0u;
+    regs[dst].v = int64_t(f64_sqrt(q));
+    return 0u;
+}
+
+// ST_Length / ST_Length2D / ST_3DLength of a geometry (GEOMLEN), the same as geom_len() of cpu_vm.c. A LINESTRING's length is PostGIS' own
+// double: the segment lengths sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (the Z term for ST_3DLength of a line with Z) added left to right.
+// The header is parsed here (a cached box of any dimension is skipped); a point and a polygon have the length 0.
+uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    if (x.isnull != 0u)
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint s = str_src(x);
+    uint b = str_off(x);
+    uint l = str_len(x);
+    if (l < 12u || (ldb_s(s, b) & 0xe0u) != 0u)
+        return SOP_RECHECK_CODE;
+    uint gflags = ldb_s(s, b + 3u);
+    if ((gflags & 0x08u) != 0u)
+        return SOP_RECHECK_CODE;                        // geodetic
+    uint hz = gflags & 1u;
+    uint hm = (gflags >> 1u) & 1u;
+    uint nd = 2u + hz + hm;
+    uint o = 4u;
+    if ((gflags & 0x40u) != 0u && (gflags & 0x10u) != 0u)
+        o += 8u;
+    if ((gflags & 0x04u) != 0u)
+        o += 8u * nd;                                   // the cached float box: two floats per dimension
+    if (o + 8u > l)
+        return SOP_RECHECK_CODE;
+    uint gtype = ldw_s(s, b + o);
+    uint64_t tot = 0ull;
+    if (gtype == 2u)
+    {
+        uint npts = ldw_s(s, b + o + 4u);
+        uint base = b + o + 8u;
+        if (npts > (l - o - 8u) / (8u * nd))
+            return SOP_RECHECK_CODE;                    // the points do not fit: malformed
+        bool d3 = (k0 == 1u) && (hz != 0u);
+        for (uint i = 0u; i + 1u < npts; i++)
+        {
+            uint p0 = base + i * 8u * nd;
+            uint p1 = p0 + 8u * nd;
+            uint64_t dx = f64_sub(ld64s(s, p1), ld64s(s, p0));
+            uint64_t dy = f64_sub(ld64s(s, p1 + 8u), ld64s(s, p0 + 8u));
+            uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
+            if (d3)
+                q = f64_sqr_add(f64_sub(ld64s(s, p1 + 16u), ld64s(s, p0 + 16u)), q);
+            if (f64_nonfinite(dx) || f64_nonfinite(dy) || f64_nonfinite(q))
+                return SOP_RECHECK_CODE;                // NaN, Infinity or an overflow: PostGIS' answer is the backend's
+            tot = f64_add(tot, f64_sqrt(q));
+            if (f64_nonfinite(tot))
+                return SOP_RECHECK_CODE;
+        }
+    }
+    else if (gtype != 1u && gtype != 3u)
+        return SOP_RECHECK_CODE;                        // multi-lines, collections, curves: the backend
+    regs[dst].isnull = 0u;
+    regs[dst].v = int64_t(tot);
+    return 0u;
+}
+
 // ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim (GEOMFLAG): the flags byte of any geometry, the same as geom_flag()
 // of cpu_vm.c
 uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
@@ -2325,6 +2451,10 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMFLAG)
             return vm_geom_flag(dst, ra, k0, regs);
+        if (op == SOP_GEOMDIST)
+            return vm_geom_dist(dst, ra, rb, k0, k1, regs);
+        if (op == SOP_GEOMLEN)
+            return vm_geom_len(dst, ra, k0, regs);
 #endif
         if (op == SOP_NULLMRG)
         {

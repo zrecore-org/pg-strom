@@ -116,6 +116,21 @@
  *            geometry type (PostGIS raises "Argument to ST_Z() must have type POINT"), a geodetic point and a malformed value
  *            return SCANVM_RECHECK_CODE: the backend evaluates the row and raises the error in its own order.
  *
+ *   GEOMDIST dst = ST_Distance / ST_3DDistance / ST_3DMaxDistance of two points, the float8 bits of PostGIS' own result:
+ *            sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (3D) or sqrt(fma(dx, dx, dy * dy)) (2D), the order the installed PostGIS
+ *            computes (200,000 pairs, 0 differences: postgis/dist_probe.c) with the software binary64 (f64_sqr_add is the fused
+ *            step). The operands are those of GEOM3DDW (a column, constant, parameter or a fused ST_MakePoint; k0 the flags and Y
+ *            registers, k1 the SRID, the Z registers and GDIST_3D). An empty operand gives NULL (as PostGIS); a SRID mismatch
+ *            (PostGIS raises), a 3D distance with an operand without Z, non-finite coordinates or an overflow, a line or any
+ *            other type, a geodetic point return SCANVM_RECHECK_CODE. The planner calibrates the order against the installed
+ *            PostGIS first (codegen.c): a build that computes it differently keeps the functions on the CPU.
+ *
+ *   GEOMLEN  dst = ST_Length / ST_Length2D (k0 = 0) or ST_3DLength (k0 = 1) of a geometry: the float8 bits of PostGIS' own result for a
+ *            LINESTRING, the segment lengths sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (the Z term only for ST_3DLength of a line with Z)
+ *            added left to right (60,000 lines, 0 differences: postgis/len_probe.c); 0 for a point or a polygon and for a line with
+ *            fewer than two points. Every other type (multi-lines, collections, curves), a geodetic value, a malformed one,
+ *            non-finite coordinates and an overflow return SCANVM_RECHECK_CODE. Calibrated by the planner like GEOMDIST.
+ *
  *   GEOMFLAG dst = the flags of a geometry of any type (empty or not): k0 0 ST_HasZ, 1 ST_HasM (boolean), 2 ST_NDims (2 + Z + M),
  *            3 ST_Zmflag (2 * Z + M), 4 ST_CoordDim (= ST_NDims) as smallint. Only the header is read; NULL in, NULL out; a value
  *            shorter than a header returns SCANVM_RECHECK_CODE.
@@ -187,6 +202,8 @@ SCANVM_OP(GEOMZM,     134)
 SCANVM_OP(GEOM3DDW,   135)
 SCANVM_OP(NULLMRG,    136)
 SCANVM_OP(GEOMFLAG,   137)
+SCANVM_OP(GEOMDIST,   138)
+SCANVM_OP(GEOMLEN,    139)
 /* GEOMPIP: the operands of the function (kind) and the flags of k0 */
 SCANVM_OP(GPIP_POLY_POINT,  0)
 SCANVM_OP(GPIP_POINT_POLY,  1)
@@ -214,6 +231,8 @@ SCANVM_OP(GBOX_OVERLAPS_ND, 3)
 /* GEOM3DDW kind 1: ST_3DIntersects(point, point) = ST_3DDWithin with the constant tolerance 0 (the program builder adds it) */
 SCANVM_OP(G3DDW_INTERSECTS, 1)
 /* GEOMFLAG kinds: ST_HasZ, ST_HasM (boolean), ST_NDims, ST_Zmflag, ST_CoordDim (smallint) */
+/* GEOMDIST: bit 30 of k1 is set for the 3D forms (ST_3DDistance, ST_3DMaxDistance of two points); ST_Distance is the 2D one */
+SCANVM_OP(GDIST_3D,       0x40000000)
 SCANVM_OP(GFLAG_HASZ,     0)
 SCANVM_OP(GFLAG_HASM,     1)
 SCANVM_OP(GFLAG_NDIMS,    2)

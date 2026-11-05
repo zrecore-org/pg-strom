@@ -2053,6 +2053,210 @@ vulkan_geom_3ddwithin_args_ok(List *func_args)
 }
 
 /*
+ * Does the installed PostGIS evaluate the distance of two points the way the GPU does? The VM reproduces
+ * sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (3D) / sqrt(fma(dx, dx, dy * dy)) (2D) bit for bit, which is what a PostGIS built with
+ * floating-point contraction (the usual arm64 build) computes (test/gpuserv/postgis/dist_probe.c: 200,000 pairs, no difference).
+ * A build without it rounds each step and gets other bits in about 10% of the pairs. So before a distance function is pushed down,
+ * it is called on 240 fixed pairs and the bits are compared with the same formula on the host; one difference and the function
+ * stays on the CPU (decided once per function and backend). The points are built as version 1 GSERIALIZED values.
+ */
+static bool
+vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
+{
+	static struct { Oid oid; bool ok; } done[16];
+	static int	ndone = 0;
+	static const double scales[5] = {1000.0, 1e-3, 1e8, 1.0, 1e-120};
+	uint64_t	rng = 0x9E3779B97F4A7C15ULL;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 2);
+	bool		ok = true;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < ndone; i++)
+		if (done[i].oid == func_oid)
+			return done[i].ok;
+	oldcxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int i = 0; i < 240 && ok; i++)
+		{
+			double		v[2][3];
+			struct varlena *pt[2];
+			double		sc = scales[i % 5];
+			Datum		r;
+
+			for (int k = 0; k < 3; k++)
+			{
+				rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+				v[0][k] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+				rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+				if (i % 3 == 0)		/* a close pair */
+					v[1][k] = v[0][k] + ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * fabs(v[0][k]) * 1e-6;
+				else
+					v[1][k] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+			}
+			for (int p = 0; p < 2; p++)
+			{
+				/* varlena header, SRID 0, flags (Z), type POINT, one point, x y z */
+				unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24);
+				uint32		one = 1;
+
+				SET_VARSIZE(buf, VARHDRSZ + 4 + 8 + 24);
+				buf[VARHDRSZ + 3] = 0x01;
+				memcpy(buf + VARHDRSZ + 4, &one, 4);
+				memcpy(buf + VARHDRSZ + 8, &one, 4);
+				memcpy(buf + VARHDRSZ + 12, v[p], 24);
+				pt[p] = (struct varlena *) buf;
+			}
+			InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
+			fcinfo->args[0].value = PointerGetDatum(pt[0]);
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].value = PointerGetDatum(pt[1]);
+			fcinfo->args[1].isnull = false;
+			r = FunctionCallInvoke(fcinfo);
+			if (fcinfo->isnull)
+				ok = false;
+			else
+			{
+				volatile double dy2 = (v[1][1] - v[0][1]) * (v[1][1] - v[0][1]);
+				double		dx = v[1][0] - v[0][0], dz = v[1][2] - v[0][2];
+				double		q = fma(dx, dx, dy2), want, got = DatumGetFloat8(r);
+
+				if (d3)
+					q = fma(dz, dz, q);
+				want = sqrt(q);
+				if (memcmp(&want, &got, sizeof(double)) != 0)
+					ok = false;
+			}
+			pfree(pt[0]);
+			pfree(pt[1]);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	if (!ok)
+		elog(LOG, "PG-Strom: PostGIS function %u does not compute distances the way the GPU kernel does; it stays on the CPU", func_oid);
+	if (ndone < lengthof(done))
+	{
+		done[ndone].oid = func_oid;
+		done[ndone].ok = ok;
+		ndone++;
+	}
+	return ok;
+}
+
+/*
+ * The same for the length of a line: ST_Length / ST_Length2D / ST_3DLength are called on 120 fixed lines of 2 to 6 points (Z, so the
+ * 3D form measures them in 3D) and compared bit for bit with the segment lengths sqrt(fma(...)) added left to right on the host.
+ */
+static bool
+vulkan_geom_len_calibrated(Oid func_oid, bool d3)
+{
+	static struct { Oid oid; bool ok; } done[16];
+	static int	ndone = 0;
+	static const double scales[5] = {1000.0, 1e-3, 1e8, 1.0, 1e-120};
+	uint64_t	rng = 0xD1B54A32D192ED03ULL;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 1);
+	bool		ok = true;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < ndone; i++)
+		if (done[i].oid == func_oid)
+			return done[i].ok;
+	oldcxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int i = 0; i < 120 && ok; i++)
+		{
+			int			npts = 2 + (i % 5);
+			double		v[6][3];
+			double		sc = scales[i % 5], want = 0.0, got;
+			unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24 * npts);
+			uint32		two = 2, np = npts;
+			Datum		r;
+
+			for (int k = 0; k < npts; k++)
+				for (int c = 0; c < 3; c++)
+				{
+					rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+					v[k][c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+				}
+			SET_VARSIZE(buf, VARHDRSZ + 4 + 8 + 24 * npts);
+			buf[VARHDRSZ + 3] = 0x01;				/* Z */
+			memcpy(buf + VARHDRSZ + 4, &two, 4);		/* LINESTRING */
+			memcpy(buf + VARHDRSZ + 8, &np, 4);
+			memcpy(buf + VARHDRSZ + 12, v, 24 * npts);
+			for (int k = 0; k + 1 < npts; k++)
+			{
+				volatile double dy2 = (v[k + 1][1] - v[k][1]) * (v[k + 1][1] - v[k][1]);
+				double		dx = v[k + 1][0] - v[k][0], dz = v[k + 1][2] - v[k][2];
+				double		q = fma(dx, dx, dy2);
+
+				if (d3)
+					q = fma(dz, dz, q);
+				want += sqrt(q);
+			}
+			InitFunctionCallInfoData(*fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
+			fcinfo->args[0].value = PointerGetDatum(buf);
+			fcinfo->args[0].isnull = false;
+			r = FunctionCallInvoke(fcinfo);
+			got = DatumGetFloat8(r);
+			if (fcinfo->isnull || memcmp(&want, &got, sizeof(double)) != 0)
+				ok = false;
+			pfree(buf);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	if (!ok)
+		elog(LOG, "PG-Strom: PostGIS function %u does not compute lengths the way the GPU kernel does; it stays on the CPU", func_oid);
+	if (ndone < lengthof(done))
+	{
+		done[ndone].oid = func_oid;
+		done[ndone].ok = ok;
+		ndone++;
+	}
+	return ok;
+}
+
+/*
+ * ST_Distance / ST_3DDistance / ST_3DMaxDistance(point, point): the shapes of st_dwithin without the tolerance, and for the 3D forms a
+ * fused point needs a Z.
+ */
+static bool
+vulkan_geom_dist_args_ok(List *func_args, bool d3)
+{
+	int			s0, s1;
+
+	if (list_length(func_args) != 2)
+		return false;
+	s0 = vulkan_geom_operand_shape(linitial(func_args));
+	s1 = vulkan_geom_operand_shape(lsecond(func_args));
+	if (s0 < 0 || s1 < 0)
+		return false;
+	if (s0 && s1 &&
+		vulkan_geom_fused_srid(linitial(func_args)) != vulkan_geom_fused_srid(lsecond(func_args)))
+		return false;
+	if (d3 && ((s0 == 1 && vulkan_geom_fused_nargs(linitial(func_args)) < 3) ||
+			   (s1 == 1 && vulkan_geom_fused_nargs(lsecond(func_args)) < 3)))
+		return false;
+	return true;
+}
+
+/*
  * ST_3DIntersects(point, point): ST_3DDWithin with the tolerance 0 (the program builder adds the constant), so the same operand
  * shapes; a fused point needs a Z.
  */
@@ -2090,12 +2294,18 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 
 	/* PostGIS (A11): the geometry operators read a string register; a join program loads none */
 	if ((fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK ||
-		 fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG) &&
+		 fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG || fc.cls == SOP_GEOMDIST || fc.cls == SOP_GEOMLEN) &&
 		((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN || !vulkan_geom_source_ok(context)))
 		return false;
 	/* st_z / st_m of a column, parameter or constant point (a fused st_makepoint has no register to read) */
 	if (fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOMFLAG)
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0);
+	if (fc.cls == SOP_GEOMLEN)
+		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0 &&
+				vulkan_geom_len_calibrated(dfunc->func_oid, fc.kind == 1));
+	if (fc.cls == SOP_GEOMDIST)
+		return (vulkan_geom_dist_args_ok(func_args, fc.kind == 1) &&
+				vulkan_geom_dist_calibrated(dfunc->func_oid, fc.kind == 1));
 	if (fc.cls == SOP_GEOM3DDW && fc.kind == SOP_G3DDW_INTERSECTS)
 		return vulkan_geom_3dintersects_args_ok(func_args);
 	if (fc.cls == SOP_GEOM3DDW)
@@ -2239,7 +2449,7 @@ __codegen_func_expression(codegen_context *context,
 		scan_func_class gfc = scan_vm_classify_func(dfunc->func_code);
 
 		/* the arguments of a point-in-polygon function may be the fused point; those of st_setsrid, its st_makepoint */
-		codegen_geom_mk_ok = (gfc.cls == SOP_GEOMPIP || gfc.cls == SOP_GEOMDWITHIN || gfc.cls == SOP_GEOM3DDW ||
+		codegen_geom_mk_ok = (gfc.cls == SOP_GEOMPIP || gfc.cls == SOP_GEOMDWITHIN || gfc.cls == SOP_GEOM3DDW || gfc.cls == SOP_GEOMDIST ||
 							  (gfc.cls == SOP_GEOMMK && gfc.kind == 1));
 	}
 	foreach (lc, func_args)
@@ -5265,7 +5475,7 @@ geometry_func_walker(Node *node, void *context)
 			scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
 			if (fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK ||
-				fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG)
+				fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG || fc.cls == SOP_GEOMDIST || fc.cls == SOP_GEOMLEN)
 				return true;
 		}
 	}
