@@ -6,6 +6,8 @@
 // used: nothing here depends on the compiler's fast-math, flush-to-zero or contraction (FMA) settings.
 //
 //   f64_add f64_sub f64_mul f64_div f64_sqrt
+//   f64_sqr_add(a, c)               a * a + c with ONE rounding (a fused multiply-add) for c >= 0: what a compiler that contracts
+//                                   x*x + y*y + z*z into fma() computes, as PostGIS' distance and length functions do
 //   f64_key                         order-preserving integer key: PostgreSQL's float8 order (NaN = NaN, the largest;
 //                                   -0 = +0), so the comparisons below, min/max, sort and group keys need no arithmetic
 //   f64_eq f64_ne f64_lt f64_le f64_gt f64_ge     (float8_eq ... float8_ge of PostgreSQL)
@@ -231,6 +233,88 @@ F64S_FN uint64_t f64_mul(uint64_t a, uint64_t b)
 			sig |= 1ull;
 	}
 	return f64s_round_pack(sign, e, sig);
+}
+
+// a * a + c rounded once (nearest, ties to even), for c >= 0 (+0 included): bit-identical to the hardware fma(a, a, c). Both terms
+// are non-negative, so there is no cancellation: the product (106 bits) and the addend are aligned in a 128-bit frame whose
+// leading bit is bit 125 for the larger term, the smaller one is shifted right with a sticky bit, and the sum has its leading bit
+// at 125 or 126. A negative c, a NaN or an infinity, and a zero operand (nothing to fuse) take the two-rounding path, which is exact
+// in those cases.
+F64S_FN uint64_t f64_sqr_add(uint64_t a, uint64_t c)
+{
+	uint64_t ma = a & F64_MAG, mc = c & F64_MAG;
+	uint64_t xa, xc, hi, lo, bh, bl, sh, sl, rh, rl, sig;
+	int ep, ec, e;
+	uint n, d;
+
+	if (ma >= F64_INF || mc >= F64_INF || (c >> 63) != 0ull || ma == 0ull || mc == 0ull)
+		return f64_add(f64_mul(a, a), c);
+	ep = 2 * f64s_unpack_exp(a) - 1023;			// biased exponent of the product's leading bit (before the carry)
+	xa = f64s_unpack_sig(a);
+	hi = f64s_mulhi(xa, xa);
+	lo = xa * xa;								// the square is in [2^104, 2^106)
+	if ((hi & (1ull << 41)) != 0ull)
+	{
+		ep += 1;
+		n = 20u;								// leading bit 105 -> 125
+	}
+	else
+		n = 21u;								// leading bit 104 -> 125
+	bh = (hi << n) | (lo >> (64u - n));
+	bl = lo << n;
+	ec = f64s_unpack_exp(c);
+	xc = f64s_unpack_sig(c);
+	sh = xc << 9;								// the addend with its leading bit (52) at 125 = 64 + 61
+	sl = 0ull;
+	if (ep >= ec)
+	{
+		d = (uint)(ep - ec);
+		e = ep;
+	}
+	else
+	{
+		// the addend is the larger term: swap, so that (bh:bl) is the larger and (sh:sl) is shifted
+		rh = bh; rl = bl;
+		bh = sh; bl = sl;
+		sh = rh; sl = rl;
+		d = (uint)(ec - ep);
+		e = ec;
+	}
+	// (sh:sl) >> d, the shifted-out bits ORed into bit 0
+	if (d >= 128u)
+	{
+		sl = ((sh | sl) != 0ull) ? 1ull : 0ull;
+		sh = 0ull;
+	}
+	else if (d >= 65u)
+	{
+		uint64_t lost = ((sh << (128u - d)) != 0ull || sl != 0ull) ? 1ull : 0ull;
+
+		sl = (sh >> (d - 64u)) | lost;
+		sh = 0ull;
+	}
+	else if (d == 64u)
+	{
+		sl = sh | ((sl != 0ull) ? 1ull : 0ull);
+		sh = 0ull;
+	}
+	else if (d != 0u)
+	{
+		uint64_t lost = ((sl << (64u - d)) != 0ull) ? 1ull : 0ull;
+
+		sl = (sl >> d) | (sh << (64u - d)) | lost;
+		sh = sh >> d;
+	}
+	rl = bl + sl;
+	rh = bh + sh + ((rl < bl) ? 1ull : 0ull);
+	if ((rh & (1ull << 62)) != 0ull)			// bit 126: the sum carried
+	{
+		sig = rh | ((rl != 0ull) ? 1ull : 0ull);
+		e += 1;
+	}
+	else
+		sig = (rh << 1) | (rl >> 63) | (((rl << 1) != 0ull) ? 1ull : 0ull);
+	return f64s_round_pack(0u, e, sig);
 }
 
 F64S_FN uint64_t f64_div(uint64_t a, uint64_t b)

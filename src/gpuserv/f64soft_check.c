@@ -178,6 +178,8 @@ static uint64_t h_sub(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u
 static uint64_t h_mul(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(u2d(a) * u2d(b)); }
 static uint64_t h_div(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(u2d(a) / u2d(b)); }
 static uint64_t h_sqrt(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return d2u(sqrt(u2d(a))); }
+static uint64_t s_sqr_add(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_sqr_add(a, b); }
+static uint64_t h_sqr_add(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(fma(u2d(a), u2d(a), u2d(b))); }
 
 /* PostgreSQL's float8 comparison functions (float.h) */
 static int pg_nan(double x) { return isnan(x); }
@@ -325,6 +327,7 @@ static const f64op ops[] = {
 	{ "err_sqrt", s_err_sqrt, h_err_sqrt, 0, 0 },
 	{ "math_sqrt", s_math_sqrt, h_sqrt, 0, 0 },
 	{ "math_rint", s_math_rint, h_rint, 0, 0 },
+	{ "sqr_add", s_sqr_add, h_sqr_add, 0, 0 },			/* index 31 in kernels_check/f64soft_check.slang */
 };
 
 /* the error numbers of the library are those of the VM */
@@ -349,6 +352,19 @@ prep(int op, uint64_t *a, uint64_t *b)
 			case 3: *a = (rnd() & 1 ? 0x20000000000000ull : 0x40000000000000ull) + (rnd() % 9) - 4; break;
 			case 4: *a = (1ull << (rnd() % 64)) + (rnd() % 5) - 2; break;
 			default: *a = (rnd() & 1) ? 0x8000000000000000ull : 0x7FFFFFFFFFFFFFFFull; *a += rnd() % 3; break;
+		}
+	}
+	else if (strcmp(nm, "sqr_add") == 0)
+	{
+		/* c is non-negative; half of the time its exponent is that of a * a (or close), where the alignment matters */
+		*b &= 0x7FFFFFFFFFFFFFFFull;
+		if (rnd() % 2)
+		{
+			int ea = (int)((*a >> 52) & 0x7FF), eb = 2 * ea - 1023 + (int)(rnd() % 9) - 4;
+
+			if (eb < 0) eb = 0;
+			if (eb > 2046) eb = 2046;
+			*b = (*b & 0x800FFFFFFFFFFFFFull) | (((uint64_t) eb) << 52);
 		}
 	}
 	else if (strcmp(nm, "from_f32") == 0)

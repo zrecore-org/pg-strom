@@ -48,6 +48,7 @@ void main(uint3 tid : SV_DispatchThreadID)
 	else if (pc.op == 29u) r = f64_math(2u, a);
 	else if (pc.op == 30u) r = f64_math(3u, a);
 	else if (pc.op == 23u) r = (uint64_t) f64_to_f32_err(a, f64_to_f32(a, 0u));
+	else if (pc.op == 31u) r = f64_sqr_add(a, b);
 	else                   r = ~0ull;
 	outR[i] = r;
 }
