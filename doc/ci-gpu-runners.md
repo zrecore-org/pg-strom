@@ -46,3 +46,17 @@ there because it is not a virtual machine.
   run yet.
 - The service does not branch on the capability tier (it only reports it), so forcing a tier on lavapipe would test nothing; the
   subgroup sizes the CI covers are 4 (lavapipe) and 32 (Apple).
+
+## Why the lavapipe jobs skip the GPU-Cache joins
+
+Measured on 2026-11-04 with `test/cloud/orbstack_lavapipe.sh` (an Ubuntu 24.04 arm64 container on the Mac, Mesa 25.2.8, LLVM 20.1.2, the
+same stack as the CI runner) and the CI logs of both Linux jobs: the first GPU-Cache join (the Arrow-source join kernel, run by the
+cache scan) keeps lavapipe's LLVM compiler busy for more than 5 minutes (the service's 300-second watchdog for CPU devices then marks
+the device lost; on arm64 the service died with signal 11 afterwards) and its resident memory reached 7 GB before the kernel killed the
+service (signal 9, in an 8 GB VM). The llvmpipe worker threads were idle: it is the compile, not a stuck kernel. The same join runs in
+seconds on the Apple GPU. So the lavapipe CI step sets `GCJOINS=off` (`gpucache_tests.inc` then skips the three join queries per table)
+and the Apple Silicon run covers them. Not known yet: whether a real NVIDIA or AMD driver compiles this kernel cheaply (it should: they
+do not lower dynamic register-array indexing through LLVM), which a first run on a real GPU will show.
+
+Open follow-ups: the client of a query hangs when the service is killed in the middle of its task (the backend should get an error), and
+the service crashes with signal 11 on the device-lost exit path.

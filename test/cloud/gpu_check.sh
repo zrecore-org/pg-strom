@@ -69,7 +69,7 @@ say "build"
 make -C src PG_CONFIG=/usr/lib/postgresql/$PG_MAJOR/bin/pg_config WITH_GPUSERV=1 -j"$(nproc)" install >"$WORK/build.log" 2>&1 \
 	|| { tail -30 "$WORK/build.log"; echo "BUILD FAILED"; exit 1; }
 
-export PGBIN=/usr/lib/postgresql/$PG_MAJOR/bin GPUSERV_BIN=/usr/lib/postgresql/$PG_MAJOR/lib/pgstrom-gpuserv ALLOW_CPU=off
+export PGBIN=/usr/lib/postgresql/$PG_MAJOR/bin GPUSERV_BIN=/usr/lib/postgresql/$PG_MAJOR/lib/pgstrom-gpuserv ALLOW_CPU=${ALLOW_CPU:-off}
 fail=0
 for st in $STAGES; do
 	case $st in

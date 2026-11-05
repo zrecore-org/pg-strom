@@ -47,6 +47,9 @@ gcagg() { # table, label, query-with-%T; the plan must use GpuPreAgg over the ca
 	else echo "  FAIL  $tbl: $label (GpuPreAgg=$n1 cache=$n2)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 gcjoin() { # table, label, query-with-%T and %D; the plan must join on the GPU (GpuJoin, or GpuPreAgg with the join folded in) over the cache
+	# GCJOINS=off skips the joins: lavapipe (CPU Vulkan) compiles the join kernels through LLVM, which takes more than 5 minutes and
+	# 7 GB for the Arrow-source join (CI), so the lavapipe jobs leave them to the Apple Silicon run
+	if [ "${GCJOINS:-on}" = off ]; then echo "  skip  $1: $2 (GCJOINS=off)"; return 0; fi
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g")
 	plan=$($PSQL -d scantest -c "$GPU $JOINSET explain $qry" 2>&1)
 	n1=$(echo "$plan" | grep -c -E "Custom Scan \(GpuJoin\)|GPU Join Quals"); n2=$(echo "$plan" | grep -c "GPU Cache:")

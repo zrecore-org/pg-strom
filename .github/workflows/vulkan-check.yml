@@ -159,6 +159,7 @@ jobs:
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
           ALLOW_CPU: "on"
           NROWS: "20000"
+          GCJOINS: "off"       # lavapipe needs more than 5 minutes and 7 GB to compile the Arrow-source join kernel
         run: sh test/gpuserv/gpucache_dev.sh
 
       - name: Upload the PostgreSQL log of the failed test
