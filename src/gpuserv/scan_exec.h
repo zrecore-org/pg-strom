@@ -31,28 +31,28 @@ typedef struct scan_engine
 	scan_map_entry	maps[SCAN_MAP_CACHE];
 	uint64_t		map_clock;
 	gpu_vk_ctx	   *vk;
-	gpu_vk_pipeline	pipe[3];			/* kernel variants with 8, 16 and 32 registers */
-	int				pipe_ready[3];
-	gpu_vk_pipeline	agg_pipe[3][3];		/* the aggregation kernel: [registers 8/16/32][aggregates 4/8/12] */
-	int				agg_pipe_ready[3][3];
-	gpu_vk_pipeline	join_pipe[3];			/* the join kernel: registers 8/16/32 */
-	int				join_pipe_ready[3];
-	gpu_vk_pipeline	gagg_pipe[2][3];		/* GROUP BY: [registers 16/32][aggregates 4/8/12] */
-	int				gagg_pipe_ready[2][3];
-	gpu_vk_pipeline	jagg_pipe[2][3];		/* aggregation over a join: [registers 16/32][aggregates 4/8/12] */
-	int				jagg_pipe_ready[2][3];
-	gpu_vk_pipeline	jgagg_pipe[2][3];		/* GROUP BY over a join: the same */
-	int				jgagg_pipe_ready[2][3];
-	gpu_vk_pipeline	arrow_pipe[3];			/* the Arrow scan kernel: registers 8/16/32 */
-	int				arrow_pipe_ready[3];
+	gpu_vk_pipeline	pipe[6];			/* kernel variants with 8, 16 and 32 registers, then the lite kernels (no numeric, jsonb, float8, geometry) */
+	int				pipe_ready[6];
+	gpu_vk_pipeline	agg_pipe[6][3];		/* the aggregation kernel: [registers 8/16/32, then lite][aggregates 4/8/12] */
+	int				agg_pipe_ready[6][3];
+	gpu_vk_pipeline	join_pipe[6];			/* the join kernel: registers 8/16/32, then the lite kernels (no optional instruction groups) */
+	int				join_pipe_ready[6];
+	gpu_vk_pipeline	gagg_pipe[4][3];		/* GROUP BY: [registers 16/32, then lite][aggregates 4/8/12] */
+	int				gagg_pipe_ready[4][3];
+	gpu_vk_pipeline	jagg_pipe[4][3];		/* aggregation over a join: [registers 16/32, then lite][aggregates 4/8/12] */
+	int				jagg_pipe_ready[4][3];
+	gpu_vk_pipeline	jgagg_pipe[4][3];		/* GROUP BY over a join: the same */
+	int				jgagg_pipe_ready[4][3];
+	gpu_vk_pipeline	arrow_pipe[6];			/* the Arrow scan kernel: registers 8/16/32, then lite */
+	int				arrow_pipe_ready[6];
 	gpu_vk_pipeline	sort_pipe;				/* GPU-Sort (gpusort.c) */
 	int				sort_pipe_ready;
 
 	/* Arrow record batches as the outer relation (registers 16/32; aggregates 4/8/12) */
-	gpu_vk_pipeline	aagg_pipe[2][3], agagg_pipe[2][3], ajagg_pipe[2][3], ajgagg_pipe[2][3];
-	int				aagg_ready[2][3], agagg_ready[2][3], ajagg_ready[2][3], ajgagg_ready[2][3];
-	gpu_vk_pipeline	ajoin_pipe[2];
-	int				ajoin_ready[2];
+	gpu_vk_pipeline	aagg_pipe[4][3], agagg_pipe[4][3], ajagg_pipe[4][3], ajgagg_pipe[4][3];
+	int				aagg_ready[4][3], agagg_ready[4][3], ajagg_ready[4][3], ajgagg_ready[4][3];
+	gpu_vk_pipeline	ajoin_pipe[4];			/* registers 16/32, then the lite kernels */
+	int				ajoin_ready[4];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 	struct spec_mgr *spec;			/* A6: specialized kernels (specialize.h) */
