@@ -48,7 +48,9 @@ struct PC
     uint page_base;
     uint blcksz;        // (unused: pages are located through ptab)
     uint total_lps;     // line pointers of all pages (start of the value area is 4 + total_lps)
-#if defined(WITH_INNER) || defined(ARROW_SRC)
+// (the Arrow scan kernel, arrow.slang, has four words even when a specialized one is generated with ARROW_SRC: its pipeline layout
+// is 16 bytes, spec_mgr.c)
+#if defined(WITH_INNER) || (defined(ARROW_SRC) && !defined(ARROW_SCAN))
     uint extra;         // join kernels: a fifth parameter (jgagg.slang: capacity of the overflow list)
 #endif
 };

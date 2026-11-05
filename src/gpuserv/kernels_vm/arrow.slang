@@ -9,6 +9,7 @@
 // Output (outb): [1] first error (FuncOpCode, 0 = none), [2] row (absolute) of it; from word 4,
 // one word per row of the pass: 1 if the row qualifies; then per row { isnull, lo, hi } * ncomp,
 // the computed projection values (written for qualifying rows).
+#define ARROW_SCAN 1               // four push-constant words, see scan_common.slang
 #include "scan_common.slang"
 #include "arrow_load.inc"
 #ifdef SPEC_PROG
