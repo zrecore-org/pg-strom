@@ -48,6 +48,16 @@ gistjoin "inner qual" "$JQ and i.a = 3"
 gistjoin "outer qual" "$JQ and o.id % 4 = 0"
 gistjoin "left join" "select o.id, i.id from pg_gp o left join pg_gz i on i.geom && st_makepoint(o.x, o.y)"
 gistjoin "count per outer row" "select o.id, count(i.id) from pg_gp o join pg_gz i on i.geom && st_makepoint(o.x, o.y) group by o.id"
+gistjoin "semi join (EXISTS)" "select o.id from pg_gp o where exists (select 1 from pg_gz i where i.geom && st_makepoint(o.x, o.y))"
+gistjoin "anti join (NOT EXISTS)" "select o.id from pg_gp o where not exists (select 1 from pg_gz i where i.geom && st_makepoint(o.x, o.y))"
+gistjoin "right join: inner rows without a partner" "select o.id, i.id from pg_gp o right join pg_gz i on i.geom && st_makepoint(o.x, o.y)"
+# PostgreSQL itself refuses a FULL JOIN on && (not merge- or hash-joinable), so there is no CPU result to compare with: the GPU's
+# FULL JOIN must have left + right - inner rows
+fj=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_gp o full join pg_gz i on i.geom && st_makepoint(o.x, o.y)" 2>&1 | tail -1)
+lj=$($PSQL -d scantest -c "$CPU select count(*) from pg_gp o left join pg_gz i on i.geom && st_makepoint(o.x, o.y)" | tail -1)
+rj=$($PSQL -d scantest -c "$CPU select count(*) from pg_gp o right join pg_gz i on i.geom && st_makepoint(o.x, o.y)" | tail -1)
+ij=$($PSQL -d scantest -c "$CPU select count(*) from pg_gp o join pg_gz i on i.geom && st_makepoint(o.x, o.y)" | tail -1)
+[ "$fj" = "$((lj + rj - ij))" ]; check "full join: left + right - inner rows ($fj = $lj + $rj - $ij)" $?
 
 # a probe point with a non-finite coordinate is an error (the CPU answers by its own rules), never a wrong result
 for i in 1 2 3 4; do
@@ -79,6 +89,28 @@ gistjoin "after a rolled back delete" "$JQ"
 # walking the tree has a step limit; hitting it is an error, never a short result
 e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpugist_max_steps=2; $JQ" 2>&1 | tail -1)
 check "step limit raises an error" "$(echo "$e" | grep -q 'ERROR' ; echo $?)"
+
+# inserts that split index pages while the join copies the index: in one snapshot the GPU join must still equal the CPU join (a
+# "kept changing" error asks for a retry and is not a wrong answer)
+sql "drop table if exists pg_gc"
+sql "create table pg_gc (id int4, geom geometry)"
+sql "insert into pg_gc select i, ST_MakeEnvelope(i % 90, (i * 7) % 90, i % 90 + 1.5, (i * 7) % 90 + 1.5) from generate_series(1, 3000) i"
+sql "create index pg_gc_gist on pg_gc using gist (geom)"
+sql "analyze pg_gc"
+( for r in 1 2 3 4 5 6; do $PSQL -d scantest -c "insert into pg_gc select 100000 + i, ST_MakeEnvelope(i % 95, (i * 11) % 95, i % 95 + 1.0, (i * 11) % 95 + 1.0) from generate_series(1, 4000) i" >/dev/null 2>&1; done ) &
+writer=$!
+cmp_ok=0; cmp_bad=0; cmp_retry=0
+for r in 1 2 3 4 5 6 7 8; do
+	res=$($PSQL -d scantest -c "begin isolation level repeatable read; $GPU $JOINSET $GISTON
+		select md5(coalesce(string_agg(o.id || '/' || i.id, ',' order by o.id, i.id), '')) from pg_gp o join pg_gc i on i.geom && st_makepoint(o.x, o.y) where o.id < 3000;
+		set pg_strom.enabled=off;
+		select md5(coalesce(string_agg(o.id || '/' || i.id, ',' order by o.id, i.id), '')) from pg_gp o join pg_gc i on i.geom && st_makepoint(o.x, o.y) where o.id < 3000; commit;" 2>&1)
+	if echo "$res" | grep -q "kept changing"; then cmp_retry=$((cmp_retry+1))
+	elif [ $(echo "$res" | grep -E '^[0-9a-f]{32}$' | sort -u | wc -l) -eq 1 ] && [ $(echo "$res" | grep -cE '^[0-9a-f]{32}$') -eq 2 ]; then cmp_ok=$((cmp_ok+1))
+	else cmp_bad=$((cmp_bad+1)); echo "$res" | head -5; fi
+done
+wait $writer
+[ "$cmp_bad" = 0 ] && [ $((cmp_ok + cmp_retry)) -ge 1 ]; check "joins while the index splits: GPU = CPU in one snapshot ($cmp_ok equal, $cmp_retry asked to retry, $cmp_bad different)" $?
 
 # off by default: the plan has no GPU GiST Join
 off=$($PSQL -d scantest -c "$GPU $JOINSET explain $JQ" | grep -c "GPU GiST Join")

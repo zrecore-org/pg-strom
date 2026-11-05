@@ -1914,11 +1914,6 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			fail(&b, "join %d has no hash value (only hash joins and GiST-index joins are implemented)", depth);
 			goto error;
 		}
-		if (is_gist && (rels[depth - 1].semi || rels[depth - 1].anti || rels[depth - 1].right_outer))
-		{
-			fail(&b, "a GiST-index join must be an inner or LEFT join");
-			goto error;
-		}
 		dsec[depth][0] = b.ninsn;
 		next = b.nslots;
 		if (is_gist)

@@ -438,7 +438,8 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	 */
 	memset(&gist_inner, 0, sizeof(gist_inner));
 	if (pgstrom_enable_gpugistindex &&
-		(join_type == JOIN_INNER || join_type == JOIN_LEFT))
+		(join_type == JOIN_INNER || join_type == JOIN_LEFT || join_type == JOIN_RIGHT ||
+		 join_type == JOIN_FULL || join_type == JOIN_SEMI || join_type == JOIN_ANTI))
 	{
 		List   *cands = NIL;
 
@@ -2129,24 +2130,57 @@ again:
 				setup_kern_data_store(kds, i_tupdesc, nbytes,
 									  KDS_FORMAT_BLOCK);
 				kds->block_offset = block_offset;
-				for (int k=0; k < nblocks; k++)
+				/*
+				 * The pages are copied one at a time under a share lock each, while inserts may split pages: a copy of a
+				 * parent taken before a split and of its child after it would miss the entries that moved to the new
+				 * page. So the page LSNs are remembered and checked once the copy is done; a changed page repeats the copy.
+				 */
 				{
-					Buffer		buffer;
-					Page		page;
-					PageHeader	hpage;
+					XLogRecPtr *lsns = palloc(sizeof(XLogRecPtr) * nblocks);
 
-					buffer = ReadBuffer(i_rel, k);
-					LockBuffer(buffer, BUFFER_LOCK_SHARE);
-					page = BufferGetPage(buffer);
-					hpage = KDS_BLOCK_PGPAGE(kds, k);
+					for (int attempt = 0; ; attempt++)
+					{
+						bool		consistent = (RelationGetNumberOfBlocks(i_rel) == nblocks);
 
-					memcpy(hpage, page, BLCKSZ);
-					GistPageSetParent(hpage,
-									  InvalidBlockNumber,
-									  InvalidOffsetNumber);
-					KDS_BLOCK_BLCKNR(kds, k) = k;
+						for (int k=0; k < nblocks; k++)
+						{
+							Buffer		buffer;
+							Page		page;
+							PageHeader	hpage;
 
-					UnlockReleaseBuffer(buffer);
+							buffer = ReadBuffer(i_rel, k);
+							LockBuffer(buffer, BUFFER_LOCK_SHARE);
+							page = BufferGetPage(buffer);
+							hpage = KDS_BLOCK_PGPAGE(kds, k);
+
+							lsns[k] = PageGetLSN(page);
+							memcpy(hpage, page, BLCKSZ);
+							GistPageSetParent(hpage,
+											  InvalidBlockNumber,
+											  InvalidOffsetNumber);
+							KDS_BLOCK_BLCKNR(kds, k) = k;
+
+							UnlockReleaseBuffer(buffer);
+						}
+						for (int k=0; consistent && k < nblocks; k++)
+						{
+							Buffer		buffer = ReadBuffer(i_rel, k);
+
+							LockBuffer(buffer, BUFFER_LOCK_SHARE);
+							if (PageGetLSN(BufferGetPage(buffer)) != lsns[k])
+								consistent = false;
+							UnlockReleaseBuffer(buffer);
+						}
+						if (consistent && RelationGetNumberOfBlocks(i_rel) == nblocks)
+							break;
+						if (attempt >= 3)
+							ereport(ERROR,
+									(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+									 errmsg("GpuJoin: GiST index \"%s\" kept changing while its pages were copied",
+											RelationGetRelationName(i_rel)),
+									 errhint("Retry the query.")));
+					}
+					pfree(lsns);
 				}
 				kds->length = nbytes;
 				kds->nitems = nblocks;
