@@ -1,0 +1,5 @@
+# 60,000 random lines of 2-10 points (len_probe.c)
+rows 60000
+ST_3DLength  fma order: 0 mismatches (plain: 5681)
+ST_Length    fma order: 0 mismatches (plain: 4281)
+ST_Length of a 2D line: 0 mismatches; ST_3DLength of a 2D line vs the 2D formula: 0 mismatches

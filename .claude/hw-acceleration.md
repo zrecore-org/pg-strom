@@ -1004,3 +1004,19 @@ Findings and changes (all on the vulkan-gpu branch, working tree before the comm
   reniced); the lite kernels shrink the latter.
 - **New on the GPU:** `&&&`, `ST_3DIntersects(point, point)`, `ST_HasZ/HasM/NDims/Zmflag/CoordDim` (probes `postgis/threed_probe*.sql/.out`).
   `ST_3DDistance` stays on the CPU: PostGIS' result differs from plain binary64 in 10,891 of 100,000 random pairs.
+
+## Exact distances and lengths (2026-11-05, later)
+
+The earlier A11 decision "no bit-exact emulation of PostGIS' distance" is reversed: the arithmetic is deterministic and known.
+- **Probe** (`postgis/dist_probe.{sql,c,out}`, `len_probe.{sql,c,out}`): the installed PostGIS (3.7, arm64, contracting compiler) computes the
+  distance of two points as `sqrt(fma(dz, dz, fma(dx, dx, dy*dy)))` (3D; the 2D form without dz) and the length of a line as the sum, left
+  to right, of the same per-segment values: 0 differences in 200,000 point pairs and 60,000 lines (plain binary64: 11-22% differ).
+  `ST_3DMaxDistance` of two points is the same value; an empty point gives NULL; a SRID mismatch raises; overflow/NaN give NULL or Infinity.
+- **Soft fma:** `f64_sqr_add(a, c)` = RNE(a*a + c), c >= 0 (no cancellation, 128-bit frame), added to `f64_soft.inc`, checked bit for bit
+  against the hardware `fma()` on 4,000,000 cases on the host and on the device (`f64soft_check`, op "sqr_add", index 31).
+- **Ops:** `SOP_GEOMDIST` (138: ST_Distance, ST_3DDistance, ST_3DMaxDistance of two points, operands as ST_3DDWithin) and `SOP_GEOMLEN` (139:
+  ST_Length, ST_Length2D, ST_3DLength of a LINESTRING; 0 for a point or polygon; multi-lines/collections/curves go back to the CPU).
+- **Portability guard:** `vulkan_geom_dist_calibrated` / `vulkan_geom_len_calibrated` (codegen.c) call the installed PostGIS function on fixed
+  point pairs / lines when the function is first planned and compare the bits with the host formula (`fma()` from libm); one difference
+  and the function stays on the CPU for that backend (LOG line). A PostGIS built without contraction therefore keeps today's behaviour.
+- **Possible next step:** ST_DWithin / ST_3DDWithin could use the exact distance instead of the 2^-47 band (no boundary rechecks).

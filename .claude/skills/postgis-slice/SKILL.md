@@ -31,10 +31,15 @@ and the 3D variants of the function, not just the 2D case. State explicitly what
 ## Known limits (as of 2026-11-05)
 
 On the GPU: ST_Z, ST_M, 3-/4-argument ST_MakePoint (fused), ST_3DDWithin and ST_3DIntersects of two points, ST_DWithin, ST_Contains/
-ST_Intersects point-in-polygon, `&&`, `&&&` (n-D boxes), the header functions ST_HasZ/ST_HasM/ST_NDims/ST_Zmflag/ST_CoordDim, GiST
-join on `&&` (2D opfamily). Still on the CPU, with the reason: ST_3DDistance (PostGIS differs from plain binary64 in 10.9% of random
-pairs: `postgis/threed_probe.out`), ST_3DLength (line parsing, exact summation order), GiST join with ST_Contains/ST_DWithin (A13 slices
-2-3, needs inner geometry registers in join programs).
+ST_Intersects point-in-polygon, `&&`, `&&&` (n-D boxes), the header functions ST_HasZ/ST_HasM/ST_NDims/ST_Zmflag/ST_CoordDim, ST_Distance/
+ST_3DDistance/ST_3DMaxDistance of two points and ST_Length/ST_Length2D/ST_3DLength of a line (exact: PostGIS' arm64 build fuses
+`dx*dx + dy*dy + dz*dz` with fma, reproduced by the software `f64_sqr_add`; `postgis/dist_probe*`, `len_probe*`), GiST join on `&&`.
+Still on the CPU: distances and lengths of non-point/non-line types (multi-lines, collections, polygons' perimeter), GiST join with
+ST_Contains/ST_DWithin (A13 slices 2-3, needs inner geometry registers in join programs).
+
+**The guard:** a function whose value must equal PostGIS' bit for bit is only pushed down after `vulkan_geom_*_calibrated` (codegen.c) called the
+installed PostGIS on fixed inputs and got the host formula's bits; a build that computes differently (no floating-point contraction) keeps the
+function on the CPU. Add a calibration like it for every new value-returning function.
 
 Pitfalls: a new geometry opcode must be in `emit()`'s feature classification in `scan_prog.c` (explicit list, not a range: NULLMRG sits
 at 136) and inside the `VM_NO_GEOM` guard of `scan_common.slang`, or the program runs on a lite kernel and fails with "malformed

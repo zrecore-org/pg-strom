@@ -1,0 +1,6 @@
+# 200,000 point pairs (magnitudes 1e-120..1e8, close pairs): mismatches per candidate order (dist_probe.c)
+rows 200000
+3D: plain 21875  fma(z,z,fma(v,v,h*h)) 14740  fma(z,z,fma(h,h,v*v)) 0  fma(v,v,fma(h,h,z*z)) 29794
+    fma(h,h,fma(v,v,z*z)) 27014  fma(h,h,fma(z,z,v*v)) 19818  fma(v,v,fma(z,z,h*h)) 27142  fma(z,z,h*h+v*v) 10710
+3DMaxDistance vs fma(z,z,fma(h,h,v*v)): 0 mismatches
+2D: plain 15995  fma(v,v,h*h) 22235  fma(h,h,v*v) 0  hypot 11216
