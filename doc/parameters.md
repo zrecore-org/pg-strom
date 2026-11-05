@@ -120,7 +120,7 @@ where PostgreSQL is started (for example in the systemd unit) and restart.
 | `PGSTROM_GPUSERV_SPEC_LOG=1` | The service logs what the specializer does (kernels queued, compiled, loaded from the cache, in use); `PGSTROM_GPUSERV_TRACE=1` includes it. Failures are always logged. |
 | `PGSTROM_GPUSERV_SPEC_KEEP=1` | Keep the compiler's scratch directories (the generated `spec_gen.inc`) for inspection. |
 | `PGSTROM_GPUSERV_SPEC_GA_C=<n>`, `PGSTROM_GPUSERV_GROUP_PPW=<n>` | Tuning experiments: the slots of a specialized GROUP BY kernel's per-workgroup table (default: sized for the groups seen) and the pages a GROUP BY workgroup runs over. |
-| `PGSTROM_GPUSERV_TIMEOUT_MS=<n>` | Time the service waits for one GPU dispatch before it declares the device lost (default 10000 ms; 300000 ms when the device is a CPU Vulkan device, which compiles each kernel at its first dispatch). |
+| `PGSTROM_GPUSERV_TIMEOUT_MS=<n>` | Time the service waits for one GPU dispatch before it declares the device lost (default 10000 ms; 300000 ms when the device is a CPU Vulkan device, which compiles each kernel at its first dispatch). The first dispatch of each pipeline gets 600000 ms instead, because the driver may compile the shader then (Metal, lavapipe); a value you set here applies to that dispatch too. |
 
 ## Server settings that matter
 

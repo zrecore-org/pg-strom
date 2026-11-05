@@ -349,6 +349,8 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 
 		if (e && atoi(e) > 0)
 			ctx->timeout_ms = (uint32_t) atoi(e);
+		/* an explicit limit applies to the first dispatch too */
+		ctx->first_timeout_ms = (e && atoi(e) > 0) ? ctx->timeout_ms : GPU_VK_FIRST_DISPATCH_TIMEOUT_MS;
 	}
 	ctx->unified_memtype = ctx->hostvis_memtype = -1;
 	ft = &ctx->feat;
@@ -375,6 +377,8 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 	if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU && ctx->timeout_ms < 300000 &&
 		!getenv("PGSTROM_GPUSERV_TIMEOUT_MS"))
 		ctx->timeout_ms = 300000;
+	if (ctx->first_timeout_ms < ctx->timeout_ms)
+		ctx->first_timeout_ms = ctx->timeout_ms;
 	api = min_u32(props.apiVersion, in.api);
 	have12 = (api >= VK_API_VERSION_1_2);
 	have13 = (api >= VK_API_VERSION_1_3);
@@ -1086,6 +1090,7 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 	VkSubmitInfo si;
 	VkResult	rc;
 	double		t0;
+	uint32_t	wait_ms;
 
 	if (elapsed_ms)
 		*elapsed_ms = 0.0;
@@ -1179,15 +1184,14 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 		CTX_ERR(ctx, "vkQueueSubmit failed: %s", vkr_str(rc));
 		return -1;
 	}
-	rc = vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE,
-						 (uint64_t) ctx->timeout_ms * 1000000ULL);
+	wait_ms = gpu_vk_wait_ms(ctx, p);
+	rc = vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE, (uint64_t) wait_ms * 1000000ULL);
 	if (elapsed_ms)
 		*elapsed_ms = now_ms() - t0;
 	if (rc == VK_TIMEOUT)
 	{
 		ctx->lost = 1;
-		CTX_ERR(ctx, "kernel did not finish within %u ms (device marked lost)",
-				ctx->timeout_ms);
+		CTX_ERR(ctx, "kernel did not finish within %u ms (device marked lost)", wait_ms);
 		return -1;
 	}
 	if (rc != VK_SUCCESS)
@@ -1203,5 +1207,6 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 		CTX_ERR(ctx, "vkResetFences failed: %s", vkr_str(rc));
 		return -1;
 	}
+	p->dispatched = 1;
 	return 0;
 }

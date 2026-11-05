@@ -14,6 +14,8 @@
 #define GPU_VK_ERRLEN			512
 #define GPU_VK_MAX_DEVICES		16
 #define GPU_VK_DEFAULT_TIMEOUT_MS	10000
+/* the first dispatch of a pipeline can include a lazy shader compile (Metal, lavapipe): minutes for the big kernels */
+#define GPU_VK_FIRST_DISPATCH_TIMEOUT_MS	600000
 
 /* result of enumeration (temporary instance, nothing opened) */
 typedef struct gpu_vk_devinfo
@@ -79,6 +81,7 @@ typedef struct gpu_vk_ctx
 
 	int					lost;					/* timeout or VK_ERROR_DEVICE_LOST seen */
 	uint32_t			timeout_ms;
+	uint32_t			first_timeout_ms;		/* limit for the first dispatch of a pipeline */
 	char				err[GPU_VK_ERRLEN];
 	char				ext_enabled[1024];		/* space separated list, for logs */
 
@@ -108,7 +111,15 @@ typedef struct gpu_vk_pipeline
 	VkDescriptorSet			dset;
 	uint32_t				nbind;
 	uint32_t				pc_size;
+	int						dispatched;			/* a dispatch of it has finished (the compile is paid) */
 } gpu_vk_pipeline;
+
+/* time limit for the next dispatch of 'p' */
+static inline uint32_t
+gpu_vk_wait_ms(const gpu_vk_ctx *ctx, const gpu_vk_pipeline *p)
+{
+	return p->dispatched ? ctx->timeout_ms : ctx->first_timeout_ms;
+}
 
 /*
  * Enumerate physical devices using a temporary instance. Returns the number of devices

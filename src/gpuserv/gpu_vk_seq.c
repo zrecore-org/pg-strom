@@ -78,6 +78,7 @@ gpu_vk_dispatch_seq(gpu_vk_ctx *ctx, const gpu_vk_step *steps, uint32_t nsteps, 
 	VkSubmitInfo si;
 	VkResult	rc;
 	double		t0;
+	uint32_t	wait_ms = 0;
 	gpu_vk_pipeline *cur = NULL;
 
 	if (elapsed_ms)
@@ -93,6 +94,9 @@ gpu_vk_dispatch_seq(gpu_vk_ctx *ctx, const gpu_vk_step *steps, uint32_t nsteps, 
 	{
 		gpu_vk_pipeline *p = steps[s].p;
 		int			seen = 0;
+
+		if (gpu_vk_wait_ms(ctx, p) > wait_ms)
+			wait_ms = gpu_vk_wait_ms(ctx, p);	/* a step that was never dispatched pays for its compile */
 
 		for (uint32_t u = 0; u < s; u++)
 			if (steps[u].p == p)
@@ -163,13 +167,13 @@ gpu_vk_dispatch_seq(gpu_vk_ctx *ctx, const gpu_vk_step *steps, uint32_t nsteps, 
 		seq_err(ctx, "vkQueueSubmit failed (%d)", (int) rc);
 		return -1;
 	}
-	rc = vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE, (uint64_t) ctx->timeout_ms * 1000000ULL);
+	rc = vkWaitForFences(ctx->dev, 1, &ctx->fence, VK_TRUE, (uint64_t) wait_ms * 1000000ULL);
 	if (elapsed_ms)
 		*elapsed_ms = seq_now_ms() - t0;
 	if (rc == VK_TIMEOUT)
 	{
 		ctx->lost = 1;
-		seq_err(ctx, "kernel did not finish within %u ms (device marked lost)", ctx->timeout_ms);
+		seq_err(ctx, "kernel did not finish within %u ms (device marked lost)", wait_ms);
 		return -1;
 	}
 	if (rc != VK_SUCCESS)
@@ -184,5 +188,7 @@ gpu_vk_dispatch_seq(gpu_vk_ctx *ctx, const gpu_vk_step *steps, uint32_t nsteps, 
 		seq_err(ctx, "vkResetFences failed");
 		return -1;
 	}
+	for (uint32_t s = 0; s < nsteps; s++)
+		steps[s].p->dispatched = 1;
 	return 0;
 }

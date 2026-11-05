@@ -1032,6 +1032,24 @@ __pickupNextXpuCommand(XpuConnection *conn)
 	return xcmd;
 }
 
+/*
+ * __xpuConnectLostError
+ *
+ * The session worker saw the socket close (the GPU service exited or was restarted) while commands were
+ * still running: their results will never arrive, so waiting on them would hang the backend. Called with
+ * conn->mutex held; releases it.
+ */
+static void
+__xpuConnectLostError(XpuConnection *conn)
+{
+	pthreadMutexUnlock(&conn->mutex);
+	ereport(ERROR,
+			(errcode(ERRCODE_CONNECTION_FAILURE),
+			 errmsg("PG-Strom: the connection to the GPU service was lost"),
+			 errdetail("The service exited or was restarted while this query was running."),
+			 errhint("See the server log for the reason, for example a kernel that did not finish in time.")));
+}
+
 static XpuCommand *
 __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 {
@@ -1063,7 +1081,9 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 		}
 		else if (conn->num_running_cmds > 0)
 		{
-			/* wait for the running commands */
+			/* wait for the running commands, unless the service is gone */
+			if (conn->terminated != 0)
+				__xpuConnectLostError(conn);
 			pthreadMutexUnlock(&conn->mutex);
 		}
 		else
@@ -1176,6 +1196,8 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 			 * tasks, but none of them are already finished.
 			 * So, let's wait for the response.
 			 */
+			if (conn->terminated != 0)
+				__xpuConnectLostError(conn);
 			ResetLatch(MyLatch);
 			pthreadMutexUnlock(&conn->mutex);
 
