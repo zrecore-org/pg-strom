@@ -39,6 +39,7 @@ pg_strom.gpuserv_path = '$GPUSERV_BIN'
 pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
+sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break

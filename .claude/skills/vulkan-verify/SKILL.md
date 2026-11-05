@@ -36,6 +36,14 @@ STAGES="installcheck scan" sh test/gpuserv/verify_all.sh      # expect "All 23 t
 - Quick pass for plumbing changes: `NROWS=30000 STAGES="installcheck scan" TIMEOUT=3000 sh test/gpuserv/verify_all.sh`.
 - Optional stages: `fuzz`, `float8`, `postgis`, `arrow`, `gpucache` (see the header of `verify_all.sh`).
 
+## Keeping the machine usable
+
+`locked_test.sh` builds with `TEST_JOBS` jobs (default 3 of 8 cores) and runs the test at `nice -n 10` (`TEST_PRIORITY=nice`, the
+default; `background` = `taskpolicy -b` also throttles disk I/O and is about 5x slower; `TEST_FULL_SPEED=1` turns it off). The
+cluster settings come from `test/gpuserv/pgconf_test.sh` (fsync off, autovacuum off, parallel workers capped). GPU load is not
+limited: on macOS long kernels can make the display lag and trigger "Impacting Interactivity" (see gpu-hang-triage); never
+run several services at once on the Apple GPU (`scan_shards.sh` is for Linux/CI).
+
 ## 3. Reading results
 
 - `test-data/logs/<stamp>/<n>-<stage>.log` and `.log.times` (seconds per group of checks and the slowest checks, from

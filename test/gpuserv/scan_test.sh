@@ -60,6 +60,7 @@ pg_strom.gpuserv_path = '$GPUSERV_BIN'
 pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
+sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 # A6: every dispatch also runs the specialized kernel next to the VM's and compares them (spec_verify.c); a cache
 # directory of its own keeps the test from using (or filling) the user's; the log shows what the specializer did
 export PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check}

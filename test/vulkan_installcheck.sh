@@ -47,6 +47,7 @@ shared_preload_libraries = 'pg_strom'
 pg_strom.gpuserv_path = '$GPUSERV_BIN'
 pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 CONF
+	sh "$HERE/gpuserv/pgconf_test.sh" io >> "$ROOT/data/postgresql.conf"	# throwaway cluster: no fsync (cannot change a plan)
 fi
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w -o "-p $PORT -k $ROOT" start >/dev/null 2>&1 || { echo "start failed (see $ROOT/log)"; exit 1; }
 n=0; while [ $n -lt 60 ]; do

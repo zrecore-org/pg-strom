@@ -22,7 +22,19 @@ done
 echo $$ > "$LOCK/pid"; echo "$TREE" > "$LOCK/tree"
 trap 'rm -rf "$LOCK"' EXIT INT TERM
 BLOG=/tmp/locked_test_build.$$.log
-if ! make -C "$TREE/src" PG_CONFIG="$PG_CONFIG" -j8 install >"$BLOG" 2>&1; then
+# Resource use: the build uses TEST_JOBS processes (default 3 of the machine's 8 cores) and the test runs at a lower
+# priority so that the machine stays usable; the cluster, the GPU service and the compilers it starts inherit it.
+# TEST_PRIORITY=nice (default: nice -n 10), background (taskpolicy -b: also throttles disk I/O, several times slower) or full.
+# TEST_FULL_SPEED=1 is the same as TEST_PRIORITY=full.
+LOWPRI=
+[ -n "$TEST_FULL_SPEED" ] && TEST_PRIORITY=full
+case "${TEST_PRIORITY:-nice}" in
+	background) command -v taskpolicy >/dev/null 2>&1 && LOWPRI="taskpolicy -b" ;;
+	nice)       LOWPRI="nice -n 10" ;;
+	full)       ;;
+	*)          echo "locked_test: unknown TEST_PRIORITY=$TEST_PRIORITY (nice, background, full)"; exit 2 ;;
+esac
+if ! $LOWPRI make -C "$TREE/src" PG_CONFIG="$PG_CONFIG" -j"${TEST_JOBS:-3}" install >"$BLOG" 2>&1; then
 	grep -E "error:|\*\*\*" "$BLOG" | head -20
 	echo "locked_test: build/install failed (log: $BLOG)"
 	exit 2
@@ -44,7 +56,7 @@ if [ -z "$ROOT" ]; then
 	esac
 	ROOT=$OWN_ROOT; export ROOT
 fi
-GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} sh "$SCRIPT"
+GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} $LOWPRI sh "$SCRIPT"
 rc=$?
 
 # Free the disk once the test has passed (KEEP=1, KEEP_RUNNING=1, HOLD=1 and REUSE=1 keep the cluster; a failed

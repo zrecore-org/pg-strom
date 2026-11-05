@@ -20,6 +20,7 @@ shared_preload_libraries = 'pg_strom'
 pg_strom.gpuserv_path = '$GPUSERV_BIN'
 max_worker_processes = 24
 CONF
+sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 trap stop EXIT INT TERM
 export PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check}
 export PGSTROM_GPUSERV_CACHE_DIR=$ROOT/speccache

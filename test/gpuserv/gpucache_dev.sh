@@ -33,6 +33,7 @@ pg_strom.gpuserv_path = '$GPUSERV_BIN'
 pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
+sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 [ -z "$KEEP" ] && trap stop EXIT INT TERM
 [ -f /tmp/gc_trace ] && export PGSTROM_GPUSERV_TRACE=1
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
