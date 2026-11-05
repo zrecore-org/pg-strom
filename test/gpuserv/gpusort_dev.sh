@@ -13,7 +13,7 @@ ALLOW_CPU=${ALLOW_CPU:-off}
 ROOT=${ROOT:-/tmp/a7_dev}
 PORT=${PORT:-54401}
 NROWS=${NROWS:-300000}
-PSQL="$PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
+PSQL="${0%/*}/qtimeout.sh $ROOT/.query_timeout $PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
 fail=0
 
 check() { # name rc

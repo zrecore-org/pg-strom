@@ -12,8 +12,36 @@ ALLOW_CPU=${ALLOW_CPU:-off}
 ROOT=${ROOT:-/tmp/pgstrom_scan_test}
 PORT=${PORT:-54334}
 NROWS=${NROWS:-300000}
-PSQL="$PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
+PSQL="${0%/*}/qtimeout.sh $ROOT/.query_timeout $PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
 fail=0
+
+# ---- shards: SHARD=<i>/<n> runs one part of the tests (scan_shards.sh runs all n at once). The units are the tables of
+# the repeated loops (run, run_any, runprep, runagg, runagg_any and runjoin skip a table that is not this shard's) and the
+# sourced test files. The weights are seconds of a full run on an M1 and only balance the load: every check belongs to
+# exactly one shard, whatever the weights say. SHARD=1/1 (the default) runs everything.
+SHARD=${SHARD:-1/1}
+shard_i=${SHARD%/*}; shard_n=${SHARD#*/}
+SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fuzz:40 gist:30 gpusort:20"
+SHARD_MINE=$(echo $SHARD_UNITS | tr ' ' '\n' | sort -t: -k2 -nr | awk -F: -v n="$shard_n" -v me="$shard_i" \
+	'{ b = 1; for (k = 2; k <= n; k++) if (load[k] < load[b]) b = k; load[b] += $2; if (b == me) printf "%s ", $1 }')
+mine() { # does this shard run the unit? (a unit that is not in the list runs on shard 1)
+	case " $SHARD_UNITS " in
+	*" $1:"*) case " $SHARD_MINE " in *" $1 "*) return 0 ;; *) return 1 ;; esac ;;
+	*) [ "$shard_i" = 1 ] ;;
+	esac
+}
+# the helpers called from scan_test.sh itself skip a loop table that is not this shard's; inside a sourced test file
+# (IN_UNIT set) the whole file belongs to this shard and every call runs
+mine_tbl() {
+	[ -n "$IN_UNIT" ] && return 0
+	case " $SHARD_UNITS " in *" $1:"*) mine "$1" ;; *) return 0 ;; esac
+}
+unit_source() { # <unit> <file>
+	mine "$1" || return 0
+	IN_UNIT=1
+	. "$2"
+	IN_UNIT=
+}
 
 check() { # name rc
 	if [ "$2" -eq 0 ]; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=$((fail+1)); fi
@@ -69,6 +97,7 @@ q() { # query -> md5 of the sorted result text
 	$PSQL -d scantest -c "$1 select md5(coalesce(string_agg(x::text, E'\n' order by x::text), '')), count(*) from ($2) x" 2>&1 | tail -1
 }
 run() { # table, label, query-with-%T
+	mine_tbl "$1" || return 0
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g")
 	plan=$($PSQL -d scantest -c "$GPU explain $qry" | grep -c "Custom Scan (GpuScan)")
 	g=$(q "$GPU" "$qry"); c=$(q "$CPU" "$qry")
@@ -77,12 +106,14 @@ run() { # table, label, query-with-%T
 }
 
 run_any() { # like run, but the plan need not use GpuScan (the expression may stay on the CPU)
+	mine_tbl "$1" || return 0
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g")
 	g=$(q "$GPU" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$g" = "$c" ] && [ "${g#*|}" != "" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
 	else echo "  FAIL  $tbl: $label"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 runprep() { # table, label, prepared query with $1/$2, execute arguments
+	mine_tbl "$1" || return 0
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); args=$4
 	pre="set plan_cache_mode=force_generic_plan; prepare pq(int, int) as select md5(coalesce(string_agg(x::text, E'\\n' order by x::text), '')), count(*) from ($qry) x; execute pq($args);"
 	g=$($PSQL -d scantest -c "$GPU $pre" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $pre" 2>&1 | tail -1)
@@ -124,9 +155,11 @@ done
 
 echo "aggregation (GpuPreAgg)"
 runagg() { # table, label, query-with-%T [, settings]; the plan must use GpuPreAgg
+	mine_tbl "$1" || return 0
 	ANYPLAN=0; __runagg "$@"
 }
 runagg_any() { # the same, but the aggregate may also stay on the CPU (results must match)
+	mine_tbl "$1" || return 0
 	ANYPLAN=1; __runagg "$@"
 }
 __runagg() {
@@ -166,7 +199,7 @@ done
 runagg s1 "parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 runagg_any s1 "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
 runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
-plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?
+if mine_tbl s1; then plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?; fi
 
 echo "joins"
 sql "create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp,
@@ -177,6 +210,7 @@ sql "analyze sd"
 JOINPAT="Custom Scan (GpuJoin)"
 JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
 runjoin() { # table, label, query-with-%T and %D [, settings]; the plan must use GpuJoin
+	mine_tbl "$1" || return 0
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g"); set_extra=${4:-}
 	plan=$($PSQL -d scantest -c "$GPU $JOINSET $set_extra explain $qry" | grep -c "$JOINPAT")
 	g=$(q "$GPU $JOINSET $set_extra" "$qry"); c=$(q "$CPU" "$qry")
@@ -315,7 +349,7 @@ runjoin s1 "RIGHT JOIN, parallel workers (not offloaded: the unmatched rows are 
 JOINSET="$JOINSET_SAVE"
 
 # ---- aggregation over a join (GpuPreAgg on GpuJoin), with and without GROUP BY
-. "${0%/*}/joinagg_tests.inc"
+unit_source joinagg "${0%/*}/joinagg_tests.inc"
 
 echo "arrow (Arrow_Fdw)"
 # The foreign tables read Arrow IPC files written by arrow_gen.cpp (the arrow-tools do not build on macOS).
@@ -373,36 +407,42 @@ runagg_any a1 "GROUP BY over an Arrow table" "select a % 10 as k, count(*), sum(
 runjoin a1 "join with a heap table (Arrow side stays a GpuScan)" "select t.i, d.grp from %T t join %D d on t.b = d.k where t.a > 9000"
 runjoin a1 "Arrow table as the inner relation" "select t.i, x.i from s1 t join %T x on t.b = x.b where t.a > 9900 and x.a > 9900"
 ANYPLAN=0
+if mine_tbl a1; then
 g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0; set parallel_leader_participation=off;" "select a, c, f from a1 where b < 1000")
 c=$(q "$CPU" "select a, c, f from a1 where b < 1000")
 [ "$g" = "$c" ]; check "parallel GpuScan on an Arrow table matches the CPU" $?
 g=$($PSQL -d scantest -c "$GPU select c / a from a1 where b < 0" 2>&1 | head -1)
 echo "$g" | grep -q "division by zero" ; check "a1: division by zero is reported on the GPU" $?
+fi
 
-. "${0%/*}/arrow_tests.inc"
-. "${0%/*}/types_tests.inc"
-. "${0%/*}/numeric_tests.inc"
-. "${0%/*}/jsonb_tests.inc"
-. "${0%/*}/float8_tests.inc"
-. "${0%/*}/postgis_tests.inc"
-. "${0%/*}/gist_tests.inc"
-. "${0%/*}/fuzz_regress.inc"
-. "${0%/*}/gpusort_tests.inc"
-. "${0%/*}/gpucache_tests.inc"
-. "${0%/*}/spec_tests.inc"
+unit_source arrow "${0%/*}/arrow_tests.inc"
+unit_source types "${0%/*}/types_tests.inc"
+unit_source numeric "${0%/*}/numeric_tests.inc"
+unit_source jsonb "${0%/*}/jsonb_tests.inc"
+unit_source float8 "${0%/*}/float8_tests.inc"
+unit_source postgis "${0%/*}/postgis_tests.inc"
+unit_source gist "${0%/*}/gist_tests.inc"
+unit_source fuzz "${0%/*}/fuzz_regress.inc"
+unit_source gpusort "${0%/*}/gpusort_tests.inc"
+unit_source gpucache "${0%/*}/gpucache_tests.inc"
+unit_source spec "${0%/*}/spec_tests.inc"
 
 echo "errors"
+if mine_tbl s1; then
 for t in s1; do
 	g=$($PSQL -d scantest -c "$GPU select c / a from $t where b < 0" 2>&1 | head -1)
 	c=$($PSQL -d scantest -c "$CPU select c / a from $t where b < 0" 2>&1 | head -1)
 	echo "$g" | grep -q "division by zero" ; check "$t: division by zero is reported on the GPU" $?
 	echo "$c" | grep -q "division by zero" ; check "$t: ... and on the CPU" $?
 done
+fi
 
 echo "parallel workers"
+if mine_tbl s1; then
 g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;" "select a, c from s1 where b < 1000")
 c=$(q "$CPU" "select a, c from s1 where b < 1000")
 [ "$g" = "$c" ]; check "parallel GpuScan matches the CPU" $?
+fi
 
 [ -z "$KEEP" ] && stop
 echo

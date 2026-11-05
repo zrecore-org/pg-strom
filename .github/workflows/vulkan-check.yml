@@ -55,6 +55,9 @@ env:
   # (The Makefile in src/gpuserv looks for ~/tools/slang-2026.20/bin/slangc by itself.)
   SLANG_VERSION: "2026.20"
   PG_MAJOR: "17"
+  # where the Linux jobs keep compiled shaders between runs (the cache step below restores them)
+  MESA_SHADER_CACHE_DIR: ${{ github.workspace }}/.cache/mesa
+  XDG_CACHE_HOME: ${{ github.workspace }}/.cache/xdg
 
 jobs:
   linux-lavapipe:
@@ -117,6 +120,19 @@ jobs:
           test -x "$SLANGC"
           echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
           "$SLANGC" -v
+
+      # A kernel changes rarely, so the driver's compiled shaders (lavapipe: Mesa's shader cache; the service's
+      # pipeline cache) are kept between runs. The key follows the kernel sources: a changed kernel recompiles,
+      # the others are found in the restored cache.
+      - name: Restore the shader and pipeline caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/mesa
+            .cache/xdg
+          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+          restore-keys: |
+            shader-cache-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Show the Vulkan devices (informational)
         continue-on-error: true
@@ -345,6 +361,19 @@ jobs:
           test -x "$SLANGC"
           echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
           "$SLANGC" -v
+
+      # A kernel changes rarely, so the driver's compiled shaders (lavapipe: Mesa's shader cache; the service's
+      # pipeline cache) are kept between runs. The key follows the kernel sources: a changed kernel recompiles,
+      # the others are found in the restored cache.
+      - name: Restore the shader and pipeline caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/mesa
+            .cache/xdg
+          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+          restore-keys: |
+            shader-cache-${{ runner.os }}-${{ runner.arch }}-
 
       - name: What the GPU runner has (informational)
         continue-on-error: true

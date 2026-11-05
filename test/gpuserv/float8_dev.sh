@@ -12,7 +12,7 @@ GPUSERV_BIN=${GPUSERV_BIN:?set GPUSERV_BIN to the pgstrom-gpuserv binary}
 ALLOW_CPU=${ALLOW_CPU:-off}
 ROOT=${ROOT:-/tmp/f8_dev}
 PORT=${PORT:-54403}
-PSQL="$PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
+PSQL="${0%/*}/qtimeout.sh $ROOT/.query_timeout $PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
 fail=0
 
 check() { # name rc
