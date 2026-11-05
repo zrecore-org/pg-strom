@@ -1279,8 +1279,16 @@ classify_geometry(const char *name)
 	else if (!strcmp(name, "st_dwithin"))
 		{ fc.cls = SOP_GEOMDWITHIN; fc.kind = 0; }
 	/* st_makepoint(x, y), st_point(x, y): only as the point of the above (fused); st_setsrid(point, const) likewise */
-	else if (!strcmp(name, "st_makepoint2") || !strcmp(name, "st_point"))
+	else if (!strcmp(name, "st_makepoint2") || !strcmp(name, "st_point") ||
+			 !strcmp(name, "st_makepoint3") || !strcmp(name, "st_makepoint4"))
 		{ fc.cls = SOP_GEOMMK; fc.kind = 0; }
+	/* 3D (A11 part 4): ST_Z / ST_M of a point, ST_3DDWithin of two points */
+	else if (!strcmp(name, "st_z"))
+		{ fc.cls = SOP_GEOMZM; fc.kind = 0; }
+	else if (!strcmp(name, "st_m"))
+		{ fc.cls = SOP_GEOMZM; fc.kind = 1; }
+	else if (!strcmp(name, "st_3ddwithin"))
+		{ fc.cls = SOP_GEOM3DDW; fc.kind = 0; }
 	else if (!strcmp(name, "st_setsrid"))
 		{ fc.cls = SOP_GEOMMK; fc.kind = 1; }
 	return fc;

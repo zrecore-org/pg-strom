@@ -1767,6 +1767,133 @@ uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
     return 0u;
 }
 
+// A point with its coordinates for the 3D functions: like gdw_load() plus the Z (hz false: the point has no Z value)
+uint gdw3_load(Reg r, inout uint srid, inout uint64_t px, inout uint64_t py, inout uint64_t pz, inout bool hz, inout bool empty)
+{
+    uint s = str_src(r);
+    uint b = str_off(r);
+    uint l = str_len(r);
+    GHead h = geom_head(s, b, l);
+    if (h.bad != 0u || h.gtype != 1u || (h.flags & 0x0cu) != 0u || h.pos + 8u > l)
+        return SOP_RECHECK_CODE;
+    srid = h.srid;
+    uint npts = ldw_s(s, b + h.pos + 4u);
+    empty = (npts == 0u);
+    hz = ((h.flags & 1u) != 0u);
+    if (!empty)
+    {
+        uint nd = 2u + (h.flags & 1u) + ((h.flags >> 1) & 1u);
+        if (npts != 1u || h.pos + 8u + 8u * nd > l)
+            return SOP_RECHECK_CODE;
+        px = ld64s(s, b + h.pos + 8u);
+        py = ld64s(s, b + h.pos + 16u);
+        if (hz)
+            pz = ld64s(s, b + h.pos + 24u);
+    }
+    return 0u;
+}
+
+// ST_Z (k0 = 0) and ST_M (k0 = 1) of a point
+uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+{
+    Reg a = regs[ra];
+    if (a.isnull != 0u)
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint s = str_src(a);
+    uint b = str_off(a);
+    uint l = str_len(a);
+    GHead h = geom_head(s, b, l);
+    if (h.bad != 0u || h.gtype != 1u || (h.flags & 0x0cu) != 0u || h.pos + 8u > l)
+        return SOP_RECHECK_CODE;                        // not a POINT (PostGIS raises), geodetic, malformed
+    uint npts = ldw_s(s, b + h.pos + 4u);
+    uint hz = h.flags & 1u;
+    uint hm = (h.flags >> 1) & 1u;
+    uint nd = 2u + hz + hm;
+    uint idx = (k0 == 0u) ? 2u : 2u + hz;
+    if (npts == 0u || (k0 == 0u ? hz == 0u : hm == 0u))
+    {
+        regs[dst].isnull = 1u;                          // an empty point, or no such dimension
+        return 0u;
+    }
+    if (npts != 1u || h.pos + 8u + 8u * nd > l)
+        return SOP_RECHECK_CODE;
+    regs[dst].isnull = 0u;
+    regs[dst].v = int64_t(ld64s(s, b + h.pos + 8u + 8u * idx));
+    return 0u;
+}
+
+// ST_3DDWithin of two points (GEOM3DDW), the same as geom_3ddwithin() of cpu_vm.c
+uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    Reg a = regs[ra];
+    Reg b = regs[rb];
+    bool fa = (k0 & SOP_GDW_FUSED_A) != 0u;
+    bool fb = (k0 & SOP_GDW_FUSED_B) != 0u;
+    Reg ya = regs[(k0 >> 8) & 0xffu];
+    Reg yb = regs[(k0 >> 16) & 0xffu];
+    Reg t = regs[k0 >> 24];
+    Reg za = regs[(k1 >> 20) & 0x1fu];
+    Reg zb = regs[(k1 >> 25) & 0x1fu];
+    if ((a.isnull | b.isnull | t.isnull) != 0u || (fa && (ya.isnull | za.isnull) != 0u) || (fb && (yb.isnull | zb.isnull) != 0u))
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint sa = k1 & 0xfffffu;
+    uint sb = sa;
+    uint64_t ax = uint64_t(a.v);
+    uint64_t ay = uint64_t(ya.v);
+    uint64_t az = uint64_t(za.v);
+    uint64_t bx = uint64_t(b.v);
+    uint64_t by = uint64_t(yb.v);
+    uint64_t bz = uint64_t(zb.v);
+    bool ea = false;
+    bool eb = false;
+    bool hza = true;
+    bool hzb = true;
+    if (!fa && gdw3_load(a, sa, ax, ay, az, hza, ea) != 0u)
+        return SOP_RECHECK_CODE;
+    if (!fb && gdw3_load(b, sb, bx, by, bz, hzb, eb) != 0u)
+        return SOP_RECHECK_CODE;
+    if (sa != sb)
+        return SOP_RECHECK_CODE;                        // PostGIS raises "mixed SRID": the backend does
+    if (ea || eb || !hza || !hzb)
+        return SOP_RECHECK_CODE;                        // empty; or no Z: PostGIS raises a NOTICE and measures in 2D
+    uint64_t tol = uint64_t(t.v);
+    if (f64_nonfinite(tol) || ((tol >> 63) != 0ull && (tol & F64_MAG) != 0ull))
+        return SOP_RECHECK_CODE;                        // negative (PostGIS raises), NaN or infinite
+    if (f64_nonfinite(ax) || f64_nonfinite(ay) || f64_nonfinite(az) || f64_nonfinite(bx) || f64_nonfinite(by) || f64_nonfinite(bz))
+        return SOP_RECHECK_CODE;
+    uint64_t dx = f64_sub(ax, bx);
+    uint64_t dy = f64_sub(ay, by);
+    uint64_t dz = f64_sub(az, bz);
+    if (f64_nonfinite(dx) || f64_nonfinite(dy) || f64_nonfinite(dz))
+        return SOP_RECHECK_CODE;
+    bool res = false;
+    if (((dx | dy | dz) & F64_MAG) == 0ull)
+        res = true;                                     // the same point: distance 0 <= tolerance
+    else
+    {
+        uint64_t d2 = f64_add(f64_add(f64_mul(dx, dx), f64_mul(dy, dy)), f64_mul(dz, dz));
+        uint64_t r2 = f64_mul(tol, tol);
+        if (f64_nonfinite(d2) || f64_nonfinite(r2) || (d2 & F64_MAG) < GDW_TINY ||
+            ((r2 & F64_MAG) != 0ull && (r2 & F64_MAG) < GDW_TINY))
+            return SOP_RECHECK_CODE;
+        if (f64_le(d2, f64_mul(r2, GDW_LO)))
+            res = true;
+        else if (f64_lt(f64_mul(r2, GDW_HI), d2))
+            res = false;
+        else
+            return SOP_RECHECK_CODE;                    // within 2^-47 of the boundary
+    }
+    regs[dst].isnull = 0u;
+    regs[dst].v = res ? 1 : 0;
+    return 0u;
+}
+
 // Returns 0 (res set), or SOP_RECHECK_CODE. a: the polygon register; b: the point register, or with SOP_GPIP_FUSED
 // the float8 x (xv) and y (yv) of a point with SRID fsrid.
 uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
@@ -2076,18 +2203,40 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         return 0;
     }
     default:
+#ifndef VM_NO_NUM
         if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
             return vm_num(op, dst, ra, rb, k0, k1, regs);
+#endif
+#ifndef VM_NO_JSON
         if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
             return vm_json(op, dst, ra, rb, k0, regs);
+#endif
+#ifndef VM_NO_F8
         if (op >= SOP_CMPD && op <= SOP_D2F)
             return vm_f8(op, dst, ra, rb, k0, k1, regs);
+#endif
+#ifndef VM_NO_GEOM
         if (op == SOP_GEOMBOX)
             return vm_geom(op, dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMPIP)
             return vm_geom_pip(dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMDWITHIN)
             return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
+#endif
+#ifndef WITH_INNER      // the planner keeps these out of join programs; their soft-float code made Metal take minutes
+        if (op == SOP_GEOMZM)
+            return vm_geom_zm(dst, ra, k0, regs);
+        if (op == SOP_GEOM3DDW)
+            return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
+#endif
+        if (op == SOP_NULLMRG)
+        {
+            Reg x = regs[ra];
+            Reg y = regs[rb];
+            regs[dst].v = x.v;
+            regs[dst].isnull = x.isnull | y.isnull;
+            return 0u;
+        }
         return op | 0x80000000u;    // malformed program
     }
     return 0;

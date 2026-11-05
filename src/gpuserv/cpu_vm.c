@@ -951,6 +951,109 @@ geom_dwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, ui
 	return 0;
 }
 
+static uint32_t
+gdw3_load(const unsigned char *p, uint32_t len, uint32_t *srid, uint64_t *px, uint64_t *py, uint64_t *pz, int *hz, int *empty)
+{
+	uint32_t	gtype, pos, flags, npts;
+
+	if (geom_head(p, len, &gtype, srid, &pos, &flags) || gtype != GEOM_POINTTYPE || (flags & 0x0c) != 0 ||
+		pos + 8 > len)
+		return SOP_RECHECK_CODE;
+	npts = ld32u(p + pos + 4);
+	*empty = (npts == 0);
+	*hz = ((flags & 1) != 0);
+	if (npts != 0)
+	{
+		uint32_t	nd = 2 + (flags & 1) + ((flags >> 1) & 1);
+
+		if (npts != 1 || pos + 8 + 8 * nd > len)
+			return SOP_RECHECK_CODE;
+		*px = ld64u(p + pos + 8);
+		*py = ld64u(p + pos + 16);
+		if (*hz)
+			*pz = ld64u(p + pos + 24);
+	}
+	return 0;
+}
+
+/* ST_Z (k0 = 0) / ST_M (k0 = 1) of a point: the same as vm_geom_zm() of scan_common.slang */
+static uint32_t
+geom_zm(const unsigned char *p, uint32_t len, uint32_t k0, int *isnull, uint64_t *val)
+{
+	uint32_t	gtype, srid, pos, flags, npts, hz, hm, idx;
+
+	if (geom_head(p, len, &gtype, &srid, &pos, &flags) || gtype != GEOM_POINTTYPE || (flags & 0x0c) != 0 || pos + 8 > len)
+		return SOP_RECHECK_CODE;
+	npts = ld32u(p + pos + 4);
+	hz = flags & 1;
+	hm = (flags >> 1) & 1;
+	idx = (k0 == 0 ? 2 : 2 + hz);
+	*isnull = 0;
+	if (npts == 0 || (k0 == 0 ? hz == 0 : hm == 0))
+	{
+		*isnull = 1;
+		return 0;
+	}
+	if (npts != 1 || pos + 8 + 8 * (2 + hz + hm) > len)
+		return SOP_RECHECK_CODE;
+	*val = ld64u(p + pos + 8 + 8 * idx);
+	return 0;
+}
+
+/* the same as vm_geom_3ddwithin() of scan_common.slang */
+static uint32_t
+geom_3ddwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1, int *res)
+{
+	vm_reg		a = regs[ra], b = regs[rb];
+	vm_reg		ya = regs[(k0 >> 8) & 0xff], yb = regs[(k0 >> 16) & 0xff], t = regs[k0 >> 24];
+	vm_reg		za = regs[(k1 >> 20) & 0x1f], zb = regs[(k1 >> 25) & 0x1f];
+	int			fa = (k0 & SOP_GDW_FUSED_A) != 0, fb = (k0 & SOP_GDW_FUSED_B) != 0;
+	uint32_t	sa = k1 & 0xfffff, sb = sa;
+	uint64_t	ax = (uint64_t) a.v, ay = (uint64_t) ya.v, az = (uint64_t) za.v;
+	uint64_t	bx = (uint64_t) b.v, by = (uint64_t) yb.v, bz = (uint64_t) zb.v;
+	uint64_t	tol, dx, dy, dz;
+	int			ea = 0, eb = 0, hza = 1, hzb = 1;
+
+	if (!fa && gdw3_load(str_ptr(env, a.v), str_len(a.v), &sa, &ax, &ay, &az, &hza, &ea))
+		return SOP_RECHECK_CODE;
+	if (!fb && gdw3_load(str_ptr(env, b.v), str_len(b.v), &sb, &bx, &by, &bz, &hzb, &eb))
+		return SOP_RECHECK_CODE;
+	if (sa != sb)
+		return SOP_RECHECK_CODE;
+	if (ea || eb || !hza || !hzb)
+		return SOP_RECHECK_CODE;
+	tol = (uint64_t) t.v;
+	if (F64_NONFINITE(tol) || ((tol >> 63) != 0 && (tol & F64_MAG) != 0))
+		return SOP_RECHECK_CODE;
+	if (F64_NONFINITE(ax) || F64_NONFINITE(ay) || F64_NONFINITE(az) ||
+		F64_NONFINITE(bx) || F64_NONFINITE(by) || F64_NONFINITE(bz))
+		return SOP_RECHECK_CODE;
+	dx = f64_sub(ax, bx);
+	dy = f64_sub(ay, by);
+	dz = f64_sub(az, bz);
+	if (F64_NONFINITE(dx) || F64_NONFINITE(dy) || F64_NONFINITE(dz))
+		return SOP_RECHECK_CODE;
+	*res = 0;
+	if (((dx | dy | dz) & F64_MAG) == 0)
+		*res = 1;
+	else
+	{
+		uint64_t	d2 = f64_add(f64_add(f64_mul(dx, dx), f64_mul(dy, dy)), f64_mul(dz, dz));
+		uint64_t	r2 = f64_mul(tol, tol);
+
+		if (F64_NONFINITE(d2) || F64_NONFINITE(r2) || (d2 & F64_MAG) < GDW_TINY ||
+			((r2 & F64_MAG) != 0 && (r2 & F64_MAG) < GDW_TINY))
+			return SOP_RECHECK_CODE;
+		if (f64_le(d2, f64_mul(r2, GDW_LO)))
+			*res = 1;
+		else if (f64_lt(f64_mul(r2, GDW_HI), d2))
+			*res = 0;
+		else
+			return SOP_RECHECK_CODE;
+	}
+	return 0;
+}
+
 /* the instructions that A6 added; the same as vm_ext() of scan_common.slang */
 static uint32_t
 vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
@@ -989,6 +1092,50 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 			regs[dst].v = res;
 			return 0;
 		}
+		case SOP_GEOMZM:
+		{
+			vm_reg		a = regs[ra];
+			int			isnull = 0;
+			uint64_t	val = 0;
+			uint32_t	rc;
+
+			if (a.isnull)
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			rc = geom_zm(str_ptr(env, a.v), str_len(a.v), k0, &isnull, &val);
+			if (rc != 0)
+				return rc;
+			regs[dst].isnull = isnull;
+			if (!isnull)
+				regs[dst].v = (int64_t) val;
+			return 0;
+		}
+		case SOP_GEOM3DDW:
+		{
+			vm_reg		a = regs[ra], b = regs[rb];
+			int			res = 0;
+			uint32_t	rc;
+
+			if (a.isnull || b.isnull || regs[k0 >> 24].isnull ||
+				((k0 & SOP_GDW_FUSED_A) && (regs[(k0 >> 8) & 0xff].isnull || regs[(k1 >> 20) & 0x1f].isnull)) ||
+				((k0 & SOP_GDW_FUSED_B) && (regs[(k0 >> 16) & 0xff].isnull || regs[(k1 >> 25) & 0x1f].isnull)))
+			{
+				regs[dst].isnull = 1;
+				return 0;
+			}
+			rc = geom_3ddwithin(env, regs, ra, rb, k0, k1, &res);
+			if (rc != 0)
+				return rc;
+			regs[dst].isnull = 0;
+			regs[dst].v = res;
+			return 0;
+		}
+		case SOP_NULLMRG:
+			regs[dst].v = regs[ra].v;
+			regs[dst].isnull = (regs[ra].isnull || regs[rb].isnull);
+			return 0;
 		case SOP_GEOMDWITHIN:
 		{
 			vm_reg		a = regs[ra], b = regs[rb];

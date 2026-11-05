@@ -28,6 +28,17 @@ typedef struct scan_proj_attr
 	int			comp_numeric;		/* SCAN_PROJ_COMP: a numeric { unscaled, scale }; the NULL word carries the scale */
 } scan_proj_attr;
 
+/*
+ * The optional instruction groups of the interpreter (kernels_vm/scan_common.slang compiles each out with -DVM_NO_<group>).
+ * A program that uses none of them runs on the "lite" join kernels, whose pipelines compile in a fraction of the time
+ * (Metal needs minutes for the full join kernel; see the Makefile).
+ */
+#define SCAN_FEAT_NUM	0x1			/* numeric */
+#define SCAN_FEAT_JSON	0x2			/* jsonb */
+#define SCAN_FEAT_F8	0x4			/* float8 (software binary64) */
+#define SCAN_FEAT_GEOM	0x8			/* geometry */
+#define SCAN_FEAT_ALL	0xf
+
 typedef struct scan_prog
 {
 	uint32_t	   *words;			/* program for the kernel */
@@ -36,6 +47,7 @@ typedef struct scan_prog
 	scan_proj_attr *attrs;
 	uint32_t		ncomp;			/* number of computed values per matching row */
 	int				nregs;			/* registers the program needs (selects the kernel variant) */
+	uint32_t		feat;			/* SCAN_FEAT_* groups the instructions use (0: the lite kernels will do) */
 	int				max_src_resno;	/* highest source column copied as is */
 	/* join (GpuJoin) */
 	int				join_mode;

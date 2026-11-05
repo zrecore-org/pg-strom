@@ -111,6 +111,22 @@
  *            non-finite coordinate or intermediate, an underflow, a multipoint, a line or a geodetic operand returns
  *            SCANVM_RECHECK_CODE. An empty point is false.
  *
+ *   GEOMZM   dst = ST_Z(point) (k0 = 0) or ST_M(point) (k0 = 1): the float8 bits of the coordinate. NULL (as PostGIS) for a point
+ *            without that dimension, an empty point and a NULL geometry; NaN, Infinity and -0 pass through. Every other
+ *            geometry type (PostGIS raises "Argument to ST_Z() must have type POINT"), a geodetic point and a malformed value
+ *            return SCANVM_RECHECK_CODE: the backend evaluates the row and raises the error in its own order.
+ *
+ *   GEOM3DDW dst = ST_3DDWithin(point, point, tolerance), the layout of GEOMDWITHIN with the Z of a fused point in a register
+ *            too: bits 0..19 of k1 are the SRID, bits 20..24 the register of the Z of a (fused), bits 25..29 that of b. PostGIS
+ *            raises a NOTICE when an operand has no Z value ("the unknown z-value will be regarded as any value") and the
+ *            distance is then 2D: such a row, an empty point, a SRID mismatch, a negative, NaN or infinite tolerance,
+ *            non-finite coordinates, an overflow or underflow and the boundary (the same 2^-47 band as GEOMDWITHIN, measured on
+ *            300,000 pairs: PostGIS' 3D distance is within 3e-16 of sqrt(dx*dx + dy*dy + dz*dz)) return SCANVM_RECHECK_CODE.
+ *
+ *   NULLMRG  dst = a with the null flag of a or b: st_makepoint(x, y, z[, m]) is NULL when any argument is; the 2D functions
+ *            that take the fused point get its y register through this, so the Z and M expressions are computed too (their
+ *            errors reach the user).
+ *
  * A failing instruction returns k1 | reason << 16 (SCANVM_ERR_*).
  */
 SCANVM_OP(CONST,    1)
@@ -163,6 +179,9 @@ SCANVM_OP(GEOMPIP,    131)
 /* never emitted: the class of st_makepoint / st_point (kind 0) and st_setsrid (kind 1), which only a GEOMPIP argument may use */
 SCANVM_OP(GEOMMK,     132)
 SCANVM_OP(GEOMDWITHIN, 133)
+SCANVM_OP(GEOMZM,     134)
+SCANVM_OP(GEOM3DDW,   135)
+SCANVM_OP(NULLMRG,    136)
 /* GEOMPIP: the operands of the function (kind) and the flags of k0 */
 SCANVM_OP(GPIP_POLY_POINT,  0)
 SCANVM_OP(GPIP_POINT_POLY,  1)

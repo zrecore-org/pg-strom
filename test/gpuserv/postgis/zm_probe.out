@@ -1,0 +1,108 @@
+POSTGIS="3.7.0 0" [EXTENSION] PGSQL="170" GEOS="3.15.0-CAPI-1.21.0" PROJ="9.9.0 NETWORK_ENABLED=OFF URL_ENDPOINT=https://cdn.proj.org USER_WRITABLE_DIRECTORY=/Users/aalbino/Library/Application Support/proj DATABASE_PATH=/opt/homebrew/Cellar/proj/9.9.0/share/proj/proj.db" (compiled against PROJ 9.9.0) LIBXML="2.15.4" LIBJSON="0.19" LIBPROTOBUF="1.5.2" WAGYU="0.5.0 (Internal)"
+-- ST_Z / ST_M: Z, M, ZM, 2D, empties, NaN, SRID, non-points, NULL
+bigz|1e+308|NULL|3
+coll|ERR[XX000]:Argument to ST_Z() must have type POINT|ERR[XX000]:Argument to ST_M() must have type POINT|3
+e2|NULL|NULL|2
+em|NULL|NULL|3
+ez|NULL|NULL|3
+infz|Infinity|NULL|3
+line|ERR[XX000]:Argument to ST_Z() must have type POINT|ERR[XX000]:Argument to ST_M() must have type POINT|3
+multi|ERR[XX000]:Argument to ST_Z() must have type POINT|ERR[XX000]:Argument to ST_M() must have type POINT|3
+nanx|3|NULL|3
+nanz|NaN|NULL|3
+negz|-0|NULL|3
+null|NULL|NULL|NULL
+p2d|NULL|NULL|2
+pm|NULL|4|3
+poly|ERR[XX000]:Argument to ST_Z() must have type POINT|ERR[XX000]:Argument to ST_M() must have type POINT|3
+pz|3|NULL|3
+pzm|3|4|4
+srid|3|NULL|3
+tinyz|5e-324|NULL|3
+-- ST_MakePoint with 3 and 4 arguments: NULL arguments, NaN, and the 2D operators on the result
+NULL|NULL|NULL|POINT Z (1 2 NaN)|POINT ZM (1 2 3 4)|3|NULL|NULL|true|true|NULL|ERR[22012]:division by zero
+-- ST_3DDWithin(a, b, 5) of two points: shapes
+p00|e2|false|false|NULL
+p00|ez|false|false|NULL
+p00|infz|true|true|2.23606797749979
+p00|line|true|true|2.23606797749979
+p00|multi|true|true|2.23606797749979
+p00|nanx|false|false|NULL
+p00|nanz|true|true|2.23606797749979
+p00|null|NULL|NULL|NULL
+p00|p00z|true|true|0
+p00|p34|true|true|5
+p00|p3412|true|true|0
+p00|p345z|true|true|5
+p00|p34m|true|true|5
+p00|p34zm|true|true|5
+p00|srid|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)
+p00|srid2|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)
+p00z|e2|false|false|NULL
+p00z|ez|false|false|NULL
+p00z|infz|false|true|NULL
+p00z|line|true|true|3.7416573867739413
+p00z|multi|true|true|3.7416573867739413
+p00z|nanx|false|false|NULL
+p00z|nanz|false|true|NULL
+p00z|null|NULL|NULL|NULL
+p00z|p00z|true|true|0
+p00z|p34|true|true|5
+p00z|p3412|true|true|5
+p00z|p345z|true|true|5
+p00z|p34m|true|true|5
+p00z|p34zm|true|true|5
+p00z|srid|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)
+p00z|srid2|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)
+p3412|e2|false|false|NULL
+p3412|ez|false|false|NULL
+p3412|infz|false|true|NULL
+p3412|line|true|true|3
+p3412|multi|true|true|3
+p3412|nanx|false|false|NULL
+p3412|nanz|false|true|NULL
+p3412|null|NULL|NULL|NULL
+p3412|p00z|true|true|5
+p3412|p34|true|true|5
+p3412|p3412|true|true|0
+p3412|p345z|false|true|7.0710678118654755
+p3412|p34m|true|true|5
+p3412|p34zm|false|true|7.0710678118654755
+p3412|srid|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 0) != (Point, 4326)
+p3412|srid2|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 0) != (Point, 3857)
+srid|e2|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|ez|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|infz|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|line|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (LineString, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (LineString, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (LineString, 0)
+srid|multi|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (MultiPoint, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (MultiPoint, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (MultiPoint, 0)
+srid|nanx|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|nanz|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|null|NULL|NULL|NULL
+srid|p00z|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p34|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p3412|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p345z|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p34m|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|p34zm|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 0)
+srid|srid|true|true|0
+srid|srid2|ERR[XX000]:LWGEOM_dwithin3d: Operation on mixed SRID geometries (Point, 4326) != (Point, 3857)|ERR[XX000]:LWGEOM_dwithin: Operation on mixed SRID geometries (Point, 4326) != (Point, 3857)|ERR[XX000]:ST_3DDistance: Operation on mixed SRID geometries (Point, 4326) != (Point, 3857)
+-- tolerance: zero, negative, NULL, NaN, Infinity, huge
+0|false
+-1|ERR[XX000]:Tolerance cannot be less than zero
+-0|false
+5|true
+4.999999999999999|false
+5.000000000000001|true
+NULL|NULL
+'NaN'|false
+'Infinity'|true
+'-Infinity'|ERR[XX000]:Tolerance cannot be less than zero
+1e308|true
+true
+true
+true
+-- overflow of the squares and extreme coordinates
+false|false|true
+-- does the CPU answer equal sqrt(dx*dx+dy*dy+dz*dz) <= r (plain operations) over many pairs, and where does it differ?
+300000|32300|2.932239979168886e-16
+300000|283793|0|300000|0|300000

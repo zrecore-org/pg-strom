@@ -38,6 +38,7 @@ typedef struct
 	uint32_t	ninsn;
 	uint32_t	insn_cap;
 	uint32_t	nslots;
+	uint32_t	feat;			/* SCAN_FEAT_* of the emitted instructions */
 	int			maxreg;						/* highest register in use + 1 */
 	int			slot_resno[SCAN_MAX_REGS];	/* source attribute of a slot, 0 if none */
 	int			slot_iresno[SCAN_MAX_REGS];	/* attribute of an inner relation (a join), 0 if none */
@@ -88,6 +89,14 @@ emit(builder *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0
 		b->insn = ni;
 		b->insn_cap = ncap;
 	}
+	if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
+		b->feat |= SCAN_FEAT_NUM;
+	else if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
+		b->feat |= SCAN_FEAT_JSON;
+	else if (op >= SOP_CMPD && op <= SOP_D2F)
+		b->feat |= SCAN_FEAT_F8;
+	else if (op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW)
+		b->feat |= SCAN_FEAT_GEOM;
 	p = b->insn + 6 * b->ninsn++;
 	p[0] = op; p[1] = dst; p[2] = a; p[3] = rb; p[4] = k0; p[5] = k1;
 	return (int)(b->ninsn - 1);
@@ -378,7 +387,55 @@ geom_fused_point(const kern_expression *k, int32_t *srid)
 		if (fc.cls != SOP_GEOMMK || fc.kind != 0)
 			return NULL;
 	}
-	return (k->nr_args == 2 ? k : NULL);
+	return (k->nr_args >= 2 && k->nr_args <= 4 ? k : NULL);
+}
+
+/*
+ * The y register of a fused st_makepoint(x, y[, z[, m]]). The 2D functions ignore Z and M, but the point is NULL when any
+ * argument is and an error in their expressions must reach the user, so they are computed and their null flags merged
+ * into y (NULLMRG). keep_z (ST_3DDWithin): the Z is not merged, its register goes to *p_rz.
+ */
+static int
+fused_y_reg(builder *b, const kern_expression *kmk, int *next, int keep_z, int *p_rz)
+{
+	const kern_expression *kx = KEXP_FIRST_ARG(kmk);
+	const kern_expression *ky = KEXP_NEXT_ARG(kx);
+	int			ry, rz = -1, rm = -1, t;
+
+	ry = expr_to_reg(b, ky, next);
+	if (ry < 0 || ry > 0xff)
+		return -1;
+	if (kmk->nr_args >= 3)
+	{
+		const kern_expression *kz = KEXP_NEXT_ARG(ky);
+
+		rz = expr_to_reg(b, kz, next);
+		if (rz < 0 || rz > 0x1f)
+			return -1;
+		if (kmk->nr_args >= 4)
+		{
+			rm = expr_to_reg(b, KEXP_NEXT_ARG(kz), next);
+			if (rm < 0)
+				return -1;
+		}
+	}
+	if (rz >= 0 && !keep_z)
+	{
+		t = new_reg(b, next);
+		if (t < 0 || emit(b, SOP_NULLMRG, t, ry, rz, 0, 0) < 0)
+			return -1;
+		ry = t;
+	}
+	if (rm >= 0)
+	{
+		t = new_reg(b, next);
+		if (t < 0 || emit(b, SOP_NULLMRG, t, ry, rm, 0, 0) < 0)
+			return -1;
+		ry = t;
+	}
+	if (p_rz)
+		*p_rz = rz;
+	return ry;
 }
 
 /*
@@ -423,8 +480,8 @@ emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *n
 		rb = expr_to_reg(b, kx, next);
 		if (rb < 0)
 			return -1;
-		ry = expr_to_reg(b, KEXP_NEXT_ARG(kx), next);
-		if (ry < 0 || ry > 0xff)
+		ry = fused_y_reg(b, kmk, next, 0, NULL);
+		if (ry < 0)
 			return -1;
 		flags = SOP_GPIP_FUSED;
 		k1 = (uint32_t) ry | ((uint32_t) srid0 << 8);
@@ -485,8 +542,8 @@ emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
 		ra = expr_to_reg(b, KEXP_FIRST_ARG(kmk[0]), next);
 		if (ra < 0)
 			return -1;
-		rya = expr_to_reg(b, KEXP_NEXT_ARG(KEXP_FIRST_ARG(kmk[0])), next);
-		if (rya < 0 || rya > 0xff)
+		rya = fused_y_reg(b, kmk[0], next, 0, NULL);
+		if (rya < 0)
 			return -1;
 		flags |= SOP_GDW_FUSED_A;
 	}
@@ -501,8 +558,8 @@ emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
 		rb = expr_to_reg(b, KEXP_FIRST_ARG(kmk[1]), next);
 		if (rb < 0)
 			return -1;
-		ryb = expr_to_reg(b, KEXP_NEXT_ARG(KEXP_FIRST_ARG(kmk[1])), next);
-		if (ryb < 0 || ryb > 0xff)
+		ryb = fused_y_reg(b, kmk[1], next, 0, NULL);
+		if (ryb < 0)
 			return -1;
 		flags |= SOP_GDW_FUSED_B;
 	}
@@ -521,6 +578,101 @@ emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
 		emit(b, SOP_GEOMDWITHIN, dst, ra, rb,
 			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16) | ((uint32_t) rt << 24),
 			 (uint32_t) (kmk[0] ? srid[0] : srid[1])) < 0)
+		return -1;
+	return dst;
+}
+
+/*
+ * A11 part 4: st_z(point) / st_m(point): one string register in, a float8 register out.
+ */
+static int
+emit_geomzm(builder *b, const kern_expression *kexp, scan_func_class fc, int *next)
+{
+	int			mark = *next;
+	int			ra, dst;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 1)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	ra = expr_to_reg(b, KEXP_FIRST_ARG(kexp), next);
+	if (ra < 0)
+		return -1;
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 || emit(b, SOP_GEOMZM, dst, ra, 0, fc.kind, 0) < 0)
+		return -1;
+	return dst;
+}
+
+/*
+ * A11 part 4: st_3ddwithin(point, point, tolerance): like st_dwithin, a fused point (st_makepoint(x, y, z[, m]), at least
+ * three arguments: PostGIS measures a point without Z in 2D and raises a NOTICE) also gives the register of its Z; the SRID
+ * (bits 0..19 of k1) and the two Z registers (bits 20..24 and 25..29) share k1.
+ */
+static int
+emit_geom3ddw(builder *b, const kern_expression *kexp, int *next)
+{
+	const kern_expression *ka = KEXP_FIRST_ARG(kexp);
+	const kern_expression *kb = KEXP_NEXT_ARG(ka);
+	const kern_expression *kt = KEXP_NEXT_ARG(kb);
+	const kern_expression *kmk[2];
+	int32_t		srid[2] = {0, 0};
+	int			mark = *next;
+	int			ra, rb, rya = 0, ryb = 0, rza = 0, rzb = 0, rt, dst;
+	uint32_t	flags = 0;
+
+	if (b->no_strings)
+		return fail(b, "a geometry is not supported in a join");
+	if (kexp->nr_args != 3)
+		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
+	kmk[0] = geom_fused_point(ka, &srid[0]);
+	kmk[1] = geom_fused_point(kb, &srid[1]);
+	if ((kmk[0] && kmk[0]->nr_args < 3) || (kmk[1] && kmk[1]->nr_args < 3))
+		return fail(b, "%s of a point without Z", scan_vm_opcode_name(kexp->opcode));
+	if (kmk[0] && kmk[1] && srid[0] != srid[1])
+		return fail(b, "%s of two points with different SRIDs", scan_vm_opcode_name(kexp->opcode));
+	if (kmk[0])
+	{
+		ra = expr_to_reg(b, KEXP_FIRST_ARG(kmk[0]), next);
+		if (ra < 0)
+			return -1;
+		rya = fused_y_reg(b, kmk[0], next, 1, &rza);
+		if (rya < 0)
+			return -1;
+		flags |= SOP_GDW_FUSED_A;
+	}
+	else
+	{
+		ra = expr_to_reg(b, ka, next);
+		if (ra < 0)
+			return -1;
+	}
+	if (kmk[1])
+	{
+		rb = expr_to_reg(b, KEXP_FIRST_ARG(kmk[1]), next);
+		if (rb < 0)
+			return -1;
+		ryb = fused_y_reg(b, kmk[1], next, 1, &rzb);
+		if (ryb < 0)
+			return -1;
+		flags |= SOP_GDW_FUSED_B;
+	}
+	else
+	{
+		rb = expr_to_reg(b, kb, next);
+		if (rb < 0)
+			return -1;
+	}
+	rt = expr_to_reg(b, kt, next);
+	if (rt < 0 || rt > 0xff)
+		return -1;
+	*next = mark;
+	dst = new_reg(b, next);
+	if (dst < 0 ||
+		emit(b, SOP_GEOM3DDW, dst, ra, rb,
+			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16) | ((uint32_t) rt << 24),
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) rza << 20) | ((uint32_t) rzb << 25)) < 0)
 		return -1;
 	return dst;
 }
@@ -774,6 +926,10 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		return emit_geompip(b, kexp, fc, next);
 	if (fc.cls == SOP_GEOMDWITHIN)
 		return emit_geomdwithin(b, kexp, next);
+	if (fc.cls == SOP_GEOMZM)
+		return emit_geomzm(b, kexp, fc, next);
+	if (fc.cls == SOP_GEOM3DDW)
+		return emit_geom3ddw(b, kexp, next);
 	if (fc.cls == SOP_GEOMMK)
 		return fail(b, "%s is only supported as the point of ST_Contains and the like", scan_vm_opcode_name(kexp->opcode));
 
@@ -1535,6 +1691,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	prog->nwords = nwords;
 	prog->ncomp = ncomp;
 	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
+	prog->feat = b.feat;
 	prog->max_src_resno = max_src;
 	free(b.insn);
 	free(b.pool);
@@ -2196,6 +2353,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	prog->nwords = nwords;
 	prog->ncomp = ncomp;
 	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
+	prog->feat = b.feat;
 	prog->max_src_resno = max_src;
 	prog->ndepth = nrels;
 	prog->join_mode = 1;
