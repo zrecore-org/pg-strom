@@ -264,12 +264,20 @@ xpuClientCloseSession(XpuConnection *conn)
 	XpuCommand *xcmd;
 	dlist_node *dnode;
 
-	/* ensure termination of worker thread */
-	close(conn->sockfd);
+	/*
+	 * Ensure termination of the worker thread. It sits in poll(2) on the socket, and on macOS close(2) of a socket that
+	 * another thread is polling can block until that poll returns (seen once: the backend hung in close() until the service
+	 * was killed). So shut the connection down first (this wakes the poll with POLLHUP), let the worker finish, and close
+	 * the descriptor last.
+	 */
+	int			fd = conn->sockfd;
+
+	shutdown(fd, SHUT_RDWR);
 	conn->sockfd = -1;
 	pg_memory_barrier();
 	pthread_kill(conn->worker, SIGPOLL);
 	pthread_join(conn->worker, NULL);
+	close(fd);
 
 	while (!dlist_is_empty(&conn->ready_cmds_list))
 	{

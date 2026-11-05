@@ -494,17 +494,40 @@ execCpuFallbackBaseTuple(pgstromTaskState *pts,
 	TupleTableSlot *scan_slot = pts->css.ss.ss_ScanTupleSlot;
 	ListCell	   *lc1, *lc2;
 
+	/* a test tuple of EvalPlanQual may come without its table OID */
+	if (!OidIsValid(base_tuple->t_tableOid))
+		base_tuple->t_tableOid = RelationGetRelid(pts->css.ss.ss_currentRelation);
 	ExecForceStoreHeapTuple(base_tuple, base_slot, false);
 	slot_getallattrs(base_slot);
 	ExecStoreAllNullTuple(scan_slot);
 	forboth (lc1, pts->fallback_load_src,
 			 lc2, pts->fallback_load_dst)
 	{
-		int		src = lfirst_int(lc1) - 1;
+		int		srcno = lfirst_int(lc1);
 		int		dst = lfirst_int(lc2) - 1;
 
-		scan_slot->tts_isnull[dst] = base_slot->tts_isnull[src];
-		scan_slot->tts_values[dst] = base_slot->tts_values[src];
+		if (srcno > 0)
+		{
+			scan_slot->tts_isnull[dst] = base_slot->tts_isnull[srcno - 1];
+			scan_slot->tts_values[dst] = base_slot->tts_values[srcno - 1];
+		}
+		else if (srcno < 0)
+		{
+			/*
+			 * A system column: the ctid that UPDATE and DELETE carry through the scan, tableoid, xmin, ... The old code
+			 * subtracted 1 from the (negative) attribute number and read outside the slot's arrays, so a recheck tuple
+			 * of a concurrently updated row (EvalPlanQual) made the backend crash in heap_form_minimal_tuple.
+			 * The datum of ctid points into base_tuple, which outlives the minimal tuple formed below.
+			 */
+			bool		isnull;
+			Datum		datum = heap_getsysattr(base_tuple, srcno,
+												RelationGetDescr(pts->css.ss.ss_currentRelation),
+												&isnull);
+
+			scan_slot->tts_isnull[dst] = isnull;
+			scan_slot->tts_values[dst] = datum;
+		}
+		/* srcno == 0 (a whole-row reference) stays NULL, as before */
 	}
 	if (pts->ps_state)
 	{

@@ -38,11 +38,24 @@ for st in $STAGES; do
 		*) echo "unknown stage $st"; exit 2 ;;
 	esac
 	t_start=$(date +%s)
+	: > "$LOGDIR/.stamp.$n"			# crash reports newer than this belong to the stage
 	# the output goes through timeline.pl (per-section and per-check seconds in <log>.times); the exit status through <log>.rc
 	( PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check} perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
 		sh test/gpuserv/locked_test.sh "$PWD" $cmd 2>&1; echo $? > "$log.rc" ) | perl test/gpuserv/timeline.pl "$log.times" > "$log"
 	e=$(cat "$log.rc" 2>/dev/null); e=${e:-1}
 	secs=$(( $(date +%s) - t_start ))
+	if [ "$e" -ne 0 ]; then
+		# keep the evidence: the next run replaces the kept cluster and its log, and a crash report is easy to lose
+		diag=$LOGDIR/$n-$st.diag
+		mkdir -p "$diag"
+		cname=$(basename "${cmd%% *}" .sh)
+		for f in "$REPO"/test-data/$cname/log*; do [ -f "$f" ] && cp "$f" "$diag/"; done
+		if [ -d "$HOME/Library/Logs/DiagnosticReports" ]; then
+			find "$HOME/Library/Logs/DiagnosticReports" -maxdepth 1 \( -name 'postgres-*.ips' -o -name 'pgstrom-gpuserv-*.ips' \) \
+				-newer "$LOGDIR/.stamp.$n" -exec cp {} "$diag/" \; 2>/dev/null
+		fi
+		echo "$st: failed, cluster log and new crash reports copied to $diag" >> "$log"
+	fi
 	if [ "$e" -eq 142 ]; then
 		# the stage was cut off: do not leave its cluster and service running (they hold the port and the GPU)
 		echo "$st: timed out after ${TIMEOUT}s, stopping its cluster" >> "$log"
