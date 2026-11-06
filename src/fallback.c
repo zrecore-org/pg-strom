@@ -579,9 +579,20 @@ execCpuFallbackOneChunk(pgstromTaskState *pts)
 /*
  * execCpuRecheckOneChunk
  *
- * A KDS_FORMAT_RECHECK chunk of the Vulkan service: raw heap tuples of the base relation that the GPU
- * could not evaluate (a compressed or external string was needed). The CPU evaluates them from the
- * start (quals, joins, projection) like any other fallback tuple.
+ * A KDS_FORMAT_RECHECK chunk of the Vulkan service: rows of the base relation that the GPU could not
+ * decide (a compressed or external string, a value or geometry the kernel cannot evaluate, ...).
+ * The CPU evaluates them from the start (quals, joins, projection) like any other fallback tuple.
+ * Items (kern_recheckitem) are of two kinds:
+ *  - RECHECK_KIND_HEAP: the heap tuple itself. A GPU-Cache row arrives the same way (the service
+ *    builds the heap tuple from the cache slot), so nothing here depends on visibility.
+ *  - RECHECK_KIND_ARROW: (scan_relidx, record batch, row) of an Arrow_Fdw / Parquet scan; the row
+ *    is decoded here from the file (pgstromArrowFdwRecheckTuple, which keeps the last batch).
+ * Both end in execCpuFallbackBaseTuple.
+ *
+ * Risk: the base slot and fallback_load_src describe pts->css.ss.ss_currentRelation. For an Arrow
+ * table of another scan relation (several scan_rels) the tuple is built with that relation's
+ * descriptor, so its column order must be that of ss_currentRelation; the heap kind has the same
+ * assumption. A different number of columns is refused below.
  */
 void
 execCpuRecheckOneChunk(pgstromTaskState *pts)
@@ -589,23 +600,67 @@ execCpuRecheckOneChunk(pgstromTaskState *pts)
 	kern_data_store *kds = pts->curr_kds;
 	Relation		rel = pts->css.ss.ss_currentRelation;
 	char		   *pos = KDS_BODY_ADDR(kds);
+	MemoryContext	row_mcxt = NULL;
 
 	Assert(kds->format == KDS_FORMAT_RECHECK);
-	elog(DEBUG1, "%s: CPU re-evaluation of %u tuples with strings the GPU cannot read",
+	elog(DEBUG1, "%s: CPU re-evaluation of %u rows the GPU could not decide",
 		 pts->css.methods->CustomName, kds->nitems);
 	for (uint32_t i=0; i < kds->nitems; i++)
 	{
 		kern_recheckitem *item = (kern_recheckitem *)pos;
-		HeapTupleData	htup;
 
-		memset(&htup, 0, sizeof(htup));
-		htup.t_len = item->t_len;
-		ItemPointerSet(&htup.t_self, item->blkno, item->offnum);
-		htup.t_tableOid = RelationGetRelid(rel);
-		htup.t_data = (HeapTupleHeader) item->t_data;
-		execCpuFallbackBaseTuple(pts, &htup);
+		if (item->kind == RECHECK_KIND_HEAP)
+		{
+			HeapTupleData	htup;
+
+			memset(&htup, 0, sizeof(htup));
+			htup.t_len = item->t_len;
+			ItemPointerSet(&htup.t_self, item->blkno, item->offnum);
+			htup.t_tableOid = RelationGetRelid(rel);
+			htup.t_data = (HeapTupleHeader) item->t_data;
+			execCpuFallbackBaseTuple(pts, &htup);
+		}
+		else if (item->kind == RECHECK_KIND_ARROW)
+		{
+			uint32_t	scan_relidx = item->offnum;
+			pgstromTaskScanState *ptss;
+			MemoryContext oldcxt;
+			HeapTuple	tuple;
+
+			if (scan_relidx >= pts->num_scan_rels)
+				elog(ERROR, "%s: CPU re-evaluation names scan relation %u of %d",
+					 pts->css.methods->CustomName, scan_relidx, pts->num_scan_rels);
+			ptss = &pts->scan_rels[scan_relidx];
+			if (!ptss->arrow_state)
+				elog(ERROR, "%s: CPU re-evaluation of an Arrow row, but scan relation %u (%s) is not an Arrow_Fdw table",
+					 pts->css.methods->CustomName, scan_relidx,
+					 RelationGetRelationName(ptss->scan_rel));
+			if (RelationGetDescr(ptss->scan_rel)->natts != RelationGetDescr(rel)->natts)
+				elog(ERROR, "%s: CPU re-evaluation of '%s' needs the columns of '%s' in the same order",
+					 pts->css.methods->CustomName,
+					 RelationGetRelationName(ptss->scan_rel),
+					 RelationGetRelationName(rel));
+			/* the decoded row is garbage once the fallback tuple is stored: reset per row */
+			if (!row_mcxt)
+				row_mcxt = AllocSetContextCreate(CurrentMemoryContext,
+												 "Arrow recheck row",
+												 ALLOCSET_DEFAULT_SIZES);
+			MemoryContextReset(row_mcxt);
+			oldcxt = MemoryContextSwitchTo(row_mcxt);
+			tuple = pgstromArrowFdwRecheckTuple(ptss->arrow_state,
+												ptss->scan_rel,
+												item->blkno,	/* rb_flat */
+												item->arrow_row);
+			execCpuFallbackBaseTuple(pts, tuple);
+			MemoryContextSwitchTo(oldcxt);
+		}
+		else
+			elog(ERROR, "%s: unknown kind %u of a CPU re-evaluation item",
+				 pts->css.methods->CustomName, (unsigned int) item->kind);
 		pos += MAXALIGN(offsetof(kern_recheckitem, t_data) + item->t_len);
 	}
+	if (row_mcxt)
+		MemoryContextDelete(row_mcxt);
 }
 
 /*
