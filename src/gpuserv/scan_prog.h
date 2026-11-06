@@ -109,5 +109,7 @@ int		scan_prog_build_join(const struct kern_session_info *session,
 							 const scan_join_rel *rels, int nrels,
 							 scan_prog *prog, char *err, size_t errlen);
 void	scan_prog_free(scan_prog *prog);
+/* aggregation over a RIGHT/FULL join: point the kernels at the outer-join map behind their results (word `base` of the output) */
+void	scan_prog_ojmap_place(const scan_prog *prog, uint32_t *words, size_t base);
 
 #endif	/* GPUSERV_SCAN_PROG_H */

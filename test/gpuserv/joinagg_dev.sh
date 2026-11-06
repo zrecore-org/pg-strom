@@ -5,8 +5,7 @@
 #
 #   sh test/gpuserv/locked_test.sh "$PWD" joinagg_dev.sh
 #
-# ADHOC=<file> runs the SQL file (psql -f) against the loaded data instead of the tests, and
-# prints the output; NROWS (default 300000) sizes the big tables.
+# ADHOC=<file> runs the SQL file (psql -f) against the loaded data first (SKIP_TESTS=1: instead of the tests); NROWS (default 300000) sizes the big tables.
 PGBIN=${PGBIN:-/opt/homebrew/opt/postgresql@17/bin}
 GPUSERV_BIN=${GPUSERV_BIN:?set GPUSERV_BIN to the pgstrom-gpuserv binary}
 ALLOW_CPU=${ALLOW_CPU:-off}
@@ -35,7 +34,7 @@ max_worker_processes = 24
 CONF
 sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 trap stop EXIT INT TERM
-[ -f /tmp/a4c_trace ] && export PGSTROM_GPUSERV_TRACE=1
+[ -n "$TRACE" ] && export PGSTROM_GPUSERV_TRACE=1
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
@@ -88,11 +87,12 @@ runjoin() { # table, label, query-with-%T and %D [, settings]; the plan must use
 }
 runagg_any() { :; }
 
-[ -z "$ADHOC" ] && [ -f /tmp/a4c_adhoc.sql ] && ADHOC=/tmp/a4c_adhoc.sql
+# ADHOC=<file>: run that SQL first (SKIP_TESTS=1: and nothing else); TRACE=1: service trace; JAGG_FILTER=<egrep>:
+# only the checks whose label matches
 if [ -n "$ADHOC" ]; then
 	$PSQL -d scantest -f "$ADHOC" 2>&1
-	[ -f /tmp/a4c_trace ] && grep "pgstrom-gpuserv: .*task" "$ROOT/log" | tail -${TRACE_LINES:-40}
-	[ -f /tmp/a4c_skip_tests ] && exit 0
+	[ -n "$TRACE" ] && LC_ALL=C grep -a "pgstrom-gpuserv: .*task" "$ROOT/log" | tail -${TRACE_LINES:-40}
+	[ -n "$SKIP_TESTS" ] && exit 0
 fi
 . "${0%/*}/joinagg_tests.inc"
 echo

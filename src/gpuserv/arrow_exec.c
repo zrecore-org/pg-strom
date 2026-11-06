@@ -2088,7 +2088,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 		tg += arrow_now_ms() - tp;
 		tp = arrow_now_ms();
 		if (prog->oj_words > 0)
-			scan_join_merge_ojmap(prog, ji, out);
+			scan_join_merge_ojmap(prog, ji, out, 4);
 		for (uint32_t r = 0; r < nmatch; r++)
 		{
 			const uint32_t *rec = &out[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
@@ -2267,7 +2267,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	for (uint32_t first = 0; first < nrows; first += pass_rows)
 	{
 		uint32_t	n = nrows - first, pages, ngroups;
-		size_t		out_words, ovf_base = 0;
+		size_t		out_words, ovf_base = 0, oj_base = 0;
 		const uint32_t *out = NULL;
 		gpu_vk_pipeline *pipe = vmpipe;
 		gpu_vk_buffer *bufs[6];
@@ -2295,6 +2295,9 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			}
 			else
 				out_words = 4 + (size_t) ngroups * nagg * 6;
+			/* RIGHT/FULL joins: the outer-join map follows the results */
+			oj_base = out_words;
+			out_words += prog->oj_words;
 			if (out_words > 0xffffffffULL / 8 ||
 				gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 			{
@@ -2307,6 +2310,12 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			memset(bout.map, 0, 16);
 			if (grouped)
 				((uint32_t *) bout.map)[ovf_base] = 0;
+			if (prog->oj_words > 0)
+			{
+				memset((uint32_t *) bout.map + oj_base, 0, (size_t) prog->oj_words * 4);
+				memcpy(at.bprog.map, prog->words, prog->nwords * 4);
+				scan_prog_ojmap_place(prog, (uint32_t *) at.bprog.map, oj_base);
+			}
 			for (uint32_t base = 0; base < ngroups; base += ARROW_WG_MAX)
 			{
 				uint32_t	groups = ngroups - base;
@@ -2344,6 +2353,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		}
 		tg += arrow_now_ms() - tp;
 		tp = arrow_now_ms();
+		if (prog->oj_words > 0)
+			scan_join_merge_ojmap(prog, ji, out, oj_base);
 		if (!grouped)
 			scan_agg_merge_workgroups(prog, st, out, ngroups);
 		else

@@ -476,6 +476,12 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 					break;
 				}
 				wlog(ws, 0, "final: reply of %zu bytes", len);
+				/*
+				 * The kernels of an aggregation over a RIGHT/FULL join flagged the matched inner rows in the
+				 * backend's outer-join map; the backend emits the others after it has handled this reply
+				 * (a join without such a relation: nothing to do).
+				 */
+				resp->u.results.right_outer_join = true;
 				if (write_all(wc->fd, resp, len) != 0)
 					wc->closing = 1;
 				free(resp);

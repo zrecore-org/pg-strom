@@ -1695,7 +1695,20 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 	{
 	next_chunks:
 		if (pts->curr_resp)
+		{
+			/*
+			 * The unmatched inner rows of RIGHT/FULL joins come after everything the final reply
+			 * carries: its KDS_FORMAT_RECHECK chunks (an aggregation over a join returns them with
+			 * the partial states) are joined on the CPU, which sets outer-join map flags the
+			 * emission must see.
+			 */
+			bool		right_outer = pts->curr_resp->u.results.right_outer_join;
+
 			xpuClientPutResponse(pts->curr_resp);
+			pts->curr_resp = NULL;
+			if (right_outer)
+				ExecFallbackCpuJoinRightOuter(pts);
+		}
 		pts->curr_resp = __fetchNextXpuCommand(pts);
 		if (pts->curr_resp)
 		{
@@ -1703,11 +1716,6 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 
 			if (resp->tag != XpuCommandTag__Success)
 				elog(ERROR, "unknown response tag: %u", resp->tag);
-			if (resp->u.results.right_outer_join)
-			{
-				Assert(resp->u.results.final_plan_task);
-				ExecFallbackCpuJoinRightOuter(pts);
-			}
 			if (resp->u.results.chunks_nitems == 0)
 				goto next_chunks;
 			pts->curr_kds = (kern_data_store *)

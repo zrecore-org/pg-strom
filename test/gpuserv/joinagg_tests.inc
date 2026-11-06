@@ -14,6 +14,7 @@ JAGGPAT='GPU Join Quals \[1\]'
 JAGGBIG="set pg_strom.gpupreagg_max_groups=1000000;"
 PAR="set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 runjagg() { # table, label, query-with-%T and %D [, settings]; GpuPreAgg over the join, results equal to the CPU's
+	[ -n "$JAGG_FILTER" ] && ! echo "$2" | grep -Eq "$JAGG_FILTER" && return 0
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g"); set_extra=${4:-}
 	pl=$($PSQL -d scantest -c "$GPU $JOINSET $JAGGBIG $set_extra explain $qry")
 	plan=$(echo "$pl" | grep -c "Custom Scan (GpuPreAgg)"); jn=$(echo "$pl" | grep -c "$JAGGPAT")
@@ -26,6 +27,7 @@ runjagg() { # table, label, query-with-%T and %D [, settings]; GpuPreAgg over th
 	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan join=$jn)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
 runjagg_cpu() { # the aggregate stays on the CPU (above a GpuJoin or not); the results must be equal
+	[ -n "$JAGG_FILTER" ] && ! echo "$2" | grep -Eq "$JAGG_FILTER" && return 0
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g"); set_extra=${4:-}
 	pl=$($PSQL -d scantest -c "$GPU $JOINSET $JAGGBIG $set_extra explain $qry")
 	plan=$(echo "$pl" | grep -c "Custom Scan (GpuPreAgg)")
@@ -120,8 +122,54 @@ JAGGPAT='Left Outer Join Quals \[1\]'
 runjagg s1 "parallel workers, LEFT JOIN with a NULL group" "select d.grp, count(*), count(d.pay) from %T t left join %D d on t.b = d.k + 20000 group by 1 order by 1" "$PAR"
 
 # shapes that stay on the CPU aggregate (the results must still be right)
-runjagg_cpu s1 "RIGHT JOIN" "select count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000"
-runjagg_cpu s1 "FULL JOIN with GROUP BY" "select d.grp, count(*), count(t.i) from %T t full join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1"
+# RIGHT and FULL joins: the kernels flag the inner rows that found a partner; after the final reply the backend
+# joins each unmatched inner row with NULL outer columns and projects it to a partial-aggregate row (the Agg node
+# above adds it to the GPU's states). Each test below needs both halves: matched rows aggregated on the device and
+# unmatched ones from the CPU.
+echo "aggregation over RIGHT and FULL joins"
+sql "create table if not exists sdnl as select case when grp % 4 = 0 then null else k end as k, grp, pay, txt from sd"; sql "analyze sdnl"
+for t in s1 s2 s3; do
+	JAGGPAT='Right Outer Join Quals \[1\]'
+	runjagg $t "RIGHT JOIN, ON qual on both sides" "select count(*), count(t.i), sum(d.grp), sum(t.a), max(d.pay), min(t.b) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000"
+	runjagg $t "RIGHT JOIN, every inner row has a partner or not (duplicate inner keys)" "select count(*), count(t.i), sum(d.grp), avg(t.a), max(d.k8) from %T t right join %D d on t.b = d.k"
+	runjagg $t "RIGHT JOIN, ON qual on the inner side" "select count(*), count(t.i), sum(d.grp), min(d.pay) from %T t right join %D d on t.b = d.k and d.grp < 3"
+	runjagg $t "RIGHT JOIN, nothing matches (the aggregates see the inner rows only)" "select count(*), count(t.i), sum(t.a), sum(d.grp), min(d.pay), max(d.k) from %T t right join %D d on t.b = d.k + 1000000"
+	runjagg $t "RIGHT JOIN, inner rows with NULL keys" "select count(*), count(t.i), sum(d.grp), max(t.a) from %T t right join sdnl d on t.b = d.k and t.a + d.grp > 9000"
+	runjagg $t "RIGHT JOIN, expression mixing both sides, FILTER" "select sum(t.a + d.grp), count(*) filter (where t.i is null), max(d.pay) filter (where t.e), sum(d.pay) filter (where t.i is null) from %T t right join %D d on t.b = d.k and t.a > d.grp"
+	JAGGPAT='Full Outer Join Quals \[1\]'
+	runjagg $t "FULL JOIN, unmatched rows on both sides" "select count(*), count(t.i), count(d.k), sum(t.a), sum(d.grp), max(d.pay) from %T t full join %D d on t.b = d.k and t.a > 9000"
+	runjagg $t "FULL JOIN, nothing matches" "select count(*), count(t.i), count(d.k), sum(d.grp), sum(t.a) from %T t full join %D d on t.b = d.k + 1000000"
+	runjagg $t "FULL JOIN, inner rows with NULL keys" "select count(*), count(t.i), count(d.k), sum(d.grp) from %T t full join sdnl d on t.b = d.k and t.a > 9000"
+done
+for t in s1 s2 s3; do
+	JAGGPAT='Right Outer Join Quals \[1\]'
+	runjagg $t "RIGHT JOIN, key from the inner side" "select d.grp, count(*), count(t.i), sum(t.a), max(d.pay) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1"
+	runjagg $t "RIGHT JOIN, nothing matches, GROUP BY" "select d.grp, count(*), count(t.i), sum(d.pay) from %T t right join %D d on t.b = d.k + 1000000 group by 1 order by 1"
+	JAGGPAT='Full Outer Join Quals \[1\]'
+	runjagg $t "FULL JOIN, key from the inner side, FILTER" "select d.grp, count(*) filter (where t.i is null), count(t.i), sum(t.a) from %T t full join %D d on t.b = d.k and t.i % 3 = 0 group by 1 order by 1"
+done
+# keys of the outer side (the planner needs statistics of a plain column: jt, a copy of s1 with such columns) and the NULL group
+# of the unmatched inner rows
+JAGGPAT='Right Outer Join Quals \[1\]'
+RJTMP="create table rjt as select i, a, b, c, (i % 7)::int4 as g7, (i % 97)::int4 as g97, (i % 1500)::int4 as g1500 from s1"
+sql "$RJTMP"; sql "vacuum analyze rjt"
+runjagg rjt "RIGHT JOIN, key from the outer side (unmatched inner rows form the NULL group)" "select t.g7, count(*), sum(d.grp), min(d.pay), count(t.i) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1"
+runjagg rjt "RIGHT JOIN, two keys, one from each side (NULL keys of the inner side's pay too)" "select t.g7, d.grp, count(*), count(t.i), sum(d.pay) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1, 2 order by 1, 2"
+runjagg rjt "RIGHT JOIN, nothing matches, key from the outer side" "select t.g7, count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k + 1000000 group by 1 order by 1"
+runjagg rjt "RIGHT JOIN, more groups than a workgroup's table (overflow list)" "select t.g1500, count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > -5000 group by 1 order by 1"
+JAGGPAT='Full Outer Join Quals \[1\]'
+runjagg rjt "FULL JOIN, key from the outer side" "select t.g7, count(*), count(d.k), sum(d.grp), sum(t.b) from %T t full join %D d on t.b = d.k and t.a > 9000 group by 1 order by 1"
+# stacked: the unmatched inner rows of depth 1 continue through the later depths with NULL outer columns
+for t in s1 s2 s3; do
+	JAGGPAT='Join Quals \[2\]'
+	runjagg $t "inner join, then RIGHT join" "select count(*), count(t.i), sum(e.g2), sum(d.grp) from %T t join sd2 e on t.a % 400 = e.k2 right join %D d on t.b = d.k and t.a + d.grp > 9000"
+	runjagg $t "inner join, then RIGHT join, GROUP BY" "select d.grp % 5 as k, count(*), count(t.i), sum(e.g2) from %T t join sd2 e on t.a % 400 = e.k2 right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1"
+done
+JAGGPAT='Right Outer Join Quals \[1\]'
+runjagg s1 "RIGHT join, then LEFT join on the inner side's column" "select count(*), count(t.i), count(e.g2), sum(d.grp), sum(e.p2) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 left join sd2 e on d.grp = e.k2"
+runjagg s1 "RIGHT join, then inner join on the inner side's column, GROUP BY" "select e.g2, count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 join sd2 e on d.grp = e.k2 group by 1 order by 1"
+# a parallel plan does not offer RIGHT/FULL joins: the aggregate must still be right
+runjagg s1 "RIGHT JOIN, parallel workers wanted (not offered for the join: a serial GpuPreAgg or the CPU aggregate, same result)" "select count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000" "$PAR"
 runjagg_cpu s1 "float aggregate over a join" "select count(*), sum(t.d), max(d.grp) from %T t join %D d on t.b = d.k where t.a > 9000"
 runjagg_cpu s1 "text key" "select d.txt, count(*) from %T t join %D d on t.b = d.k group by 1 order by 1 limit 20"
 runjagg_cpu s1 "too many estimated groups" "select t.i, count(*) from %T t join %D d on t.b = d.k where t.i < 50000 group by 1 order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
