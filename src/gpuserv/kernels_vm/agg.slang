@@ -25,6 +25,13 @@
 #ifndef AGG_MAX
 #define AGG_MAX 12
 #endif
+// the row-flag word of line pointer `lp` of `page`; an Arrow record batch (virtual pages of AR_VP rows) has no line
+// pointer table: its flags are one word per row of the pass
+#ifdef ARROW_SRC
+#define FLAG_AT(page, lp) (kparam.total_lps + (page) * AR_VP + (lp))
+#else
+#define FLAG_AT(page, lp) (kparam.total_lps + ptab[2 * (page) + 1] + (lp))
+#endif
 static const uint AC_COUNT_ANY  = 1;
 static const uint AC_COUNT_COND = 2;
 static const uint AC_SUM        = 3;
@@ -102,13 +109,11 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
 #elif defined(SPEC_PROG)
                 hit = spec_eval_row(pbase, page, lp, false, regs);
-                if (g_recheck != 0)
-                    outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
 #else
                 hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
-                if (g_recheck != 0)     // flag the row for the backend (kparam.total_lps: base of the flags)
-                    outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
 #endif
+                if (g_recheck != 0)     // flag the row for the backend (kparam.total_lps: base of the flags)
+                    outb[FLAG_AT(page, lp)] = 2u;
             }
             if (!hit)
                 continue;
@@ -119,7 +124,7 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #endif
             {
                 // a numeric of another scale than the plan's: the backend evaluates the row
-                outb[kparam.total_lps + ptab[2 * page + 1] + lp] = 2u;
+                outb[FLAG_AT(page, lp)] = 2u;
                 continue;
             }
             hits += 1;

@@ -1145,6 +1145,8 @@ typedef struct
 	uint32_t   *tab;
 	uint32_t	ncols, nrows;
 	gcache	   *gc;					/* a GPU-Cache task: bg is the cache's buffer (not owned), bdummy its row filter */
+	uint32_t	rb_flat;			/* Arrow / Parquet task: index of the record batch in the backend's ArrowFdwState (A12) */
+	int32_t		relidx;				/* the task's scan_relidx */
 	gpu_vk_buffer bg, btab, bprog, bdummy;
 	int			have_data, have_g, have_tab, have_prog, have_dummy;
 } arrow_task;
@@ -1178,6 +1180,11 @@ arrow_task_parse(const XpuCommand *task, arrow_task *at, char *err, size_t errle
 		return -1;
 	}
 	at->kds_src = (const kern_data_store *)((const char *) task + task->u.task.kds_src_offset);
+	if (task->tag != XpuCommandTag__XpuTaskExecGpuCache)
+	{
+		at->rb_flat = task->u.task.arrow_rb_flat;
+		at->relidx = task->u.task.scan_relidx;
+	}
 	if (task->tag == XpuCommandTag__XpuTaskExecGpuCache)
 	{
 		/* GPU-Cache: the data is the service's own */
@@ -1365,10 +1372,51 @@ arrow_kernel_error(uint32_t code, uint32_t row, char *err, size_t errlen)
 		snprintf(p, errlen - (size_t)(p - err), ", row %u)", row);
 }
 
+/*
+ * A12: row `row` of the task's batch could not be decided on the GPU: it goes to the backend (a
+ * KDS_FORMAT_RECHECK chunk). An Arrow / Parquet row is named by (record batch, row); a GPU-Cache row
+ * is sent as a synthesized heap tuple.
+ */
+static int
+arrow_rck_row(const arrow_task *at, recheck_buf *r, uint32_t row, char *err, size_t errlen)
+{
+	int			rv;
+
+	if (at->gc)
+		rv = -2;
+	else
+		rv = rck_add_arrow(r, at->rb_flat, (uint32_t) at->relidx, row);
+	if (rv == -2)
+		snprintf(err, errlen, "a GPU-Cache row needs the CPU, which is not implemented yet");
+	else if (rv != 0)
+		snprintf(err, errlen, "out of memory");
+	return rv;
+}
+
+/* append the chunk of the recheck rows (if any) to a reply; 0, or -1 (out of memory) */
+static int
+arrow_append_recheck(XpuCommand **p_resp, const kern_data_store *kds_dst_head, const recheck_buf *r)
+{
+	size_t		csz = rck_chunk_size(kds_dst_head, r);
+	XpuCommand *nr;
+
+	if (csz == 0)
+		return 0;
+	nr = realloc(*p_resp, (*p_resp)->length + csz);
+	if (!nr)
+		return -1;
+	rck_chunk_fill((kern_data_store *)((char *) nr + nr->length), kds_dst_head, r);
+	nr->length += csz;
+	nr->u.results.chunks_nitems++;
+	*p_resp = nr;
+	return 0;
+}
+
 /* ---------------------------------------------------------------- */
 /* the result chunk of a task, which grows as tuples are added */
 typedef struct
 {
+	recheck_buf	rck;				/* rows for the backend (A12) */
 	const kern_data_store *kds_dst_head;
 	XpuCommand *resp;
 	size_t		cap, usage, resp_sz, head_sz, idx_cap;
@@ -1403,6 +1451,7 @@ arrow_result_free(arrow_result *rs)
 {
 	free(rs->resp);
 	free(rs->rowindex);
+	free(rs->rck.buf);
 	memset(rs, 0, sizeof(*rs));
 }
 
@@ -1505,6 +1554,12 @@ arrow_result_finish(arrow_result *rs, const XpuCommand *task, uint32_t nitems_ra
 	resp->u.results.npages_vfs_read = npages_vfs_read;
 	if (resp->u.results.chunks_nitems == 0)
 		resp->length = rs->resp_sz;
+	if (arrow_append_recheck(&resp, rs->kds_dst_head, &rs->rck) != 0)
+	{
+		snprintf(err, errlen, "out of memory");
+		rs->resp = resp;
+		return NULL;
+	}
 	*p_len = resp->length;
 	rs->resp = NULL;
 	free(rs->rowindex);
@@ -1675,6 +1730,12 @@ scan_exec_arrow_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		tp = arrow_now_ms();
 		for (uint32_t r = 0; r < n; r++)
 		{
+			if (flags[r] == 2)			/* the backend evaluates the row */
+			{
+				if (arrow_rck_row(&at, &rs.rck, base + r, err, errlen) != 0)
+					goto error;
+				continue;
+			}
 			if (!flags[r])
 				continue;
 			if (arrow_result_add(&rs, &af, base + r, vals + (size_t) r * 3 * ncomp, err, errlen) != 0)
@@ -1834,7 +1895,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	for (uint32_t first = 0; first < nrows; first += pass_rows)
 	{
 		uint32_t	n = nrows - first, pages, ngroups;
-		size_t		out_words, ovf_base = 0;
+		size_t		out_words, ovf_base = 0, rflag_base = 0;
 		const uint32_t *out = NULL;
 		gpu_vk_pipeline *pipe = vmpipe;
 		gpu_vk_buffer *bufs[5];
@@ -1855,13 +1916,16 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 		tp = arrow_now_ms();
 		for (int attempt = 0; attempt < 4; attempt++)
 		{
+			/* after the records (and the overflow list of GROUP BY): one flag word per row of the pass,
+			 * 2 = the backend evaluates the row (A12) */
 			if (grouped)
 			{
 				ovf_base = 4 + (size_t) ngroups * blk_words;
-				out_words = ovf_base + 1 + (size_t) ovf_cap * ov_rec;
+				rflag_base = ovf_base + 1 + (size_t) ovf_cap * ov_rec;
 			}
 			else
-				out_words = 4 + (size_t) ngroups * nagg * 6;
+				ovf_base = rflag_base = 4 + (size_t) ngroups * nagg * 6;
+			out_words = rflag_base + n;
 			if (out_words > 0xffffffffULL / 8 ||
 				gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 			{
@@ -1874,6 +1938,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 			memset(bout.map, 0, 16);
 			if (grouped)
 				((uint32_t *) bout.map)[ovf_base] = 0;
+			memset((uint32_t *) bout.map + rflag_base, 0, sizeof(uint32_t) * n);
 			for (uint32_t base = 0; base < ngroups; base += ARROW_WG_MAX)
 			{
 				uint32_t	groups = ngroups - base;
@@ -1911,6 +1976,10 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 		}
 		tg += arrow_now_ms() - tp;
 		tp = arrow_now_ms();
+		/* the rows the kernel could not decide (an instruction that rechecks, a numeric of another scale) */
+		for (uint32_t i = 0; i < n; i++)
+			if (out[rflag_base + i] == 2 && arrow_rck_row(&at, &st->rck, first + i, err, errlen) != 0)
+				goto done;
 		if (!grouped)
 			scan_agg_merge_workgroups(prog, st, out, ngroups);
 		else

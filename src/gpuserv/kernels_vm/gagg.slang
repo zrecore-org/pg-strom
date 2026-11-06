@@ -27,6 +27,8 @@
 // and L0 is the value biased by 2^31.
 // followed (at kparam.total_lps's pc word: flags_base) by one word per line pointer: 1 if the row
 // overflowed. The aggregate words are those of agg.slang.
+// ARROW_SRC: no flags; the overflow list at flags_base is followed (after kparam.extra records) by one word per row of
+// the pass: 2 if the backend must evaluate the row (A12).
 #include "scan_common.slang"
 #ifdef ARROW_SRC
 #include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
@@ -300,6 +302,8 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     }
                 }
             }
+            if (lp < nlp && g_recheck != 0)
+                outb[flags_base + 1 + kparam.extra * OV_REC + page * AR_VP + lp] = 2u;     // the backend evaluates the row (A12)
 #else
             if (lp < nlp)
                 outb[flags_base + lp_base + lp] = (hit && slot == NO_SLOT) ? 1u : (g_recheck != 0 ? 2u : 0u);   // 2: the backend evaluates the row

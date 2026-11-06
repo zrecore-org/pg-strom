@@ -1908,7 +1908,7 @@ vulkan_geom_source_ok(codegen_context *context)
 	rel = root->simple_rel_array[context->base_relid];
 	if (!rel)
 		return true;
-	return !(baseRelIsArrowFdw(rel) || baseRelHasGpuCache(root, rel));
+	return !baseRelHasGpuCache(root, rel);
 }
 
 /*

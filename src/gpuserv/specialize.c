@@ -362,10 +362,11 @@ gen_arrow_eval_row(gen_ctx *g, sbuf *o)
 	}
 	sb_printf(o,
 			  "bool spec_arrow_eval_row(uint row, uint epage, uint elp, bool qonly, inout Reg regs[VM_MAX_REGS])\n{\n"
+			  "    g_recheck = 0;\n"
 			  /* GPU-Cache: a row whose bit in the row filter is 0 does not exist (free slot, or not visible) */
 			  "    if (ptab[8u * %uu + 2u] != 0u && ((pagel[row >> 5] >> (row & 31u)) & 1u) == 0u)\n"
 			  "        return false;\n"
-			  "    g_recheck = 0;\n    g_src = 0;\n"
+			  "    g_src = 0;\n"
 			  "    [unroll]\n    for (uint i = 0; i < VM_MAX_REGS; i++)\n    {\n"
 			  "        regs[i].v = 0;\n        regs[i].isnull = 1;\n        regs[i].sc = 0;\n    }\n",
 			  ncols);
@@ -396,6 +397,7 @@ gen_arrow_eval_row(gen_ctx *g, sbuf *o)
 	if (nins > nq && g->kind != SPEC_JOIN && g->kind != SPEC_JAGG && g->kind != SPEC_JGAGG)
 		sb_printf(o, "    if (err == 0 && hit && !qonly)\n        err = spec_r%u_%u(regs);\n", nq, nins);
 	sb_printf(o,
+			  "    if (err == SOP_RECHECK_CODE)\n    {\n        g_recheck = 1;\n        return false;\n    }\n"
 			  "    if (err != 0)\n    {\n        report_error(epage, elp, err);\n        return false;\n    }\n"
 			  "    return hit;\n}\n\n");
 }

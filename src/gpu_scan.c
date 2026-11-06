@@ -439,7 +439,7 @@ gpuScanGeometryQualOk(PlannerInfo *root, RelOptInfo *baserel, Expr *clause)
 {
 	if (!pgstrom_expr_has_geometry_func(clause))
 		return true;
-	return !(baseRelIsArrowFdw(baserel) || baseRelHasGpuCache(root, baserel));
+	return !baseRelHasGpuCache(root, baserel);
 }
 
 /*

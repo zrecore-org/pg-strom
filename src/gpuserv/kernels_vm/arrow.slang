@@ -7,7 +7,7 @@
 // dispatch, blcksz = absolute index of the pass's first row, total_lps = rows of this pass.
 //
 // Output (outb): [1] first error (FuncOpCode, 0 = none), [2] row (absolute) of it; from word 4,
-// one word per row of the pass: 1 if the row qualifies; then per row { isnull, lo, hi } * ncomp,
+// one word per row of the pass: 1 if the row qualifies, 2 if the backend must evaluate it; then per row { isnull, lo, hi } * ncomp,
 // the computed projection values (written for qualifying rows).
 #define ARROW_SCAN 1               // four push-constant words, see scan_common.slang
 #include "scan_common.slang"
@@ -40,7 +40,7 @@ void arrow_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #else
     bool hit = arrow_eval_row(row, row, 0, coloff, ncols, insnoff, nq, nins, qreg, regs);
 #endif
-    outb[4 + rel] = hit ? 1u : 0u;
+    outb[4 + rel] = hit ? 1u : (g_recheck != 0 ? 2u : 0u);      // 2: the backend must evaluate the row (A12)
     if (hit)
     {
         uint vb = 4 + kparam.total_lps + rel * (3 * ncomp);

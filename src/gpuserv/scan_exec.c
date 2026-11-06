@@ -427,11 +427,8 @@ cmp_u64(const void *a, const void *b)
 /* ---------------------------------------------------------------- */
 /* rows for the backend to evaluate (KDS_FORMAT_RECHECK) */
 static int
-rck_add(recheck_buf *r, uint32_t blkno, uint32_t offnum, const unsigned char *htup, uint32_t len)
+rck_reserve(recheck_buf *r, size_t isz)
 {
-	size_t		isz = MAXALIGN(offsetof(kern_recheckitem, t_data) + len);
-	kern_recheckitem *it;
-
 	if (r->len + isz > r->cap)
 	{
 		size_t		ncap = (r->cap ? r->cap * 2 : 4096);
@@ -445,6 +442,36 @@ rck_add(recheck_buf *r, uint32_t blkno, uint32_t offnum, const unsigned char *ht
 		r->buf = nb;
 		r->cap = ncap;
 	}
+	return 0;
+}
+
+/* an item of kind RECHECK_KIND_ARROW (16 bytes, no tuple): row `row` of record batch `rb_flat` of scan relation `relidx` */
+int
+rck_add_arrow(recheck_buf *r, uint32_t rb_flat, uint32_t relidx, uint32_t row)
+{
+	kern_recheckitem *it;
+
+	if (relidx > 0xffffU || rck_reserve(r, offsetof(kern_recheckitem, t_data)) != 0)
+		return -1;
+	it = (kern_recheckitem *)(r->buf + r->len);
+	memset(it, 0, offsetof(kern_recheckitem, t_data));
+	it->blkno = rb_flat;
+	it->offnum = (uint16_t) relidx;
+	it->kind = RECHECK_KIND_ARROW;
+	it->arrow_row = row;
+	r->len += offsetof(kern_recheckitem, t_data);
+	r->nitems++;
+	return 0;
+}
+
+int
+rck_add(recheck_buf *r, uint32_t blkno, uint32_t offnum, const unsigned char *htup, uint32_t len)
+{
+	size_t		isz = MAXALIGN(offsetof(kern_recheckitem, t_data) + len);
+	kern_recheckitem *it;
+
+	if (rck_reserve(r, isz) != 0)
+		return -1;
 	it = (kern_recheckitem *)(r->buf + r->len);
 	memset(it, 0, offsetof(kern_recheckitem, t_data));
 	it->t_len = len;
@@ -458,12 +485,12 @@ rck_add(recheck_buf *r, uint32_t blkno, uint32_t offnum, const unsigned char *ht
 }
 
 /* the size of the chunk of the rows (0 if none), and filling it in at 'kds' */
-static size_t
+size_t
 rck_chunk_size(const kern_data_store *kds_head, const recheck_buf *r)
 {
 	return r->nitems == 0 ? 0 : KDS_HEAD_LENGTH(kds_head) + r->len;
 }
-static void
+void
 rck_chunk_fill(kern_data_store *kds, const kern_data_store *kds_head, const recheck_buf *r)
 {
 	size_t		head_sz = KDS_HEAD_LENGTH(kds_head);

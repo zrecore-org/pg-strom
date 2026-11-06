@@ -207,9 +207,9 @@ void arrow_load_row(uint row, uint coloff, uint ncols, inout Reg regs[VM_MAX_REG
 bool arrow_eval_row(uint row, uint epage, uint elp, uint coloff, uint ncols, uint insnoff, uint nq, uint nins,
                     uint qreg, inout Reg regs[VM_MAX_REGS])
 {
+    g_recheck = 0;
     if (ptab[8 * ncols + 2] != 0u && ((pagel[row >> 5] >> (row & 31u)) & 1u) == 0u)
         return false;                               // GPU-Cache: no such row (free slot, or not visible)
-    g_recheck = 0;
     g_src = 0;
     [unroll]
     for (uint i = 0; i < VM_MAX_REGS; i++)
@@ -230,6 +230,11 @@ bool arrow_eval_row(uint row, uint epage, uint elp, uint coloff, uint ncols, uin
     }
     if (err == 0 && hit && nins > nq)
         err = vm_run(insnoff, nq, nins, regs);
+    if (err == SOP_RECHECK_CODE)
+    {
+        g_recheck = 1;                              // A12: an instruction could not decide this row: the backend does
+        return false;
+    }
     if (err != 0)
     {
         report_error(epage, elp, err);

@@ -94,6 +94,12 @@ typedef struct recheck_buf
 	uint32_t	nitems;
 } recheck_buf;
 
+/* the rows for the backend (scan_exec.c): heap tuples, Arrow rows (rck_add_arrow) and GPU-Cache rows (a synthesized heap tuple) */
+int		rck_add(recheck_buf *r, uint32_t blkno, uint32_t offnum, const unsigned char *htup, uint32_t len);
+int		rck_add_arrow(recheck_buf *r, uint32_t rb_flat, uint32_t relidx, uint32_t row);
+size_t	rck_chunk_size(const kern_data_store *kds_head, const recheck_buf *r);
+void	rck_chunk_fill(kern_data_store *kds, const kern_data_store *kds_head, const recheck_buf *r);
+
 struct group_table;
 typedef struct agg_state
 {

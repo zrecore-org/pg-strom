@@ -124,6 +124,8 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     if (idx < kparam.extra)
                         spec_dm_ov(regs, flags_base + 1 + idx * OV_REC);
                 }
+                if (g_recheck != 0)
+                    outb[flags_base + 1 + kparam.extra * OV_REC + page * AR_VP + lp] = 2u;     // the backend evaluates the row (A12)
 #else
                 outb[flags_base + lp_base + lp] = overflow ? 1u : (g_recheck != 0 ? 2u : 0u);   // 2: the backend evaluates the row
 #endif
