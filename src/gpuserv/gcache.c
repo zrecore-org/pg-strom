@@ -1384,6 +1384,25 @@ gcache_ctid(const gcache *g, uint32_t row, unsigned char *out)
 	memcpy(out + 4, &offnum, 2);
 }
 
+/* pg_attribute.attalign ('c', 's', 'i', 'd') in bytes */
+static size_t
+gc_typalign(uint16_t attalign, size_t dflt)
+{
+	switch (attalign)
+	{
+		case 'c':
+			return 1;
+		case 's':
+			return 2;
+		case 'i':
+			return 4;
+		case 'd':
+			return 8;
+		default:
+			return dflt;
+	}
+}
+
 /*
  * A12: the heap tuple of a cached row, for the backend's CPU re-evaluation of a row the GPU could not decide
  * (a KDS_FORMAT_RECHECK item of kind heap). The cache is not a snapshot (it holds the latest committed state and the
@@ -1434,10 +1453,10 @@ gcache_form_tuple(const gcache *g, uint32_t row, unsigned char **p_buf, uint32_t
 		{
 			infomask |= HEAP_HASVARWIDTH;
 			if ((ptr[0] & 1) == 0)				/* a 4-byte header is aligned (a short one is not) */
-				al = col->attalign ? col->attalign : 4;
+				al = gc_typalign(col->attalign, 4);
 		}
 		else
-			al = col->attalign ? col->attalign : 1;
+			al = gc_typalign(col->attalign, 1);
 		npos = TYPEALIGN(al, pos);
 		if (npos + len > cap)
 		{

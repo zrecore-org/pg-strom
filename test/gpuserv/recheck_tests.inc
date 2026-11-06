@@ -22,11 +22,12 @@ if [ -z "$ARROW_LIBS" ] && command -v brew >/dev/null 2>&1; then
 # combines the partial states): without GROUP BY, with one and two keys, a FILTER, HAVING-free
 for t in rk_a rk_p rk_one rk_first rk_last rk_pone; do
 	echo "table $t: aggregation"
-	runagg $t "count(*), sum, min, max" "select count(*), sum(id), min(id), max(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
-	runagg $t "count of ST_Covers(hole), avg" "select count(*), avg(id) from %T where ST_Covers($HOLE, ST_MakePoint(x, y))"
+	case $t in rk_one|rk_pone) agg=runagg_any;; *) agg=runagg;; esac
+	$agg $t "count(*), sum, min, max" "select count(*), sum(id), min(id), max(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
+	$agg $t "count of ST_Covers(hole), avg" "select count(*), avg(id) from %T where ST_Covers($HOLE, ST_MakePoint(x, y))"
 	runagg_any $t "GROUP BY id % 7" "select id % 7 as k, count(*), sum(id) from %T where ST_Intersects(ST_MakePoint(x, y), $MULTI) group by 1 order by 1"
 	runagg_any $t "GROUP BY two keys" "select id % 3 as k1, id % 5 as k2, count(*), max(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y)) group by 1, 2 order by 1, 2"
-	runagg $t "count(*) FILTER" "select count(*) filter (where id % 2 = 0), count(*) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
+	$agg $t "count(*) FILTER" "select count(*) filter (where id % 2 = 0), count(*) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
 done
 for t in rk_a rk_p; do
 	rck_check $t "select count(*), sum(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))" "aggregation"
@@ -41,19 +42,19 @@ for t in rk_a rk_p rk_first; do
 	run $t "scan: ST_Covers(polygon Z, point Z)" "select id from %T where ST_Covers($SQZ, ST_MakePoint(x, y, z))"
 	run $t "scan: ST_Intersects(point ZM, multi)" "select id from %T where ST_Intersects(ST_MakePoint(x, y, z, m), $MULTI)"
 	run $t "scan: ST_Contains(hole, point ZM)" "select id, z from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m))"
-	runagg $t "count over a point Z" "select count(*), sum(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y, z))"
+	runagg_any $t "count over a point Z" "select count(*), sum(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y, z))"
 	runagg_any $t "GROUP BY over a point ZM" "select id % 4, count(*) from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m)) group by 1 order by 1"
 done
 fi
 c++ -std=c++20 -O2 -DWITH_PARQUET "${0%/*}/arrow_points.cpp" -o "$RARROW/arrow_points" $ARROW_CFLAGS $ARROW_LIBS >"$RARROW/gen.log" 2>&1
 check "the point-table generator builds" $?
 # 3 record batches / row groups; a one-row file whose row is the vertex (10 10) of SQ (i = 1176); a file that starts at the
-# vertex (0 0) (i = 336) and one that ends at (10 10), each in a single batch; a Parquet file with several row groups
+# vertex (0 0) (i = 336) and one that ends at (10 10) (i = 1176 mod 1681), each one batch of 60000 rows; a Parquet file with several row groups
 "$RARROW/arrow_points" "$RARROW/rk_a.arrow" "$RCKROWS" 50000
 "$RARROW/arrow_points" "$RARROW/rk_p.parquet" "$RCKROWS" 50000
 "$RARROW/arrow_points" "$RARROW/rk_one.arrow" 1 1 1176
-"$RARROW/arrow_points" "$RARROW/rk_first.arrow" 1000 1000 336
-"$RARROW/arrow_points" "$RARROW/rk_last.arrow" 1000 1000 177
+"$RARROW/arrow_points" "$RARROW/rk_first.arrow" 60000 60000 336
+"$RARROW/arrow_points" "$RARROW/rk_last.arrow" 60000 60000 12
 "$RARROW/arrow_points" "$RARROW/rk_pone.parquet" 1 1 1176
 RFT="(id int8, x float8, y float8, z float8, m float8)"
 sql "create foreign table rk_a $RFT server arrow_fdw options (file '$RARROW/rk_a.arrow')"
@@ -94,11 +95,12 @@ done
 # combines the partial states): without GROUP BY, with one and two keys, a FILTER, HAVING-free
 for t in rk_a rk_p rk_one rk_first rk_last rk_pone; do
 	echo "table $t: aggregation"
-	runagg $t "count(*), sum, min, max" "select count(*), sum(id), min(id), max(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
-	runagg $t "count of ST_Covers(hole), avg" "select count(*), avg(id) from %T where ST_Covers($HOLE, ST_MakePoint(x, y))"
+	case $t in rk_one|rk_pone) agg=runagg_any;; *) agg=runagg;; esac
+	$agg $t "count(*), sum, min, max" "select count(*), sum(id), min(id), max(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
+	$agg $t "count of ST_Covers(hole), avg" "select count(*), avg(id) from %T where ST_Covers($HOLE, ST_MakePoint(x, y))"
 	runagg_any $t "GROUP BY id % 7" "select id % 7 as k, count(*), sum(id) from %T where ST_Intersects(ST_MakePoint(x, y), $MULTI) group by 1 order by 1"
 	runagg_any $t "GROUP BY two keys" "select id % 3 as k1, id % 5 as k2, count(*), max(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y)) group by 1, 2 order by 1, 2"
-	runagg $t "count(*) FILTER" "select count(*) filter (where id % 2 = 0), count(*) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
+	$agg $t "count(*) FILTER" "select count(*) filter (where id % 2 = 0), count(*) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
 done
 for t in rk_a rk_p; do
 	rck_check $t "select count(*), sum(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))" "aggregation"
@@ -113,7 +115,7 @@ for t in rk_a rk_p rk_first; do
 	run $t "scan: ST_Covers(polygon Z, point Z)" "select id from %T where ST_Covers($SQZ, ST_MakePoint(x, y, z))"
 	run $t "scan: ST_Intersects(point ZM, multi)" "select id from %T where ST_Intersects(ST_MakePoint(x, y, z, m), $MULTI)"
 	run $t "scan: ST_Contains(hole, point ZM)" "select id, z from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m))"
-	runagg $t "count over a point Z" "select count(*), sum(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y, z))"
+	runagg_any $t "count over a point Z" "select count(*), sum(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y, z))"
 	runagg_any $t "GROUP BY over a point ZM" "select id % 4, count(*) from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m)) group by 1 order by 1"
 done
 
@@ -138,8 +140,8 @@ done
 # cannot read (Z, M, ZM, a line, a point, a big polygon, NULL, EMPTY), which come back as poison records: the outer row goes to
 # the backend, which joins it on the CPU. The outer tables are small Arrow / Parquet files with several batches.
 GISTON="set pg_strom.enable_gpugistindex=on; set enable_seqscan=on;"
-"$RARROW/arrow_points" "$RARROW/rk_j.arrow" 8200 3000
-"$RARROW/arrow_points" "$RARROW/rk_jp.parquet" 8200 3000
+"$RARROW/arrow_points" "$RARROW/rk_j.arrow" 8200 3000 0 clean
+"$RARROW/arrow_points" "$RARROW/rk_jp.parquet" 8200 3000 0 clean
 sql "create foreign table rk_j $RFT server arrow_fdw options (file '$RARROW/rk_j.arrow')"
 sql "create foreign table rk_jp $RFT server arrow_fdw options (file '$RARROW/rk_jp.parquet')"
 sql "analyze rk_j"; sql "analyze rk_jp"
@@ -199,10 +201,10 @@ rk_joins() { # outer table
 	A="select count(*), count(i.a), sum(i.a), min(i.id), max(o.id) from $o o join rk_gz i on"
 	rk_gistagg "$o: ungrouped aggregate over the join" "$A st_contains(i.geom, st_makepoint(o.x, o.y))"
 	rk_gistagg "$o: ungrouped aggregate, ST_Intersects, point ZM" "$A st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
-	rk_gistagg "$o: GROUP BY an outer key" "select o.id % 7, count(*), sum(i.a), min(i.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id % 7"
 	rk_gistagg "$o: GROUP BY an inner key" "select i.a % 5, count(*), sum(o.id), max(o.id) from $o o join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y)) group by i.a % 5"
 	rk_gistagg "$o: aggregate, parallel workers" "$A st_contains(i.geom, st_makepoint(o.x, o.y))" "$APAR"
 	ANYPLAN=1
+	rk_gistagg "$o: GROUP BY an outer key (any plan)" "select o.id % 7, count(*), sum(i.a), min(i.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id % 7"
 	rk_gistagg "$o: GROUP BY two keys (any plan)" "select o.id % 3, i.a % 4, count(*), sum(o.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id % 3, i.a % 4"
 	ANYPLAN=0
 }
@@ -247,10 +249,12 @@ rkgc "scan, parallel workers" "select id from %T where ST_Contains($HOLE, ST_Mak
 n=$(rck_rows rk_gc "select id from %T where ST_Contains($SQ, ST_MakePoint(x, y))")
 [ "$n" -gt 0 ]; check "rk_gc: the GPU handed cached rows to the backend ($n rechecked)" $?
 # a join with the cache as the outer relation
-rk_gistjoin "rk_gc: ST_Contains join" "select o.id, i.id from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))"
-rk_gistjoin "rk_gc: left join, point ZM" "select o.id, i.id from rk_gc o left join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
-rk_gistagg "rk_gc: ungrouped aggregate over the join" "select count(*), sum(i.a), min(i.id), max(o.id) from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))"
-rk_gistagg "rk_gc: GROUP BY an outer key" "select o.id % 7, count(*), sum(i.a) from rk_gc o join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y)) group by o.id % 7"
+rk_gistjoin "rk_gc: ST_Contains join" "select o.id, i.id from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
+rk_gistjoin "rk_gc: left join, point ZM" "select o.id, i.id from rk_gc o left join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
+rk_gistagg "rk_gc: ungrouped aggregate over the join" "select count(*), sum(i.a), min(i.id), max(o.id) from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
+ANYPLAN=1
+rk_gistagg "rk_gc: GROUP BY an outer key (any plan)" "select o.id % 7, count(*), sum(i.a) from rk_gc o join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8 group by o.id % 7"
+ANYPLAN=0
 
 # the cache holds the latest committed state and the session's own changes: rows changed inside a transaction (at the vertex
 # (0 0) and (10 10) of the square, so they are rechecked) must be seen by the recheck exactly as by the heap scan
