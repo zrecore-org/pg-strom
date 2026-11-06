@@ -2093,6 +2093,21 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
  */
 #define JDT_WORDS			19
 
+/*
+ * Aggregation over a RIGHT/FULL join: the kernels write the outer-join map at word `base` of their output
+ * buffer (behind the aggregates; the join kernels' map sits at word 4). The kernel adds 4 to the offset in the
+ * depth table, so patch that table in the program buffer `words` (a copy of prog->words) before a dispatch.
+ */
+void
+scan_prog_ojmap_place(const scan_prog *prog, uint32_t *words, size_t base)
+{
+	uint32_t	dtab = prog->words[15];
+
+	for (int d = 1; d <= prog->ndepth; d++)
+		if (prog->oj_off[d] != 0xffffffffU)
+			words[dtab + JDT_WORDS * (d - 1) + 12] = (uint32_t)(base - 4 + prog->oj_off[d]);
+}
+
 int
 scan_prog_build_join(const kern_session_info *session, const kern_data_store *kds_src,
 					 const scan_join_rel *rels, int nrels,
@@ -2137,12 +2152,26 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	}
 	if (agg_mode)
 	{
+		/*
+		 * RIGHT/FULL: the kernels flag the matched inner rows in a map appended to their output buffer
+		 * (scan_prog_ojmap_place); the backend emits the unmatched ones after the final reply. A GiST join
+		 * hands whole outer rows to the CPU after the final reply too, and those rows set map flags that
+		 * the emission has to see, so that combination stays on the CPU.
+		 */
+		int			has_right = 0, has_gist = 0;
+
 		for (int i = 0; i < nrels; i++)
+		{
 			if (rels[i].right_outer)
-			{
-				fail(&b, "aggregation over a RIGHT or FULL join is not implemented by the Vulkan service");
-				goto error;
-			}
+				has_right = 1;
+			if (rels[i].gist_page0)
+				has_gist = 1;
+		}
+		if (has_right && has_gist)
+		{
+			fail(&b, "aggregation over a RIGHT or FULL join with a GiST join is not implemented by the Vulkan service");
+			goto error;
+		}
 	}
 	if (nrels < 1 || nrels > SCAN_JOIN_MAXDEPTH || session->kcxt_kvecs_ndims != nrels + 1)
 	{

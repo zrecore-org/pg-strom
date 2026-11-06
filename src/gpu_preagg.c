@@ -2547,6 +2547,13 @@ tryAddGpuSortedGroupByPath(xpugroupby_build_path_context *con, CustomPath *cpath
 				elog(DEBUG2, "GpuPreAgg: GPU-Sort is not used over a GiST join with a geometry qual");
 				return;
 			}
+			/* the unmatched inner rows are emitted by the backend after the sorted groups */
+			if (pp_join->inners[i].join_type == JOIN_RIGHT ||
+				pp_join->inners[i].join_type == JOIN_FULL)
+			{
+				elog(DEBUG2, "GpuPreAgg: GPU-Sort is not used over a RIGHT/FULL join");
+				return;
+			}
 		}
 	}
 	if (!parse->groupClause || parse->distinctClause || con->havingProjQuals != NIL)
@@ -2610,21 +2617,31 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 
 	/*
 	 * GpuPreAgg on top of a GpuJoin: the join kernel aggregates the joined rows on the device
-	 * (jagg.slang / jgagg.slang). The service cannot do that for RIGHT and FULL joins, whose
-	 * unmatched inner rows are emitted by the backend after the scan, so those stay on
-	 * Aggregate (CPU) -> GpuJoin.
+	 * (jagg.slang / jgagg.slang). RIGHT and FULL joins work too: the kernels flag the matched inner rows
+	 * in the outer-join map, and after the final reply the backend joins each unmatched inner row with
+	 * NULL outer columns on the CPU and projects it to a partial-aggregate row (the poison path of a
+	 * GiST join uses the same code). The combination with a GiST join stays on the CPU: its undecidable
+	 * outer rows are joined by the backend after the service replied, and those set map flags too.
 	 */
 	if (input_path->custom_paths != NIL)
 	{
+		bool		has_right = false;
+		bool		has_gist = false;
+
 		for (int i=0; i < pp_input->num_inner_rels; i++)
 		{
 			JoinType	jtype = pp_input->inners[i].join_type;
 
 			if (jtype == JOIN_RIGHT || jtype == JOIN_FULL)
-			{
-				elog(DEBUG2, "GpuPreAgg: aggregation over a RIGHT/FULL join stays on the CPU");
-				return;
-			}
+				has_right = true;
+			if (OidIsValid(pp_input->inners[i].gist_index_oid) ||
+				OidIsValid(pp_input->inners[i].gist_func_oid))
+				has_gist = true;
+		}
+		if (has_right && has_gist)
+		{
+			elog(DEBUG2, "GpuPreAgg: aggregation over a RIGHT/FULL join with a GiST join stays on the CPU");
+			return;
 		}
 	}
 	elog(DEBUG2, "GpuPreAgg: trying on top of %s (%d inner relations, parallel=%d)",

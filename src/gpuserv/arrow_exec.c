@@ -1133,6 +1133,7 @@ arrow_pack_gpu(gpu_vk_ctx *vk, const arrow_src *as, const scan_prog *prog, const
 #define ARROW_AGG_PAGES_PER_WG	32U		/* virtual pages one aggregation workgroup runs over */
 #define ARROW_JAGG_PAGES_PER_WG	8U
 #define ARROW_JGAGG_PAGES_PER_WG	32U
+#define ARROW_JOINAGG_DISPATCH_GROUPS	128U	/* workgroups per dispatch of a join aggregation (see JOINAGG_DISPATCH_GROUPS in scan_exec.c) */
 #define ARROW_JOIN_PASS_ROWS	(1U << 20)	/* rows of a join pass (the output buffer holds the matches) */
 
 typedef struct
@@ -2182,7 +2183,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 		tg += arrow_now_ms() - tp;
 		tp = arrow_now_ms();
 		if (prog->oj_words > 0)
-			scan_join_merge_ojmap(prog, ji, out);
+			scan_join_merge_ojmap(prog, ji, out, 4);
 		/*
 		 * Poison records (item word of depth 1 = 0xfffffffe, join_walk.inc): the outer row could not be decided on the
 		 * GPU (a scan qual or the join program needed the CPU). Whatever matches it appended are dropped and the row
@@ -2506,7 +2507,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	for (uint32_t first = 0; first < nrows; first += pass_rows)
 	{
 		uint32_t	n = nrows - first, pages, ngroups;
-		size_t		out_words, ovf_base = 0;
+		size_t		out_words, ovf_base = 0, oj_base = 0;
 		const uint32_t *out = NULL;
 		gpu_vk_pipeline *pipe = vmpipe;
 		gpu_vk_buffer *bufs[6];
@@ -2537,6 +2538,9 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			}
 			else
 				out_words = 4 + (size_t) ngroups * nagg * 6;
+			/* RIGHT/FULL joins: the outer-join map follows the results */
+			oj_base = out_words;
+			out_words += prog->oj_words;
 			if (out_words > 0xffffffffULL / 8 ||
 				gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 			{
@@ -2549,13 +2553,19 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			memset(bout.map, 0, 16);
 			if (grouped)
 				((uint32_t *) bout.map)[ovf_base] = 0;
-			for (uint32_t base = 0; base < ngroups; base += ARROW_WG_MAX)
+			if (prog->oj_words > 0)
+			{
+				memset((uint32_t *) bout.map + oj_base, 0, (size_t) prog->oj_words * 4);
+				memcpy(at.bprog.map, prog->words, prog->nwords * 4);
+				scan_prog_ojmap_place(prog, (uint32_t *) at.bprog.map, oj_base);
+			}
+			for (uint32_t base = 0; base < ngroups; base += ARROW_JOINAGG_DISPATCH_GROUPS)
 			{
 				uint32_t	groups = ngroups - base;
 				uint32_t	pc[5];
 
-				if (groups > ARROW_WG_MAX)
-					groups = ARROW_WG_MAX;
+				if (groups > ARROW_JOINAGG_DISPATCH_GROUPS)
+					groups = ARROW_JOINAGG_DISPATCH_GROUPS;
 				pc[0] = pages;
 				pc[1] = base;
 				pc[2] = ppw;
@@ -2586,6 +2596,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		}
 		tg += arrow_now_ms() - tp;
 		tp = arrow_now_ms();
+		if (prog->oj_words > 0)
+			scan_join_merge_ojmap(prog, ji, out, oj_base);
 		if (!grouped)
 			scan_agg_merge_workgroups(prog, st, out, ngroups);
 		else

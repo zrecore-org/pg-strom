@@ -166,6 +166,10 @@ for t in a1 a2 a3 p1; do
 	ajagg_any $t "GROUP BY an expression of the outer side" "select t.a % 20 as k, count(*), sum(d.grp) from %T t join %D d on t.b = d.k group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
 	ajagg_any $t "GROUP BY two keys (outer and inner), the overflow list" "select t.a % 200 as k1, d.grp, count(*), sum(d.pay) from %T t join %D d on t.b = d.k group by 1, 2 order by 1, 2" "set pg_strom.gpupreagg_max_groups=100000;"
 	ajagg $t "GROUP BY the NULL group of a LEFT join" "select d.grp, count(*), sum(t.a) from %T t left join %D d on t.b = d.k + 20000 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	ajagg $t "RIGHT JOIN: matched rows on the device, the unmatched inner rows from the backend" "select count(*), count(t.i), sum(d.grp), sum(t.a), max(d.pay) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000"
+	ajagg $t "RIGHT JOIN, nothing matches" "select count(*), count(t.i), sum(d.grp), min(d.pay) from %T t right join %D d on t.b = d.k + 1000000"
+	ajagg $t "FULL JOIN" "select count(*), count(t.i), count(d.k), sum(d.grp), sum(t.a) from %T t full join %D d on t.b = d.k and t.a > 9000"
+	ajagg $t "RIGHT JOIN, GROUP BY a key of the inner side" "select d.grp, count(*), count(t.i), sum(t.a) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
 	adim=ad; adim2=ad2
 	ajagg $t "Arrow dimension table: GROUP BY" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
 	adim=sd; adim2=sd2

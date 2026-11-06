@@ -2711,9 +2711,9 @@ join_open_ojmap(join_inner *ji, const char *name, const kern_multirels *kmrels, 
 	return 0;
 }
 
-/* merge the flags a task set (its output buffer's map) into the backend's map */
+/* merge the flags a task set (its output buffer's map, which starts at word `base`) into the backend's map */
 static void
-join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out)
+join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out, size_t base)
 {
 	for (int d = 1; d <= prog->ndepth; d++)
 	{
@@ -2722,7 +2722,7 @@ join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *ou
 
 		if (prog->oj_off[d] == 0xffffffffU || !dst)
 			continue;
-		src = out + 4 + prog->oj_off[d];
+		src = out + base + prog->oj_off[d];
 		for (uint32_t r = 0; r < prog->oj_nitems[d]; r++)
 			if (src[r])
 				dst[r] = 1;
@@ -3061,7 +3061,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	}
 	t2 = now_ms();
 	if (prog->oj_words > 0)
-		join_merge_ojmap(prog, ji, out);
+		join_merge_ojmap(prog, ji, out, 4);
 
 	/* the result chunk, in one pass */
 	memset(&fc, 0, sizeof(fc));
@@ -3269,6 +3269,12 @@ error:
  */
 #define JAGG_PAGES_PER_WG	8U		/* outer pages one such workgroup runs over (without GROUP BY) */
 #define JGAGG_PAGES_PER_WG	32U		/* ... with GROUP BY (the group table is set up and written out per workgroup) */
+/*
+ * A walk of the join tree can be long (an inner side with many equal or NULL hash values makes a chain of thousands of
+ * items), and the device is marked lost when one dispatch runs past the watchdog: a join aggregation is therefore
+ * dispatched in slices of this many workgroups (the slices add up to the same work).
+ */
+#define JOINAGG_DISPATCH_GROUPS	128U
 
 static int
 ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int avariant, char *err, size_t errlen)
@@ -3331,7 +3337,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	gpu_vk_pipeline *sp, *vmpipe;
 	spec_shape	sh;
 	spec_keystats ks;
-	size_t		out_words, ovf_base = 0;
+	size_t		out_words, ovf_base = 0, oj_base = 0;
 	const uint32_t *out = NULL;
 	int			rv = -1;
 	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
@@ -3568,6 +3574,9 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		}
 		else
 			out_words = 4 + (size_t) ngroups_total * nagg * 6;
+		/* RIGHT/FULL joins: the outer-join map follows the results (the kernels flag the matched inner rows) */
+		oj_base = out_words;
+		out_words += prog->oj_words;
 		if (out_words > 0xffffffffULL / 8 ||
 			gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 		{
@@ -3579,13 +3588,19 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		memset(bout.map, 0, 16);
 		if (grouped)
 			((uint32_t *) bout.map)[ovf_base] = 0;
-		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
+		if (prog->oj_words > 0)
+		{
+			memset((uint32_t *) bout.map + oj_base, 0, (size_t) prog->oj_words * 4);
+			memcpy(bprog.map, prog->words, prog->nwords * 4);
+			scan_prog_ojmap_place(prog, (uint32_t *) bprog.map, oj_base);
+		}
+		for (uint32_t base = 0; base < ngroups_total; base += JOINAGG_DISPATCH_GROUPS)
 		{
 			uint32_t	groups = ngroups_total - base;
 			uint32_t	pc[5];
 
-			if (groups > SCAN_WG_MAX)
-				groups = SCAN_WG_MAX;
+			if (groups > JOINAGG_DISPATCH_GROUPS)
+				groups = JOINAGG_DISPATCH_GROUPS;
 			pc[0] = npages;
 			pc[1] = base;
 			pc[2] = ppw;
@@ -3615,6 +3630,8 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		goto done;
 	}
 	t2 = now_ms();
+	if (prog->oj_words > 0)
+		join_merge_ojmap(prog, ji, out, oj_base);
 	if (!grouped)
 		agg_merge_workgroups(prog, st, out, ngroups_total);
 	else
@@ -3771,7 +3788,7 @@ scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *
 
 /* merge the outer-join map a join kernel filled (RIGHT/FULL joins) into the backend's */
 void
-scan_join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out)
+scan_join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out, size_t base)
 {
-	join_merge_ojmap(prog, ji, out);
+	join_merge_ojmap(prog, ji, out, base);
 }
