@@ -416,6 +416,14 @@ describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_
 	}
 }
 
+static int
+cmp_u64(const void *a, const void *b)
+{
+	uint64_t	x = *(const uint64_t *) a, y = *(const uint64_t *) b;
+
+	return (x < y ? -1 : x > y ? 1 : 0);
+}
+
 /* ---------------------------------------------------------------- */
 /* rows for the backend to evaluate (KDS_FORMAT_RECHECK) */
 static int
@@ -2855,12 +2863,15 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	page_set	ps;
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant;
 	gpu_vk_pipeline *sp = NULL;
-	uint32_t	npages, nloaded, total_lps = 0, ncomp, rec_words, cap, nmatch = 0;
+	uint32_t	npages, nloaded, total_lps = 0, ncomp, rec_words, cap, nmatch = 0, nout = 0;
 	size_t		out_words;
 	const uint32_t *out = NULL;
 	XpuCommand *resp = NULL;
 	form_ctx	fc;
 	double		t0 = now_ms(), t1 = 0, t2 = 0;
+	recheck_buf	rck = {0};
+	uint64_t   *pz = NULL;				/* the outer rows the join program could not decide: (page << 32) | lp, sorted */
+	uint32_t	npz = 0;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -3042,6 +3053,50 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 			snprintf(err, errlen, "out of memory");
 			goto error;
 		}
+		/*
+		 * Poison records (item word of depth 1 = 0xfffffffe): the kernel could not decide the outer row (a geometry
+		 * it cannot read, an instruction that needs the CPU). Whatever matches it appended before are dropped and the
+		 * outer tuple goes back to the backend, which joins it on the CPU (KDS_FORMAT_RECHECK).
+		 */
+		for (uint32_t r = 0; r < nmatch; r++)
+		{
+			const uint32_t *rec = &out[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
+
+			if (rec[2] != 0xfffffffeu)
+				continue;
+			if (rec[0] >= npages)
+			{
+				snprintf(err, errlen, "corrupt match record");
+				goto error;
+			}
+			if (!pz)
+			{
+				pz = malloc(sizeof(uint64_t) * (size_t) nmatch);
+				if (!pz)
+				{
+					snprintf(err, errlen, "out of memory");
+					goto error;
+				}
+			}
+			pz[npz++] = ((uint64_t) rec[0] << 32) | rec[1];
+		}
+		if (npz > 1)
+			qsort(pz, npz, sizeof(uint64_t), cmp_u64);
+		for (uint32_t i = 0; i < npz; i++)
+		{
+			uint32_t	page = (uint32_t)(pz[i] >> 32), lp = (uint32_t) pz[i], lpd;
+			const unsigned char *pg = PAGE_AT(&ps, page);
+
+			if (i > 0 && pz[i] == pz[i - 1])
+				continue;
+			memcpy(&lpd, pg + 24 + (size_t) lp * 4, 4);
+			if (rck_add(&rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[page], lp + 1,
+						pg + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+			{
+				snprintf(err, errlen, "out of memory");
+				goto error;
+			}
+		}
 		for (uint32_t r = 0; r < nmatch; r++)
 		{
 			const uint32_t *rec = &out[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
@@ -3054,6 +3109,15 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 			{
 				snprintf(err, errlen, "corrupt match record");
 				goto error;
+			}
+			if (rec[2] == 0xfffffffeu)
+				continue;
+			if (npz > 0)
+			{
+				uint64_t	key = ((uint64_t) page << 32) | lp;
+
+				if (bsearch(&key, pz, npz, sizeof(uint64_t), cmp_u64))
+					continue;				/* the backend joins this row */
 			}
 			inner[0] = NULL;
 			for (int d = 1; d <= prog->ndepth; d++)
@@ -3084,40 +3148,59 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 			sz = form_tuple(&fc, pg + (lpd & 0x7fff), inner,
 							rec + 2 + prog->ndepth, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[page], lp + 1,
 							(kern_tupitem *)((char *) resp + resp_sz + head_sz + idx_sz + usage),
-							r, err, errlen);
+							nout, err, errlen);
 			if (sz < 0)
 				goto error;
-			((uint64_t *)((char *) resp + resp_sz + head_sz))[r] = usage;
+			((uint64_t *)((char *) resp + resp_sz + head_sz))[nout] = usage;
 			usage += MAXALIGN(sz);
+			nout++;
 		}
 		chunk_len = head_sz + idx_sz + usage;
 		kds = (kern_data_store *)((char *) resp + resp_sz);
 		memcpy(kds, kds_dst_head, head_sz);
 		kds->length = chunk_len;
 		kds->usage = usage;
-		kds->nitems = nmatch;
+		kds->nitems = nout;
 		kds->format = KDS_FORMAT_ROW;
 		kds->hash_nslots = 0;
 		rowindex = (uint64_t *)((char *) kds + head_sz);
-		for (uint32_t r = 0; r < nmatch; r++)
+		for (uint32_t r = 0; r < nout; r++)
 			rowindex[r] = usage - rowindex[r];
 		resp->magic = XpuCommandMagicNumber;
 		resp->tag = XpuCommandTag__Success;
 		resp->length = resp_sz + chunk_len;
 		resp->u.results.scan_relidx = task->u.task.scan_relidx;
 		resp->u.results.chunks_offset = resp_sz;
-		resp->u.results.chunks_nitems = (nmatch > 0 ? 1 : 0);
+		resp->u.results.chunks_nitems = (nout > 0 ? 1 : 0);
 		resp->u.results.nitems_raw = total_lps;
 		resp->u.results.nitems_in = total_lps;
-		resp->u.results.nitems_out = nmatch;
+		resp->u.results.nitems_out = nout;
 		resp->u.results.npages_vfs_read = (npages - nloaded) * PAGES_PER_BLOCK;
-		if (nmatch == 0)
+		if (nout == 0)
 			resp->length = resp_sz;
+		if (rck.nitems > 0)
+		{
+			/* the rows the backend has to join itself, as one more chunk */
+			size_t		csz = rck_chunk_size(kds_dst_head, &rck);
+			XpuCommand *nr = realloc(resp, resp->length + csz);
+
+			if (!nr)
+			{
+				snprintf(err, errlen, "out of memory");
+				goto error;
+			}
+			resp = nr;
+			rck_chunk_fill((kern_data_store *)((char *) resp + resp->length), kds_dst_head, &rck);
+			resp->length += csz;
+			resp->u.results.chunks_nitems++;
+		}
 		*p_len = resp->length;
 	}
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: join task: %u pages, pages-in %.1f ms, gpu %.1f ms, results %.1f ms (%u matches)\n",
 				npages, t1 - t0, t2 - t1, now_ms() - t2, nmatch);
+	free(pz);
+	free(rck.buf);
 	gpu_vk_buffer_destroy(vk, &bprog);
 	if (have_out)
 		gpu_vk_buffer_destroy(vk, &bout);
@@ -3127,6 +3210,8 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 
 error:
 	free(resp);
+	free(pz);
+	free(rck.buf);
 	if (have_prog)
 		gpu_vk_buffer_destroy(vk, &bprog);
 	if (have_out)

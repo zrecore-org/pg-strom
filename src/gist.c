@@ -19,6 +19,9 @@
 #include "utils/syscache.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
+#include "access/stratnum.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 
 /* the index must cover fewer blocks than a walker cursor can name (scan_prog.c / join_walk.inc) */
 #define GIST_JOIN_MAX_BLOCKS	((1U << 21) - 2)
@@ -44,19 +47,25 @@ __gist_opfamily_is_2d(Oid opfamily)
  * st_makepoint(x, y) of two float8 arguments from the postgis extension: returns the (x, y) pair
  */
 static bool
-__gist_makepoint_args(Node *node, Expr **p_x, Expr **p_y)
+__gist_makepoint_args(Node *node, Expr **p_x, Expr **p_y, bool loose)
 {
 	FuncExpr   *func;
 	char	   *extname;
 	devtype_info *dtype;
 
+	/* loose (slice 2, the function runs again in the join program): st_setsrid(., constant) and Z / M arguments are fine */
+	if (loose && node && IsA(node, FuncExpr) && list_length(((FuncExpr *) node)->args) == 2 &&
+		IsA(lsecond(((FuncExpr *) node)->args), Const) &&
+		strcmp(get_func_name(((FuncExpr *) node)->funcid), "st_setsrid") == 0)
+		node = linitial(((FuncExpr *) node)->args);
 	if (!node || !IsA(node, FuncExpr))
 		return false;
 	func = (FuncExpr *) node;
-	if (list_length(func->args) != 2 ||
-		exprType(linitial(func->args)) != FLOAT8OID ||
-		exprType(lsecond(func->args)) != FLOAT8OID)
+	if (list_length(func->args) < 2 || list_length(func->args) > (loose ? 4 : 2))
 		return false;
+	for (int i = 0; i < list_length(func->args); i++)
+		if (exprType(list_nth(func->args, i)) != FLOAT8OID)
+			return false;
 	if (strcmp(get_func_name(func->funcid), "st_makepoint") != 0)
 		return false;
 	extname = get_func_extension_name(func->funcid);
@@ -113,7 +122,7 @@ __gist_match_clause(PlannerInfo *root,
 	/* the key is the index column itself (a plain column of the inner relation) */
 	if (!IsA(keyarg, Var) || ((Var *) keyarg)->varno != inner_rel->relid)
 		return false;
-	if (!__gist_makepoint_args(ptarg, p_x, p_y))
+	if (!__gist_makepoint_args(ptarg, p_x, p_y, false))
 		return false;
 	/* the point depends on the outer relation only */
 	relids = pull_varnos(root, ptarg);
@@ -122,6 +131,91 @@ __gist_match_clause(PlannerInfo *root,
 	if (contain_volatile_functions(ptarg))
 		return false;
 	*p_clause = (Expr *) op;
+	return true;
+}
+
+/*
+ * __gist_match_pip
+ *
+ * Slice 2: st_contains(geom, st_makepoint(x, y)), st_within(st_makepoint(x, y), geom) or st_intersects of the two in
+ * either order, geom being the key of the index column. The index answers the box overlap "geom && point" (every
+ * geometry that contains or intersects the point has a box that overlaps the point's box, and the key boxes are rounded
+ * outward), and the join program runs the original function on the candidates. *p_clause is that "&&" clause.
+ */
+static bool
+__gist_match_pip(PlannerInfo *root,
+				 RelOptInfo *outer_rel,
+				 RelOptInfo *inner_rel,
+				 IndexOptInfo *index,
+				 int indexcol,
+				 RestrictInfo *rinfo,
+				 Expr **p_x, Expr **p_y, Expr **p_clause, Oid *p_funcid)
+{
+	FuncExpr   *func;
+	char	   *fname, *extname;
+	Node	   *a0, *a1, *keyarg, *ptarg;
+	Relids		relids;
+	Oid			opno;
+	Oid			keytype;
+
+	if (rinfo->pseudoconstant || !rinfo->clause || !IsA(rinfo->clause, FuncExpr))
+		return false;
+	func = (FuncExpr *) rinfo->clause;
+	if (list_length(func->args) != 2)
+		return false;
+	extname = get_func_extension_name(func->funcid);
+	if (!extname || strcmp(extname, "postgis") != 0)
+		return false;
+	fname = get_func_name(func->funcid);
+	if (!fname)
+		return false;
+	a0 = linitial(func->args);
+	a1 = lsecond(func->args);
+	if (strcmp(fname, "st_contains") == 0)
+	{
+		keyarg = a0;
+		ptarg = a1;
+	}
+	else if (strcmp(fname, "st_within") == 0)
+	{
+		keyarg = a1;
+		ptarg = a0;
+	}
+	else if (strcmp(fname, "st_intersects") == 0)
+	{
+		if (match_index_to_operand(a0, indexcol, index))
+		{
+			keyarg = a0;
+			ptarg = a1;
+		}
+		else
+		{
+			keyarg = a1;
+			ptarg = a0;
+		}
+	}
+	else
+		return false;
+	if (!match_index_to_operand(keyarg, indexcol, index))
+		return false;
+	if (!IsA(keyarg, Var) || ((Var *) keyarg)->varno != inner_rel->relid)
+		return false;
+	if (!__gist_makepoint_args(ptarg, p_x, p_y, true))
+		return false;
+	relids = pull_varnos(root, ptarg);
+	if (!bms_is_subset(relids, outer_rel->relids))
+		return false;
+	if (contain_volatile_functions(ptarg))
+		return false;
+	/* the index operator "geom && geom" of the operator family */
+	keytype = exprType(keyarg);
+	opno = get_opfamily_member(index->opfamily[indexcol], keytype, keytype, RTOverlapStrategyNumber);
+	if (!OidIsValid(opno))
+		return false;
+	*p_clause = make_opclause(opno, BOOLOID, false, (Expr *) keyarg, (Expr *) ptarg,
+							  InvalidOid, exprInputCollation((Node *) func));
+	set_opfuncid((OpExpr *) *p_clause);
+	*p_funcid = func->funcid;
 	return true;
 }
 
@@ -183,9 +277,26 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = lfirst(cell);
 			Expr	   *x, *y, *clause;
+			Oid			pip_func = InvalidOid;
 
-			if (!__gist_match_clause(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &clause))
+			if (!__gist_match_clause(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &clause) &&
+				!__gist_match_pip(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &clause, &pip_func))
 				continue;
+			/*
+			 * slice 2: the function itself runs in the join program (inner geometry, string registers, a row it cannot
+			 * decide goes back to the backend), so it must be executable there
+			 */
+			if (OidIsValid(pip_func))
+			{
+				bool	saved = pgstrom_codegen_join_geom(true);
+				bool	ok = pgstrom_xpu_expression(rinfo->clause,
+													(xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
+													base_scan_relid, inner_target_list, NULL);
+
+				pgstrom_codegen_join_geom(saved);
+				if (!ok)
+					continue;
+			}
 			/* x and y run on the device (in the join program) */
 			if (!pgstrom_xpu_expression(x, (xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
 										base_scan_relid, inner_target_list, NULL) ||
@@ -226,7 +337,7 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 			pp_inner->gist_index_col = 1;
 			pp_inner->gist_ctid_resno = gist_ctid_resno;
 			pp_inner->gist_strategy = 1;			/* && */
-			pp_inner->gist_func_oid = InvalidOid;
+			pp_inner->gist_func_oid = pip_func;		/* slice 2: the function the join program runs (the marker) */
 			pp_inner->gist_slot_id = -1;
 			pp_inner->gist_clause = clause;
 			pp_inner->gist_selectivity = clauselist_selectivity(root, list_make1(rinfo),

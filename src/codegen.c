@@ -1665,6 +1665,17 @@ static bool codegen_jsonb_const_ok = false;
  * by vulkan_geom_pip_args_ok(); this lets exactly those functions through while their arguments are generated.
  */
 static bool codegen_geom_mk_ok = false;
+static bool codegen_join_geom_ok = false;	/* A13 slice 2: a point-in-polygon qual may read an inner geometry column */
+
+/* gpu_join.c: allow (or not) the point-in-polygon quals of a GiST-index join in a join program */
+bool
+pgstrom_codegen_join_geom(bool allow)
+{
+	bool		saved = codegen_join_geom_ok;
+
+	codegen_join_geom_ok = allow;
+	return saved;
+}
 
 static int
 codegen_const_expression(codegen_context *context,
@@ -2591,6 +2602,31 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 {
 	scan_func_class fc = scan_vm_classify_func(dfunc->func_code);
 
+	/*
+	 * A13 slice 2: a point-in-polygon qual of a GiST-index join runs in the join program on the inner relation's
+	 * geometry column (a string register that points into the inner buffer); the kernel hands a row it cannot
+	 * decide back to the backend (the poison records of the join task). Nothing else reads a geometry in a join.
+	 */
+	if (fc.cls == SOP_GEOMPIP && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	{
+		Node	   *poly;
+		int			s0, s1;
+
+		if (!codegen_join_geom_ok || list_length(func_args) != 2 || !vulkan_geom_source_ok(context) ||
+			!vulkan_geom_pip_args_ok(fc, func_args))
+			return false;
+		s0 = vulkan_geom_operand_shape(linitial(func_args));
+		s1 = vulkan_geom_operand_shape(lsecond(func_args));
+		/* one fused point, the other operand a column of an inner relation */
+		if (!((s0 == 1 && s1 == 0) || (s0 == 0 && s1 == 1)))
+			return false;
+		poly = (s0 == 1 ? (Node *) lsecond(func_args) : (Node *) linitial(func_args));
+		return (IsA(poly, Var) && ((Var *) poly)->varno != context->base_relid &&
+				((Var *) poly)->varlevelsup == 0 && ((Var *) poly)->varattno > 0);
+	}
+	/* the fused st_makepoint(x, y) of such a qual (codegen_geom_mk_ok: its parent allowed it) */
+	if (fc.cls == SOP_GEOMMK && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+		return (codegen_join_geom_ok && codegen_geom_mk_ok && vulkan_geom_source_ok(context));
 	/* PostGIS (A11): the geometry operators read a string register; a join program loads none */
 	if ((fc.cls == SOP_GEOMBOX || fc.cls == SOP_GEOMPIP || fc.cls == SOP_GEOMDWITHIN || fc.cls == SOP_GEOMMK ||
 		 fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOM3DDW || fc.cls == SOP_GEOMFLAG || fc.cls == SOP_GEOMDIST || fc.cls == SOP_GEOMLEN) &&

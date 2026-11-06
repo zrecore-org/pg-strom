@@ -40,6 +40,9 @@
 #endif
         uint d = 0;                                 // current depth; 0: this lane is done
         uint mflag = 0;                             // bit d: depth d has found a match
+#if JW_MODE == 0 && !defined(SPEC_PROG)
+        bool pz = false;                            // "poison": the join program could not decide this outer row (see below)
+#endif
         for (uint i = 0; i <= JOIN_MAXD; i++)
         {
             nxt[i] = NO_ITEM;
@@ -182,9 +185,18 @@
                                 ok = jok;
 #else
                         null_slots(prog[dt + 5], prog[dt + 6], regs);
+                        g_recheck = 0;
                         if (deform_tuple(it, page, lp, prog[dt + 5], prog[dt + 6], regs))
                         {
+#if JW_MODE == 0
+                            // A string of the inner tuple the kernel cannot read (compressed, out of line) or an
+                            // instruction that cannot decide (SOP_RECHECK_CODE): the backend joins this outer row
+                            // on the CPU, so the walk of the row ends here and a poison record names it.
+                            uint err = (g_recheck != 0) ? SOP_RECHECK_CODE
+                                     : vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
+#else
                             uint err = vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
+#endif
                             if (err == 0)
                             {
                                 uint jq = prog[dt + 4];
@@ -193,7 +205,12 @@
 #endif
                             else
                             {
-                                report_error(page, lp, err);
+#if JW_MODE == 0 && !defined(SPEC_PROG)
+                                if (err == SOP_RECHECK_CODE)
+                                    pz = true;
+                                else
+#endif
+                                    report_error(page, lp, err);
                                 d = 0;
                             }
                         }
@@ -295,16 +312,23 @@
             }
 
 #if JW_MODE == 0
-            // append a match record: one atomic reservation per subgroup
-            uint cnt  = WaveActiveCountBits(emit);
+            // append a match record: one atomic reservation per subgroup. A poisoned outer row appends one
+            // record of its own, marked by 0xfffffffe in the item word of depth 1: the service drops the
+            // records of that row and returns the outer tuple to the backend (KDS_FORMAT_RECHECK).
+#ifdef SPEC_PROG
+            bool rec = emit;
+#else
+            bool rec = emit || pz;
+#endif
+            uint cnt  = WaveActiveCountBits(rec);
             if (cnt > 0)
             {
-                uint excl = WavePrefixCountBits(emit);
+                uint excl = WavePrefixCountBits(rec);
                 uint pos  = 0;
                 if (WaveIsFirstLane())
                     InterlockedAdd(outb[0], cnt, pos);
                 pos = WaveReadLaneFirst(pos);
-                if (emit)
+                if (rec)
                 {
                     uint idx = pos + excl;
                     if (idx < cap)
@@ -314,6 +338,10 @@
                         outb[rb + 1] = lp;
                         for (uint k = 0; k < nd; k++)
                             outb[rb + 2 + k] = cur[k + 1];
+#ifndef SPEC_PROG
+                        if (pz)
+                            outb[rb + 2] = 0xfffffffeu;
+#endif
 #ifdef SPEC_PROG
                         spec_store_comp_j(regs, rb + 2 + nd);
 #else
@@ -328,6 +356,9 @@
                     }
                 }
             }
+#ifndef SPEC_PROG
+            pz = false;                                     // the record names the row once
+#endif
 #elif JW_MODE == 1
             if (emit)
             {

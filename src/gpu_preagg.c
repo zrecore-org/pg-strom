@@ -2609,6 +2609,12 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 				elog(DEBUG2, "GpuPreAgg: aggregation over a RIGHT/FULL join stays on the CPU");
 				return;
 			}
+			/* a join program that reads an inner geometry hands undecidable rows back to the backend: not aggregated */
+			if (OidIsValid(pp_input->inners[i].gist_func_oid))
+			{
+				elog(DEBUG2, "GpuPreAgg: aggregation over a GiST join with a geometry qual stays on the CPU");
+				return;
+			}
 		}
 	}
 	elog(DEBUG2, "GpuPreAgg: trying on top of %s (%d inner relations, parallel=%d)",

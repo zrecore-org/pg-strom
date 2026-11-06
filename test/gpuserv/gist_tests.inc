@@ -115,4 +115,85 @@ wait $writer
 # off by default: the plan has no GPU GiST Join
 off=$($PSQL -d scantest -c "$GPU $JOINSET explain $JQ" | grep -c "GPU GiST Join")
 check "pg_strom.enable_gpugistindex is off by default" "$([ "$off" = 0 ]; echo $?)"
+# ---- slice 2: ST_Contains / ST_Intersects / ST_Within through the index, the function itself runs in the join program ----
+# The index answers "geom && point"; the join program runs the point-in-polygon function on the inner geometry column (a string
+# register into the inner buffer). A row the kernel cannot decide (a Z/M polygon, a line, a compressed or out-of-line polygon, a
+# SRID mismatch) is joined by the backend on the CPU (poison record -> KDS_FORMAT_RECHECK), so the answer is always PostGIS's.
+echo "GiST spatial join, point-in-polygon (A13 slice 2)"
+sql "drop table if exists pg_g2z; drop table if exists pg_g2p"
+sql "create table pg_g2z (id int4, geom geometry, a int4) with (fillfactor=70)"
+sql "insert into pg_g2z select i,
+	case i % 20
+		when 0 then null
+		when 1 then ST_GeomFromText('POLYGON EMPTY')
+		when 2 then ST_MakeEnvelope(i % 50, (i * 3) % 50, i % 50 + 4, (i * 3) % 50 + 3)
+		when 3 then ST_MakePolygon(ST_MakeLine(ARRAY[ST_MakePoint(i % 50, i % 47), ST_MakePoint(i % 50 + 6, i % 47), ST_MakePoint(i % 50 + 3, i % 47 + 5), ST_MakePoint(i % 50, i % 47)]))
+		when 4 then ST_Difference(ST_MakeEnvelope(i % 50, i % 47, i % 50 + 8, i % 47 + 8), ST_MakeEnvelope(i % 50 + 2, i % 47 + 2, i % 50 + 6, i % 47 + 6))
+		when 5 then ST_Collect(ST_MakeEnvelope(i % 50, i % 47, i % 50 + 2, i % 47 + 2), ST_MakeEnvelope(i % 50 + 4, i % 47 + 4, i % 50 + 6, i % 47 + 6))
+		when 6 then ST_MakeLine(ST_MakePoint(i % 50, i % 47), ST_MakePoint(i % 50 + 5, i % 47 + 5))
+		when 7 then ST_MakePoint(i % 50, i % 47)
+		when 8 then ST_Force3D(ST_MakeEnvelope(i % 50, i % 47, i % 50 + 5, i % 47 + 5), 2)
+		when 9 then ST_Force4D(ST_MakeEnvelope(i % 50, i % 47, i % 50 + 5, i % 47 + 5), 2, 3)
+		when 10 then ST_Force3DM(ST_MakeEnvelope(i % 50, i % 47, i % 50 + 5, i % 47 + 5), 4)
+		when 11 then ST_Buffer(ST_MakePoint(i % 50 + 5, i % 47 + 5), 4, 100)
+		else ST_MakeEnvelope(i % 52 - 1, (i * 7) % 52 - 1, i % 52 + 1 + i % 3, (i * 7) % 52 + 1 + i % 4)
+	end, i
+	from generate_series(1, 3000) i"
+# one polygon of 3000 vertices (about 48 kB: stored out of line / compressed) and a compressible one
+sql "insert into pg_g2z values (90001, ST_Buffer(ST_MakePoint(30, 30), 12, 750), 1), (90002, ST_Buffer(ST_MakePoint(20, 40), 15, 250), 2)"
+sql "create index pg_g2z_gist on pg_g2z using gist (geom)"
+sql "create table pg_g2p (id int4, x float8, y float8)"
+# integer and half-integer points: on vertices, on edges, on the boundary of holes
+sql "insert into pg_g2p select i, (i % 120) / 2.0, (i / 120) / 2.0 from generate_series(0, 14399) i"
+sql "insert into pg_g2p values (-1, null, 1), (-2, 1, null), (-3, 1e300, 1e300)"
+sql "analyze pg_g2z; analyze pg_g2p"
+J2="select o.id, i.id from pg_g2p o join pg_g2z i on"
+gistjoin "ST_Contains(inner polygon, point)" "$J2 st_contains(i.geom, st_makepoint(o.x, o.y))"
+gistjoin "ST_Intersects(inner polygon, point)" "$J2 st_intersects(i.geom, st_makepoint(o.x, o.y))"
+gistjoin "ST_Intersects(point, inner polygon)" "$J2 st_intersects(st_makepoint(o.x, o.y), i.geom)"
+gistjoin "ST_Within(point, inner polygon)" "$J2 st_within(st_makepoint(o.x, o.y), i.geom)"
+gistjoin "with an inner qual" "$J2 st_contains(i.geom, st_makepoint(o.x, o.y)) and i.a % 3 = 0"
+gistjoin "with an outer qual" "$J2 st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.id % 5 = 0"
+gistjoin "left join" "select o.id, i.id from pg_g2p o left join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y))"
+gistjoin "semi join" "select o.id from pg_g2p o where exists (select 1 from pg_g2z i where st_intersects(i.geom, st_makepoint(o.x, o.y)))"
+gistjoin "anti join" "select o.id from pg_g2p o where not exists (select 1 from pg_g2z i where st_contains(i.geom, st_makepoint(o.x, o.y)))"
+gistjoin "count per outer row (an aggregate above the join)" "select o.id, count(i.id) from pg_g2p o join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id"
+gistjoin "fused 3-argument point" "$J2 st_intersects(i.geom, st_makepoint(o.x, o.y, 2))"
+gistjoin "fused point with SRID 0 set explicitly" "$J2 st_contains(i.geom, st_setsrid(st_makepoint(o.x, o.y), 0))"
+# RIGHT and FULL joins: the kernel's flags of matched inner rows and the backend's re-joined rows (poison) add up
+gistjoin "right join" "select o.id, i.id from pg_g2p o right join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y))"
+gistjoin "right join, intersects" "select o.id, i.id from pg_g2p o right join pg_g2z i on st_intersects(i.geom, st_makepoint(o.x, o.y))"
+# PostgreSQL cannot plan a FULL JOIN on this clause: the GPU's FULL JOIN must have left + right - inner rows
+fj=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_g2p o full join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y))" 2>&1 | tail -1)
+lj=$($PSQL -d scantest -c "$CPU select count(*) from pg_g2p o left join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y))" | tail -1)
+rj=$($PSQL -d scantest -c "$CPU select count(*) from pg_g2p o right join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y))" | tail -1)
+ij=$($PSQL -d scantest -c "$CPU select count(*) from pg_g2p o join pg_g2z i on st_contains(i.geom, st_makepoint(o.x, o.y))" | tail -1)
+[ "$fj" = "$((lj + rj - ij))" ]; check "full join: left + right - inner rows ($fj = $lj + $rj - $ij)" $?
+# the outer polygon column (the wrong side) is not pushed into the join program
+plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON explain select o.id, i.id from pg_g2p o join pg_g2z i on st_contains(st_buffer(st_makepoint(o.x, o.y), 1), i.geom)" 2>&1)
+check "a function of the outer side as the polygon stays off the GiST join" "$(echo "$plan" | grep -q 'GPU GiST Join'; [ $? -ne 0 ]; echo $?)"
+# rows the kernel hands back: the Z/M/ZM polygons, lines, points, the big polygons. Confirm that some existed in the join.
+nb=$($PSQL -d scantest -c "$CPU select count(*) from pg_g2z where geom is not null and (ST_HasZ(geom) or ST_HasM(geom) or GeometryType(geom) <> 'POLYGON' or ST_NPoints(geom) > 200)" | tail -1)
+check "the data has rows for the CPU path ($nb)" "$([ "${nb:-0}" -gt 0 ]; echo $?)"
+# a mixed SRID is an error on the CPU; the GPU path asks the CPU, so the error is the same
+sql "drop table if exists pg_g2s"
+sql "create table pg_g2s (id int4, x float8, y float8)"
+sql "insert into pg_g2s values (1, 10.5, 10.5)"
+sql "create table if not exists pg_g2zs (id int4, geom geometry)"
+sql "truncate pg_g2zs"
+sql "insert into pg_g2zs values (1, ST_SetSRID(ST_MakeEnvelope(10, 10, 12, 12), 4326))"
+sql "create index if not exists pg_g2zs_gist on pg_g2zs using gist (geom)"
+sql "analyze pg_g2zs; analyze pg_g2s"
+eg=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select o.id, i.id from pg_g2s o join pg_g2zs i on st_contains(i.geom, st_makepoint(o.x, o.y))" 2>&1 | grep -i 'mixed SRID' | head -1)
+ec=$($PSQL -d scantest -c "$CPU select o.id, i.id from pg_g2s o join pg_g2zs i on st_contains(i.geom, st_makepoint(o.x, o.y))" 2>&1 | grep -i 'mixed SRID' | head -1)
+check "mixed SRID: the same error on both ($eg)" "$([ -n "$eg" ] && [ "$eg" = "$ec" ]; echo $?)"
+# changes of the inner table: deleted, HOT updated and moved rows
+sql "delete from pg_g2z where id % 7 = 0"
+sql "update pg_g2z set a = a + 1 where id % 5 = 0"
+sql "update pg_g2z set geom = ST_Translate(geom, 3, 2) where id % 11 = 3 and geom is not null"
+gistjoin "after delete and updates (contains)" "$J2 st_contains(i.geom, st_makepoint(o.x, o.y))"
+gistjoin "after delete and updates (intersects)" "$J2 st_intersects(i.geom, st_makepoint(o.x, o.y))"
+sql "vacuum pg_g2z"
+gistjoin "after vacuum" "$J2 st_intersects(i.geom, st_makepoint(o.x, o.y))"
+
 fi

@@ -680,6 +680,7 @@ extern void		pgstrom_init_brin(void);
  * gist.c
  */
 extern int		pgstrom_gist_max_steps;
+extern bool		pgstrom_codegen_join_geom(bool allow);
 extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 										RelOptInfo *outer_rel,
 										Path *inner_path,

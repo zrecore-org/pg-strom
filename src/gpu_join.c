@@ -461,7 +461,6 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			llast(inner_paths_list) = inner_path;
 		}
 	}
-
 	/*
 	 * All the join-clauses must be executable on GPU device.
 	 * Even though older version supports HostQuals to be
@@ -474,8 +473,8 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
 
-		/* the clause the GiST walk answers */
-		if (rinfo == gist_rinfo)
+		/* the clause the GiST walk answers (slice 2 keeps its function as a join qual) */
+		if (rinfo == gist_rinfo && !OidIsValid(gist_inner.gist_func_oid))
 		{
 			clauses_are_immutable = false;
 			continue;
@@ -493,13 +492,17 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		/*
 		 * Is the JOIN-clause executable on the target device?
 		 */
-		if (!pgstrom_xpu_expression(rinfo->clause,
-									(pp_prev->xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
-									pp_prev->base_relid,
-									inner_target_list,
-									NULL))
 		{
-			return NULL;
+			bool	geom_saved = pgstrom_codegen_join_geom(rinfo == gist_rinfo);
+			bool	xpu_ok = pgstrom_xpu_expression(rinfo->clause,
+													(pp_prev->xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
+													pp_prev->base_relid,
+													inner_target_list,
+													NULL);
+
+			pgstrom_codegen_join_geom(geom_saved);
+			if (!xpu_ok)
+				return NULL;
 		}
 
 		/*
@@ -1575,10 +1578,19 @@ PlanGpuJoinPathCommon(PlannerInfo *root,
 	pp_info->kexp_gpusort_keydesc = codegen_build_gpusort_keydesc(context, pp_info);
 	
 	/* assign remaining PlanInfo members */
-	pp_info->kexp_join_quals_packed
-		= codegen_build_packed_joinquals(context,
-										 join_quals_stacked,
-										 other_quals_stacked);
+	{
+		bool	geom_ok = false, geom_saved;
+
+		for (int i=0; i < pp_info->num_inner_rels; i++)
+			if (OidIsValid(pp_info->inners[i].gist_func_oid))
+				geom_ok = true;
+		geom_saved = pgstrom_codegen_join_geom(geom_ok);
+		pp_info->kexp_join_quals_packed
+			= codegen_build_packed_joinquals(context,
+											 join_quals_stacked,
+											 other_quals_stacked);
+		pgstrom_codegen_join_geom(geom_saved);
+	}
 	pp_info->kexp_hash_keys_packed
 		= codegen_build_packed_hashkeys(context,
 										hash_keys_stacked);

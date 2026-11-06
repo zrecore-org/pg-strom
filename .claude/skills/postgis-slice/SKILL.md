@@ -34,8 +34,9 @@ On the GPU: ST_Z, ST_M, 3-/4-argument ST_MakePoint (fused), ST_3DDWithin and ST_
 ST_Intersects point-in-polygon, `&&`, `&&&` (n-D boxes), the header functions ST_HasZ/ST_HasM/ST_NDims/ST_Zmflag/ST_CoordDim, ST_Distance/
 ST_3DDistance/ST_3DMaxDistance of two points and ST_Length/ST_Length2D/ST_3DLength of a line (exact: PostGIS' arm64 build fuses
 `dx*dx + dy*dy + dz*dz` with fma, reproduced by the software `f64_sqr_add`; `postgis/dist_probe*`, `len_probe*`), GiST join on `&&`.
-Still on the CPU: distances and lengths of non-point/non-line types (multi-lines, collections, polygons' perimeter), GiST join with
-ST_Contains/ST_DWithin (A13 slices 2-3, needs inner geometry registers in join programs).
+Also on the GPU: exact multi-part lengths/perimeters, point-to-line/polygon distance, exact ST_DWithin, and the GiST join with ST_Contains/ST_Within/
+ST_Intersects (A13 slice 2: inner geometry string registers in join programs, undecidable rows go back through poison records).
+Still on the CPU: distances of two non-points, ST_DWithin of non-points, GiST join with ST_DWithin (A13 slice 3), GpuPreAgg over a geometry GiST join.
 
 **The guard:** a function whose value must equal PostGIS' bit for bit is only pushed down after `vulkan_geom_*_calibrated` (codegen.c) called the
 installed PostGIS on fixed inputs and got the host formula's bits; a build that computes differently (no floating-point contraction) keeps the

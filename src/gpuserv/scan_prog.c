@@ -454,8 +454,7 @@ emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *n
 	int			ra, rb, ry = 0, dst;
 	uint32_t	flags, k1 = 0;
 
-	if (b->no_strings)
-		return fail(b, "a geometry is not supported in a join");
+	/* in a join program the polygon must be a column of an inner relation (the VarExpr case checks it) */
 	if (kexp->nr_args != 2)
 		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 	kmk0 = geom_fused_point(ka, &srid0);
@@ -968,7 +967,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR || reg_vtype(kexp->exptype, &bytes) == SOP_VT_NUM ||
 				reg_vtype(kexp->exptype, &bytes) == SOP_VT_JSON)
 			{
-				if (b->no_strings)
+				/* a join program reads the strings of an inner relation only (a geometry qual of a GiST join, A13) */
+				if (b->no_strings && !(reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR && b->slot_iresno[slot] > 0))
 					return fail(b, "strings and numerics are not supported in a join");
 				b->slot_strval[slot] = 1;
 			}
@@ -2356,7 +2356,16 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
 
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM || b.slot_ivtype[s] == SOP_VT_JSON)
+			if (b.slot_ivtype[s] == SOP_VT_STR && b.slot_strval[s])
+			{
+				/* the value of a string column of an inner relation is read (a geometry qual of a GiST join) */
+				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1)
+				{
+					fail(&b, "inner column %d does not have the type the expression expects", b.slot_iresno[s]);
+					goto error;
+				}
+			}
+			else if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM || b.slot_ivtype[s] == SOP_VT_JSON)
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
 			else if (!b.slot_ivtype[s] && b.slot_nullonly[s])
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
