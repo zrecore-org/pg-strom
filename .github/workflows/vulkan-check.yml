@@ -209,8 +209,8 @@ jobs:
           if-no-files-found: ignore
 
   macos-build:
-    name: macOS Apple Silicon, build only (no GPU test), PostgreSQL 17
-    runs-on: macos-26
+    name: macOS (Intel runner), build only (no GPU test), PostgreSQL 17
+    runs-on: macos-15-intel   # hosted macOS arm64 runners are not acquired for this repository (capacity); the host code builds the same
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -224,8 +224,8 @@ jobs:
           D="$HOME/tools/slang-${SLANG_VERSION}"
           mkdir -p "$D"
           curl -fsSL -o /tmp/slang.tar.gz \
-            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-aarch64.tar.gz"
-          echo "07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4  /tmp/slang.tar.gz" | shasum -a 256 -c -
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-x86_64.tar.gz"
+          echo "b4f01f615dc625f60c593d7d0a4bbd38e05dfa2a34bfd3973017c309d866feaa  /tmp/slang.tar.gz" | shasum -a 256 -c -
           tar -xzf /tmp/slang.tar.gz -C "$D"
           SLANGC=$(find "$D" -type f -name slangc | head -n 1)
           test -x "$SLANGC"
