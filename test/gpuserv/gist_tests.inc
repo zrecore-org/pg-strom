@@ -117,7 +117,7 @@ off=$($PSQL -d scantest -c "$GPU $JOINSET explain $JQ" | grep -c "GPU GiST Join"
 check "pg_strom.enable_gpugistindex is off by default" "$([ "$off" = 0 ]; echo $?)"
 # ---- slice 2: ST_Contains / ST_Intersects / ST_Within through the index, the function itself runs in the join program ----
 # The index answers "geom && point"; the join program runs the point-in-polygon function on the inner geometry column (a string
-# register into the inner buffer). A row the kernel cannot decide (a Z/M polygon, a line, a compressed or out-of-line polygon, a
+# register into the inner buffer). A row the kernel cannot decide (a Z/M polygon, a line, a
 # SRID mismatch) is joined by the backend on the CPU (poison record -> KDS_FORMAT_RECHECK), so the answer is always PostGIS's.
 echo "GiST spatial join, point-in-polygon (A13 slice 2)"
 sql "drop table if exists pg_g2z; drop table if exists pg_g2p"
@@ -139,7 +139,7 @@ sql "insert into pg_g2z select i,
 		else ST_MakeEnvelope(i % 52 - 1, (i * 7) % 52 - 1, i % 52 + 1 + i % 3, (i * 7) % 52 + 1 + i % 4)
 	end, i
 	from generate_series(1, 3000) i"
-# one polygon of 3000 vertices (about 48 kB: stored out of line / compressed) and a compressible one
+# one polygon of 3000 vertices (about 48 kB: stored out of line / compressed; the inner preload detoasts it) and a compressible one
 sql "insert into pg_g2z values (90001, ST_Buffer(ST_MakePoint(30, 30), 12, 750), 1), (90002, ST_Buffer(ST_MakePoint(20, 40), 15, 250), 2)"
 sql "create index pg_g2z_gist on pg_g2z using gist (geom)"
 sql "create table pg_g2p (id int4, x float8, y float8)"
