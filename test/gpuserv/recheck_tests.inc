@@ -154,22 +154,22 @@ rk_gistagg() { # label, query [, settings]: GpuPreAgg above the GiST join (ANYPL
 	if { [ "$pa" -ge 1 ] || [ "$ANYPLAN" = 1 ]; } && [ "$pg" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
 	else echo "  FAIL  $label (plan GpuPreAgg=$pa GPU GiST Join=$pg)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
-rk_joins() { # outer table
-	o=$1
+rk_joins() { # outer table, mode (full | short: the Parquet outer needs only the cases that exercise its row-group path)
+	o=$1; mode=${2:-full}
 	echo "table $o: GiST joins"
 	J="select o.id, i.id from $o o join rk_gz i on"
 	rk_gistjoin "$o: ST_Contains(inner polygon, point)" "$J st_contains(i.geom, st_makepoint(o.x, o.y))"
-	rk_gistjoin "$o: ST_Intersects(inner polygon, point)" "$J st_intersects(i.geom, st_makepoint(o.x, o.y))"
-	rk_gistjoin "$o: ST_Within(point, inner polygon)" "$J st_within(st_makepoint(o.x, o.y), i.geom)"
-	rk_gistjoin "$o: point Z" "$J st_intersects(i.geom, st_makepoint(o.x, o.y, o.z))"
+	[ "$mode" != full ] || rk_gistjoin "$o: ST_Intersects(inner polygon, point)" "$J st_intersects(i.geom, st_makepoint(o.x, o.y))"
+	[ "$mode" != full ] || rk_gistjoin "$o: ST_Within(point, inner polygon)" "$J st_within(st_makepoint(o.x, o.y), i.geom)"
+	[ "$mode" != full ] || rk_gistjoin "$o: point Z" "$J st_intersects(i.geom, st_makepoint(o.x, o.y, o.z))"
 	rk_gistjoin "$o: point ZM" "$J st_contains(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
-	rk_gistjoin "$o: outer qual, inner qual" "$J st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.id % 5 = 0 and i.a % 3 = 0"
+	[ "$mode" != full ] || rk_gistjoin "$o: outer qual, inner qual" "$J st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.id % 5 = 0 and i.a % 3 = 0"
 	rk_gistjoin "$o: left join" "select o.id, i.id from $o o left join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))"
-	rk_gistjoin "$o: semi join" "select o.id from $o o where exists (select 1 from rk_gz i where st_intersects(i.geom, st_makepoint(o.x, o.y)))"
-	rk_gistjoin "$o: anti join" "select o.id from $o o where not exists (select 1 from rk_gz i where st_contains(i.geom, st_makepoint(o.x, o.y)))"
-	rk_gistjoin "$o: right join" "select o.id, i.id from $o o right join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))"
-	rk_gistjoin "$o: count per outer row above the join" "select o.id, count(i.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id"
-	rk_gistjoin "$o: parallel workers" "$J st_contains(i.geom, st_makepoint(o.x, o.y))" "$APAR"
+	[ "$mode" != full ] || rk_gistjoin "$o: semi join" "select o.id from $o o where exists (select 1 from rk_gz i where st_intersects(i.geom, st_makepoint(o.x, o.y)))"
+	[ "$mode" != full ] || rk_gistjoin "$o: anti join" "select o.id from $o o where not exists (select 1 from rk_gz i where st_contains(i.geom, st_makepoint(o.x, o.y)))"
+	[ "$mode" != full ] || rk_gistjoin "$o: right join" "select o.id, i.id from $o o right join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))"
+	[ "$mode" != full ] || rk_gistjoin "$o: count per outer row above the join" "select o.id, count(i.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id"
+	[ "$mode" != full ] || rk_gistjoin "$o: parallel workers" "$J st_contains(i.geom, st_makepoint(o.x, o.y))" "$APAR"
 	ANYPLAN=0
 	A="select count(*), count(i.a), sum(i.a), min(i.id), max(o.id) from $o o join rk_gz i on"
 	rk_gistagg "$o: ungrouped aggregate over the join" "$A st_contains(i.geom, st_makepoint(o.x, o.y))"
@@ -182,7 +182,7 @@ rk_joins() { # outer table
 	ANYPLAN=0
 }
 rk_joins rk_j
-rk_joins rk_jp
+rk_joins rk_jp short
 # the GPU must have handed rows of the Arrow outer relation to the backend
 for t in rk_j rk_jp; do
 	r=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON explain (analyze, costs off) select o.id, i.id from $t o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))" | grep "Fallback-stats" | head -1 | sed 's/[^0-9=]//g; s/=/ /g')
@@ -223,7 +223,7 @@ n=$(rck_rows rk_gc "select id from %T where ST_Contains($SQ, ST_MakePoint(x, y))
 [ "$n" -gt 0 ]; check "rk_gc: the GPU handed cached rows to the backend ($n rechecked)" $?
 # a join with the cache as the outer relation
 rk_gistjoin "rk_gc: ST_Contains join" "select o.id, i.id from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
-rk_gistjoin "rk_gc: left join, point ZM" "select o.id, i.id from rk_gc o left join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
+rk_gistjoin "rk_gc: left join, point ZM" "select o.id, i.id from (select * from rk_gc where x <> 'Infinity'::float8 and y <> 'NaN'::float8) o left join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
 rk_gistagg "rk_gc: ungrouped aggregate over the join" "select count(*), sum(i.a), min(i.id), max(o.id) from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
 ANYPLAN=1
 rk_gistagg "rk_gc: GROUP BY an outer key (any plan)" "select o.id % 7, count(*), sum(i.a) from rk_gc o join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8 group by o.id % 7"

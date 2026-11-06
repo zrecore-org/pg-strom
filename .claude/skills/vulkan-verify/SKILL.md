@@ -16,7 +16,7 @@ sh test/gpuserv/affected.sh origin/vulkan-gpu..HEAD
 ```
 
 Dev scripts take a few minutes: `postgis_dev.sh`, `postgis3d_dev.sh`, `gist_dev.sh`, `float8_dev.sh`, `arrow_dev.sh`,
-`gpucache_dev.sh`, `joinagg_dev.sh`, `gpusort_dev.sh`, `spec_dev.sh`. Run each as
+`gpucache_dev.sh`, `joinagg_dev.sh`, `gpusort_dev.sh`, `spec_dev.sh`, `recheck_dev.sh` (A12: geometry rechecks on Arrow, Parquet and GPU-Cache sources). Run each as
 `PGSTROM_GPUSERV_SPECIALIZE=check sh test/gpuserv/locked_test.sh "$PWD" <script>`.
 `sh test/gpuserv/spec_compile_check.sh` (no GPU, no lock) must pass after any change to kernels or the specializer.
 

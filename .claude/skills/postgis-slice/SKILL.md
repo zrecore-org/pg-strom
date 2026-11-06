@@ -13,18 +13,23 @@ and the 3D variants of the function, not just the 2D case. State explicitly what
 1. **Probe PostGIS first.** Write `test/gpuserv/postgis/<name>_probe.sql` with the edge cases (empty, NULL, missing
    dimension, SRID mismatch, NaN/Inf, boundary within 2^-47 relative on squared distances), run it on PostGIS 3.7 and save the
    filtered output as `<name>_probe.out` (drop NOTICE spam). The GPU must reproduce these answers; where PostGIS raises a
-   NOTICE or an error the GPU path must hand the row to the CPU (`SCANVM_RECHECK_CODE`, heap scans only).
+   NOTICE or an error the GPU path must hand the row to the CPU (`SCANVM_RECHECK_CODE`; every source can take it since A12: heap
+   tuples, Arrow / Parquet rows by (record batch, row), GPU-Cache rows as synthesized heap tuples).
 2. **Registration chain** (in this order):
    - `src/xpu_opcodes.h`: `FUNC_OPCODE` / `__FUNC_OPCODE` with the argument types.
    - `src/gpuserv/scan_caps.c`: classify it (`classify_geometry`) into a `SOP_GEOM*` kind.
    - `src/codegen.c`: operand shapes (`vulkan_geom_operand_shape`, fused `st_makepoint` with 2-4 args), `vulkan_text_func_allowed`
-     (refuse in join programs or on Arrow/GPU-Cache sources that have no recheck), `geometry_func_walker`.
+     (refuse in join programs; a source that cannot recheck is refused through `pgstrom_source_can_recheck()`, which is true for
+     heap, Arrow/Parquet and GPU-Cache), `geometry_func_walker`.
    - `src/gpuserv/scan_prog.c`: `emit_*` (use `fused_y_reg` for fused points; registers must be <= 0x1f where packed).
    - `src/gpuserv/kernels_vm/scan_vm_ops.inc` (new `SCANVM_OP`), `scan_common.slang` (the op), `cpu_vm.c` (the C twin),
      `specialize.c` (`op_known`).
 3. **Tests** in `test/gpuserv/postgis_tests.inc` / `postgis3d_tests.inc` (helpers `run`, `run_any`, `refused`, `pushed`;
    `pushed` asserts the function name appears under "GPU Scan Quals"). Cover: 2D, Z, M, ZM columns, fused 3-/4-argument points,
-   NULL and empty, boundary tables (`pg_3dn`, `pg_3dq`), a GPU-Cache table (run_any), a join qual, the ladder, GiST join over Z/M/ZM.
+   NULL and empty, boundary tables (`pg_3dn`, `pg_3dq`), a join qual, the ladder, GiST join over Z/M/ZM. **A12:** a new
+   recheck-capable instruction also needs a case in `test/gpuserv/recheck_tests.inc` (`recheck_dev.sh`): the same grid on an Arrow file,
+   a Parquet file and a cached table (`rk_a`, `rk_p`, `rk_gc`), scan / aggregate / GROUP BY / GiST join / join aggregation,
+   Z/M/ZM points, parallel workers, and `Fallback-stats` non-zero.
 4. **Run** `postgis3d_dev.sh` and `postgis_dev.sh` (see the vulkan-verify skill), `spec_compile_check.sh`, then the full verification.
 5. **Docs**: `doc/features.md` (function table, "not yet" cells) and the status section of `.claude/hw-acceleration.md`.
 
@@ -38,7 +43,8 @@ Also on the GPU: exact multi-part lengths/perimeters, point-to-line/polygon dist
 ST_Intersects (A13 slice 2: inner geometry string registers in join programs, undecidable rows go back through poison records).
 Also the GiST join with ST_DWithin / ST_3DDWithin (A13 slice 3: the walk grows the point's box by the tolerance; inner non-points go back through poison records).
 Also GpuPreAgg over a geometry GiST join (ungrouped and GROUP BY: a scout pass finds the poisoned outer rows, the aggregating kernels skip them and the backend joins and aggregates them as a RECHECK chunk; a new geometry qual in the GiST join gets this for free if its poison goes through the join kernel's poison record, and needs a `gistagg` test).
-Still on the CPU: distances of two non-points, ST_DWithin of non-points, Arrow / GPU-Cache outer sources, aggregation over a RIGHT/FULL GiST join, GPU-Sort over a geometry GiST join.
+Also (A12) all of the above on Arrow_Fdw, Parquet and GPU-Cache sources: scan, GpuPreAgg (also GROUP BY), GpuJoin and GpuPreAgg over a GiST join with such an outer relation.
+Still on the CPU: distances of two non-points, ST_DWithin of non-points, aggregation over a RIGHT/FULL GiST join, GPU-Sort over a geometry GiST join; an outer scan qual of an aggregation over a non-GiST join that rechecks (no scout pass without a GiST depth).
 
 **The guard:** a function whose value must equal PostGIS' bit for bit is only pushed down after `vulkan_geom_*_calibrated` (codegen.c) called the
 installed PostGIS on fixed inputs and got the host formula's bits; a build that computes differently (no floating-point contraction) keeps the

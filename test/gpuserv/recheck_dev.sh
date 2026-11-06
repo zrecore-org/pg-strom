@@ -14,6 +14,7 @@ ROOT=${ROOT:-/tmp/rck_dev}
 PORT=${PORT:-54404}
 PSQL="${0%/*}/qtimeout.sh $ROOT/.query_timeout $PGBIN/psql -h $ROOT -p $PORT -U postgres -X -At -q"
 fail=0
+T0=$(date +%s)
 
 check() { # name rc
 	if [ "$2" -eq 0 ]; then echo "  ok    $1"; else echo "  FAIL  $1"; fail=$((fail+1)); fi
@@ -89,4 +90,4 @@ if [ -n "$ADHOC" ]; then
 fi
 . "${0%/*}/recheck_tests.inc"
 echo
-if [ $fail -eq 0 ]; then echo "RECHECK DEV: ALL PASSED"; else echo "RECHECK DEV: $fail FAILED"; exit 1; fi
+if [ $fail -eq 0 ]; then echo "RECHECK DEV: ALL PASSED ($(( $(date +%s) - T0 )) s)"; else echo "RECHECK DEV: $fail FAILED ($(( $(date +%s) - T0 )) s)"; exit 1; fi
