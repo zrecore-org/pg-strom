@@ -96,7 +96,13 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
+          # the Azure Ubuntu mirror sometimes serves a package at a few KB/s (llvm-19-dev, a dependency of the server
+          # headers, stalled for 5 minutes): a stalled attempt is cut off and retried, finished downloads are kept
+          for try in 1 2 3 4; do
+            sudo timeout 240 apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} && break
+            [ "$try" = 4 ] && exit 1
+            sudo dpkg --configure -a || true
+          done
           # the build installs into the PostgreSQL tree: let the runner user write there
           sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
 
