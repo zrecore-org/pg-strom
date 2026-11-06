@@ -44,6 +44,11 @@ cluster settings come from `test/gpuserv/pgconf_test.sh` (fsync off, autovacuum 
 limited: on macOS long kernels can make the display lag and trigger "Impacting Interactivity" (see gpu-hang-triage); never
 run several services at once on the Apple GPU (`scan_shards.sh` is for Linux/CI).
 
+After an edit of `kernels_vm/`, `locked_test.sh` compiles the changed common kernels once before the test
+(`test/gpuserv/prewarm_kernels.sh`, `pgstrom-gpuserv --prewarm`; `PREWARM=off` skips it, `PREWARM=all` covers every variant). The
+service's pipeline cache file (`pipeline-*.bin` in `~/.cache/pgstrom`) keeps the result for every later service start, so only
+the first run after an edit pays the driver's compile of a full kernel.
+
 ## 3. Reading results
 
 - `test-data/logs/<stamp>/<n>-<stage>.log` and `.log.times` (seconds per group of checks and the slowest checks, from

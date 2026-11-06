@@ -41,6 +41,9 @@ if ! $LOWPRI make -C "$TREE/src" PG_CONFIG="$PG_CONFIG" -j"${TEST_JOBS:-3}" inst
 fi
 rm -f /tmp/locked_test_build.$$.log
 PKGLIB=$("$PG_CONFIG" --pkglibdir)
+# Kernels whose SPIR-V changed with this build are compiled by the driver once, here, instead of at the first query
+# of the test (PREWARM=off skips it; the service keeps the result in its pipeline cache file).
+case "$TEST" in perf_bench.sh) ;; *) sh "$TREE/test/gpuserv/prewarm_kernels.sh" "$TREE" "${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv}" ;; esac
 case "$TEST" in */*) SCRIPT=$TREE/$TEST;; *) SCRIPT=$TREE/test/gpuserv/$TEST;; esac
 
 # Where the throwaway cluster goes (an explicit ROOT is used as is and never removed). The local drive is nearly

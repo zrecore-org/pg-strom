@@ -12,6 +12,11 @@
  *       attaches the control segment NAME, opens the device, listens on PATH, and
  *       exits when the lifeline pipe (the launcher's) reaches EOF or on SIGTERM.
  *
+ *   pgstrom-gpuserv --prewarm NBIND PCSIZE FILE.spv... [--device N]
+ *       create the compute pipeline of each SPIR-V file (NBIND storage buffers, PCSIZE bytes of push constants)
+ *       and exit: the driver's compiler runs once and the pipeline cache file keeps the result
+ *       (test/gpuserv/prewarm_kernels.sh chooses the kernels and the arguments).
+ *
  * Not a PostgreSQL process: no PostgreSQL headers, no fork() before exec().
  * --
  * Copyright 2011-2026 (C) KaiGai Kohei <kaigai@kaigai.gr.jp>
@@ -32,7 +37,10 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <time.h>
 #include "gpuserv_proto.h"
+#include "gpu_vk.h"
 #include "gpuserv_probe.h"
 #include "gpu_vk.h"
 #include "vm_selftest.h"
@@ -280,6 +288,58 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 	return lost ? 3 : 0;
 }
 
+/* --prewarm: create the pipelines once so that the pipeline cache file holds them */
+static int
+do_prewarm(long device, uint32_t nbind, uint32_t pcsize, char **files, int nfiles)
+{
+	gpu_vk_ctx *ctx = calloc(1, sizeof(*ctx));
+	int			rc = 0;
+
+	if (!ctx || gpu_vk_open(ctx, (int) device) != 0)
+	{
+		log_msg("prewarm: cannot open device %ld: %s", device, ctx ? ctx->err : "out of memory");
+		return 1;
+	}
+	for (int i = 0; i < nfiles; i++)
+	{
+		FILE	   *fp = fopen(files[i], "rb");
+		long		n = 0;
+		void	   *buf = NULL;
+		gpu_vk_pipeline pl;
+		struct timespec t0, t1;
+
+		if (!fp || fseek(fp, 0, SEEK_END) != 0 || (n = ftell(fp)) <= 0 || fseek(fp, 0, SEEK_SET) != 0 ||
+			posix_memalign(&buf, 16, (size_t) n + 16) != 0 || fread(buf, 1, (size_t) n, fp) != (size_t) n)
+		{
+			log_msg("prewarm: cannot read %s", files[i]);
+			rc = 1;
+			if (fp)
+				fclose(fp);
+			free(buf);
+			continue;
+		}
+		fclose(fp);
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		if (gpu_vk_pipeline_create(ctx, &pl, buf, (size_t) n, nbind, pcsize) != 0)
+		{
+			log_msg("prewarm: %s: %s", files[i], ctx->err);
+			rc = 1;
+		}
+		else
+		{
+			clock_gettime(CLOCK_MONOTONIC, &t1);
+			printf("prewarm %s: %.2f s\n", files[i],
+				   (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
+			fflush(stdout);
+			gpu_vk_pipeline_destroy(ctx, &pl);
+		}
+		free(buf);
+	}
+	gpu_vk_close(ctx);
+	free(ctx);
+	return rc;
+}
+
 /* ----------------------------------------------------------------
  * main
  * ----------------------------------------------------------------
@@ -294,6 +354,22 @@ main(int argc, char **argv)
 
 	for (i = 1; i < argc; i++)
 	{
+		if (!strcmp(argv[i], "--prewarm") && i + 2 < argc)
+		{
+			long		nb = strtol(argv[i + 1], NULL, 10);
+			long		pc = strtol(argv[i + 2], NULL, 10);
+			int			k;
+
+			for (k = i + 3; k + 1 < argc; k++)
+				if (!strcmp(argv[k], "--device"))
+				{
+					device = strtol(argv[k + 1], NULL, 10);
+					memmove(&argv[k], &argv[k + 2], (argc - k - 2) * sizeof(char *));
+					argc -= 2;
+					break;
+				}
+			return do_prewarm(device, (uint32_t) nb, (uint32_t) pc, &argv[i + 3], argc - i - 3);
+		}
 		if (!strcmp(argv[i], "--probe"))
 			probe = 1;
 		else if (!strcmp(argv[i], "--serve"))

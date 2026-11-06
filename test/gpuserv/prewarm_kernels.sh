@@ -1,0 +1,76 @@
+#!/bin/sh
+# prewarm_kernels.sh <tree> <pgstrom-gpuserv>
+#
+# After a build: compile the interpreter kernels whose SPIR-V changed since the last run once, one after the other,
+# so that a test does not pay for it at its first query (the driver's compile of a full kernel takes from seconds to
+# minutes; the result lands in the pipeline cache file of the service, src/gpuserv/gpu_vk.c, which every later service
+# start reuses).
+#
+# The kernels checked are the ones the tests use most (the smallest register file of each family, 4 aggregates, full
+# and lite). Their checksums are kept in <cache dir>/prewarm.sums; the first run only records them. A kernel whose
+# checksum is unchanged is not touched, so an edit of one .slang file costs the compile of the kernels it changed.
+#   PREWARM=off        skip this step
+#   PREWARM=all        also the other register/aggregate variants (can take an hour after an edit of scan_common.slang)
+#   PGSTROM_GPUSERV_PIPELINE_CACHE=off or PGSTROM_GPUSERV_CACHE_DIR=none: nothing to warm, skipped
+TREE=${1:?usage: prewarm_kernels.sh <tree> <pgstrom-gpuserv>}
+BIN=${2:?usage: prewarm_kernels.sh <tree> <pgstrom-gpuserv>}
+[ "${PREWARM:-default}" = off ] && exit 0
+[ "$PGSTROM_GPUSERV_PIPELINE_CACHE" = off ] && exit 0
+[ "$PGSTROM_GPUSERV_CACHE_DIR" = none ] && exit 0
+BUILD=$TREE/src/gpuserv/build
+[ -d "$BUILD" ] || exit 0
+if [ -n "$PGSTROM_GPUSERV_CACHE_DIR" ]; then DIR=$PGSTROM_GPUSERV_CACHE_DIR
+elif [ -n "$XDG_CACHE_HOME" ]; then DIR=$XDG_CACHE_HOME/pgstrom
+else DIR=$HOME/.cache/pgstrom; fi
+mkdir -p "$DIR" 2>/dev/null || exit 0
+SUMS=$DIR/prewarm.sums
+NEW=$DIR/prewarm.sums.$$
+OLD_EMPTY=0
+[ -s "$SUMS" ] || OLD_EMPTY=1
+
+# name  nbind  pc_size
+if [ "${PREWARM:-default}" = all ]; then
+	LIST=$(cd "$BUILD" && ls gpuscan*.spv gpuagg*.spv gagg*.spv gpuarrow*.spv aagg*.spv agagg*.spv gpujoin*.spv jagg*.spv jgagg*.spv ajoin*.spv ajagg*.spv ajgagg*.spv 2>/dev/null | sed 's/\.spv$//')
+else
+	LIST=
+	for k in gpuscan8 gpuagg8_4 gagg16_4 gpujoin8 jagg16_4 jgagg16_4 gpuarrow8 aagg16_4 agagg16_4 ajoin16 ajagg16_4 ajgagg16_4; do
+		LIST="$LIST $k ${k}_lite"
+	done
+fi
+geom() {	# nbind and push constant bytes by kernel family (scan_exec.c, arrow_exec.c)
+	case $1 in
+	gpuscan*|gpuagg*|gagg*|gpuarrow*) echo "5 16";;
+	aagg*|agagg*) echo "5 20";;
+	*) echo "6 20";;
+	esac
+}
+checksum() { shasum -a 256 "$1" | cut -d' ' -f1; }
+
+: > "$NEW"
+TODO=
+for k in $LIST; do
+	f=$BUILD/$k.spv
+	[ -f "$f" ] || continue
+	s=$(checksum "$f")
+	echo "$k $s" >> "$NEW"
+	[ $OLD_EMPTY = 1 ] && continue
+	old=$(grep "^$k " "$SUMS" | cut -d' ' -f2)
+	[ "$old" = "$s" ] || TODO="$TODO $k"
+done
+if [ $OLD_EMPTY = 1 ]; then
+	echo "prewarm: recorded the kernel checksums (the next change of a kernel is compiled before the test)"
+	mv "$NEW" "$SUMS"
+	exit 0
+fi
+if [ -z "$TODO" ]; then rm -f "$NEW"; exit 0; fi
+echo "prewarm: kernels changed since the last run:$TODO"
+t0=$(date +%s)
+rc=0
+for k in $TODO; do
+	set -- $(geom "$k")
+	nice -n 10 "$BIN" --prewarm "$1" "$2" "$BUILD/$k.spv" || rc=1
+done
+echo "prewarm: $(( $(date +%s) - t0 )) s"
+# kernels that failed to compile are tried again next time
+if [ $rc = 0 ]; then mv "$NEW" "$SUMS"; else rm -f "$NEW"; fi
+exit 0
