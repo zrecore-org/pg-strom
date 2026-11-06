@@ -160,7 +160,7 @@ __execFallbackLoadVarsSlot(TupleTableSlot *fallback_slot,
 				switch (cmeta->attlen)
 				{
 					case 1:
-						datum = *((uint8_t *)addr);
+						datum = CharGetDatum(*((char *)addr));		/* as fetch_att() */
 						break;
 					case 2:
 						/* as fetch_att(): a negative int2/int4 is a sign-extended Datum, which partial min/max

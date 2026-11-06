@@ -2634,7 +2634,8 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 
 			if (jtype == JOIN_RIGHT || jtype == JOIN_FULL)
 				has_right = true;
-			if (OidIsValid(pp_input->inners[i].gist_func_oid))
+			if (OidIsValid(pp_input->inners[i].gist_index_oid) ||
+				OidIsValid(pp_input->inners[i].gist_func_oid))
 				has_gist = true;
 		}
 		if (has_right && has_gist)

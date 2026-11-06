@@ -3242,6 +3242,12 @@ error:
  */
 #define JAGG_PAGES_PER_WG	8U		/* outer pages one such workgroup runs over (without GROUP BY) */
 #define JGAGG_PAGES_PER_WG	32U		/* ... with GROUP BY (the group table is set up and written out per workgroup) */
+/*
+ * A walk of the join tree can be long (an inner side with many equal or NULL hash values makes a chain of thousands of
+ * items), and the device is marked lost when one dispatch runs past the watchdog: a join aggregation is therefore
+ * dispatched in slices of this many workgroups (the slices add up to the same work).
+ */
+#define JOINAGG_DISPATCH_GROUPS	128U
 
 static int
 ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int avariant, char *err, size_t errlen)
@@ -3561,13 +3567,13 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			memcpy(bprog.map, prog->words, prog->nwords * 4);
 			scan_prog_ojmap_place(prog, (uint32_t *) bprog.map, oj_base);
 		}
-		for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
+		for (uint32_t base = 0; base < ngroups_total; base += JOINAGG_DISPATCH_GROUPS)
 		{
 			uint32_t	groups = ngroups_total - base;
 			uint32_t	pc[5];
 
-			if (groups > SCAN_WG_MAX)
-				groups = SCAN_WG_MAX;
+			if (groups > JOINAGG_DISPATCH_GROUPS)
+				groups = JOINAGG_DISPATCH_GROUPS;
 			pc[0] = npages;
 			pc[1] = base;
 			pc[2] = ppw;

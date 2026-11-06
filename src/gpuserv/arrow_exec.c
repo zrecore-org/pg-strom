@@ -1133,6 +1133,7 @@ arrow_pack_gpu(gpu_vk_ctx *vk, const arrow_src *as, const scan_prog *prog, const
 #define ARROW_AGG_PAGES_PER_WG	32U		/* virtual pages one aggregation workgroup runs over */
 #define ARROW_JAGG_PAGES_PER_WG	8U
 #define ARROW_JGAGG_PAGES_PER_WG	32U
+#define ARROW_JOINAGG_DISPATCH_GROUPS	128U	/* workgroups per dispatch of a join aggregation (see JOINAGG_DISPATCH_GROUPS in scan_exec.c) */
 #define ARROW_JOIN_PASS_ROWS	(1U << 20)	/* rows of a join pass (the output buffer holds the matches) */
 
 typedef struct
@@ -2316,13 +2317,13 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 				memcpy(at.bprog.map, prog->words, prog->nwords * 4);
 				scan_prog_ojmap_place(prog, (uint32_t *) at.bprog.map, oj_base);
 			}
-			for (uint32_t base = 0; base < ngroups; base += ARROW_WG_MAX)
+			for (uint32_t base = 0; base < ngroups; base += ARROW_JOINAGG_DISPATCH_GROUPS)
 			{
 				uint32_t	groups = ngroups - base;
 				uint32_t	pc[5];
 
-				if (groups > ARROW_WG_MAX)
-					groups = ARROW_WG_MAX;
+				if (groups > ARROW_JOINAGG_DISPATCH_GROUPS)
+					groups = ARROW_JOINAGG_DISPATCH_GROUPS;
 				pc[0] = pages;
 				pc[1] = base;
 				pc[2] = ppw;

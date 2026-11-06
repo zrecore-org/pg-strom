@@ -134,6 +134,7 @@ for t in s1 s2 s3; do
 	runjagg $t "RIGHT JOIN, every inner row has a partner or not (duplicate inner keys)" "select count(*), count(t.i), sum(d.grp), avg(t.a), max(d.k8) from %T t right join %D d on t.b = d.k"
 	runjagg $t "RIGHT JOIN, ON qual on the inner side" "select count(*), count(t.i), sum(d.grp), min(d.pay) from %T t right join %D d on t.b = d.k and d.grp < 3"
 	runjagg $t "RIGHT JOIN, nothing matches (the aggregates see the inner rows only)" "select count(*), count(t.i), sum(t.a), sum(d.grp), min(d.pay), max(d.k) from %T t right join %D d on t.b = d.k + 1000000"
+	runjagg $t "RIGHT JOIN, empty outer side (every inner row is unmatched)" "select count(*), count(t.i), sum(d.grp), max(d.pay) from %T t right join %D d on t.b = d.k and t.i + 0 < -1"
 	runjagg $t "RIGHT JOIN, inner rows with NULL keys" "select count(*), count(t.i), sum(d.grp), max(t.a) from %T t right join sdnl d on t.b = d.k and t.a + d.grp > 9000"
 	runjagg $t "RIGHT JOIN, expression mixing both sides, FILTER" "select sum(t.a + d.grp), count(*) filter (where t.i is null), max(d.pay) filter (where t.e), sum(d.pay) filter (where t.i is null) from %T t right join %D d on t.b = d.k and t.a > d.grp"
 	JAGGPAT='Full Outer Join Quals \[1\]'
@@ -159,6 +160,13 @@ runjagg rjt "RIGHT JOIN, nothing matches, key from the outer side" "select t.g7,
 runjagg rjt "RIGHT JOIN, more groups than a workgroup's table (overflow list)" "select t.g1500, count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > -5000 group by 1 order by 1"
 JAGGPAT='Full Outer Join Quals \[1\]'
 runjagg rjt "FULL JOIN, key from the outer side" "select t.g7, count(*), count(d.k), sum(d.grp), sum(t.b) from %T t full join %D d on t.b = d.k and t.a > 9000 group by 1 order by 1"
+# an inner side with many NULL keys: they hash alike, so an outer row with a NULL key walks one long chain (about 7 s of
+# kernel time on the Apple GPU for this query; the join aggregation is dispatched in slices so that no dispatch hits the watchdog)
+JAGGPAT='Full Outer Join Quals \[1\]'
+runjagg s2 "FULL JOIN, NULL-key inner rows and long chain walks" "select count(*), count(t.i), count(d.k), sum(d.grp) from %T t full join sdnl d on t.b = d.k and t.i % 3 = 0"
+# negative values of the inner side in min/max/sum (the backend loads them from the inner store as Datums)
+JAGGPAT='Right Outer Join Quals \[1\]'
+runjagg s1 "RIGHT JOIN, negative int4 and int8 values of the unmatched inner rows" "select min(d.k), max(d.k), sum(d.k), min(d.pay), max(d.pay), min(d.grp - 100), count(t.i) from %T t right join %D d on t.b = d.k + 1000000"
 # stacked: the unmatched inner rows of depth 1 continue through the later depths with NULL outer columns
 for t in s1 s2 s3; do
 	JAGGPAT='Join Quals \[2\]'

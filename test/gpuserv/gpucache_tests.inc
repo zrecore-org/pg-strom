@@ -52,7 +52,7 @@ gcjoin() { # table, label, query-with-%T and %D; the plan must join on the GPU (
 	if [ "${GCJOINS:-on}" = off ]; then echo "  skip  $1: $2 (GCJOINS=off)"; return 0; fi
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g")
 	plan=$($PSQL -d scantest -c "$GPU $JOINSET explain $qry" 2>&1)
-	n1=$(echo "$plan" | grep -c -E "Custom Scan \(GpuJoin\)|GPU Join Quals"); n2=$(echo "$plan" | grep -c "GPU Cache:")
+	n1=$(echo "$plan" | grep -c -E "Custom Scan \(GpuJoin\)|GPU ([A-Za-z]+ )*Join Quals"); n2=$(echo "$plan" | grep -c "GPU Cache:")
 	g=$(q "$GPU $JOINSET" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$n1" -ge 1 ] && [ "$n2" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
 	else echo "  FAIL  $tbl: $label (GpuJoin=$n1 cache=$n2)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
@@ -142,6 +142,10 @@ for t in gc1 gc2; do
 	gcjoin $t "join with a heap table" "select t.id, t.a, d.grp, d.pay from %T t join %D d on t.b = d.k where t.a > 9000"
 	gcjoin $t "LEFT JOIN, text of both sides" "select t.id, d.txt, t.f from %T t left join %D d on t.b = d.k where t.id < 5000"
 	gcjoin $t "join aggregate" "select d.grp, count(*), sum(t.c) from %T t join %D d on t.b = d.k where t.a > 0 group by 1 order by 1"
+	gcjoin $t "RIGHT JOIN aggregate" "select count(*), count(t.id), sum(d.grp), sum(t.c) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000"
+	gcjoin $t "FULL JOIN aggregate, GROUP BY an inner column" "select d.grp, count(*), count(t.id), count(d.k) from %T t full join %D d on t.b = d.k and t.a > 9000 group by 1 order by 1"
+	# the rows deleted from the table (id % 13 = 0) are still slots of the cache: their partners must not count as matches
+	gcjoin $t "RIGHT JOIN aggregate whose only partners were deleted" "select count(*), count(t.id), sum(d.grp) from %T t right join %D d on t.b = d.k and t.id % 13 = 0"
 done
 ANYPLAN=0
 gcrun gc1 "parallel workers on the cache" "select a, c, f from %T where b < 1000" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0; set parallel_leader_participation=off;"
