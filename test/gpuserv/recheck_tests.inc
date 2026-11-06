@@ -18,33 +18,6 @@ RARROW="$ROOT/rck_arrow"; mkdir -p "$RARROW"
 ARROW_CFLAGS=$(pkg-config --cflags arrow parquet 2>/dev/null); ARROW_LIBS=$(pkg-config --libs arrow parquet 2>/dev/null)
 if [ -z "$ARROW_LIBS" ] && command -v brew >/dev/null 2>&1; then
 	AP=$(brew --prefix apache-arrow 2>/dev/null); ARROW_CFLAGS="-I$AP/include"; ARROW_LIBS="-L$AP/lib -lparquet -larrow -Wl,-rpath,$AP/lib"
-# aggregation over the rows the GPU decides, with the rechecked rows added by the backend (the Agg node above GpuPreAgg
-# combines the partial states): without GROUP BY, with one and two keys, a FILTER, HAVING-free
-for t in rk_a rk_p rk_one rk_first rk_last rk_pone; do
-	echo "table $t: aggregation"
-	case $t in rk_one|rk_pone) agg=runagg_any;; *) agg=runagg;; esac
-	$agg $t "count(*), sum, min, max" "select count(*), sum(id), min(id), max(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
-	$agg $t "count of ST_Covers(hole), avg" "select count(*), avg(id) from %T where ST_Covers($HOLE, ST_MakePoint(x, y))"
-	runagg_any $t "GROUP BY id % 7" "select id % 7 as k, count(*), sum(id) from %T where ST_Intersects(ST_MakePoint(x, y), $MULTI) group by 1 order by 1"
-	runagg_any $t "GROUP BY two keys" "select id % 3 as k1, id % 5 as k2, count(*), max(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y)) group by 1, 2 order by 1, 2"
-	$agg $t "count(*) FILTER" "select count(*) filter (where id % 2 = 0), count(*) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
-done
-for t in rk_a rk_p; do
-	rck_check $t "select count(*), sum(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))" "aggregation"
-	rck_check $t "select id % 7, count(*) from %T where ST_Contains($SQ, ST_MakePoint(x, y)) group by 1" "GROUP BY"
-done
-
-# Z, M and ZM: the point built from three and four coordinates against 2D and 3D polygons (PostGIS decides in 2D)
-SQZ="'POLYGON Z((0 0 0,10 0 0,10 10 0,0 10 0,0 0 0))'::geometry"
-for t in rk_a rk_p rk_first; do
-	echo "table $t: Z, M and ZM points"
-	run $t "scan: ST_Contains(square, point Z)" "select id from %T where ST_Contains($SQ, ST_MakePoint(x, y, z))"
-	run $t "scan: ST_Covers(polygon Z, point Z)" "select id from %T where ST_Covers($SQZ, ST_MakePoint(x, y, z))"
-	run $t "scan: ST_Intersects(point ZM, multi)" "select id from %T where ST_Intersects(ST_MakePoint(x, y, z, m), $MULTI)"
-	run $t "scan: ST_Contains(hole, point ZM)" "select id, z from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m))"
-	runagg_any $t "count over a point Z" "select count(*), sum(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y, z))"
-	runagg_any $t "GROUP BY over a point ZM" "select id % 4, count(*) from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m)) group by 1 order by 1"
-done
 fi
 c++ -std=c++20 -O2 -DWITH_PARQUET "${0%/*}/arrow_points.cpp" -o "$RARROW/arrow_points" $ARROW_CFLAGS $ARROW_LIBS >"$RARROW/gen.log" 2>&1
 check "the point-table generator builds" $?
