@@ -210,7 +210,7 @@ jobs:
 
   macos-build:
     name: macOS Apple Silicon, build only (no GPU test), PostgreSQL 17
-    runs-on: macos-15
+    runs-on: macos-14
     timeout-minutes: 60
     steps:
       - name: Checkout
