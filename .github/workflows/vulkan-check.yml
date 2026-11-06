@@ -241,7 +241,7 @@ jobs:
           VKL="$(brew --prefix vulkan-loader)"
           make -C src PG_CONFIG="$PG_CONFIG" WITH_GPUSERV=1 \
             VK_CFLAGS="-I$VKH/include" \
-            VK_LIBS="-L$VKL/lib -lvulkan -Wl,-rpath,$VKL/lib" \
+            VK_LIBS="-L$VKL/lib -lvulkan -Wl,-rpath,$VKL/lib -Wl,-ld_classic" \
             -j"$(sysctl -n hw.ncpu)" install
 
       - name: Portability layer test
