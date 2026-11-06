@@ -9,6 +9,15 @@
 //                   rounds separated by workgroup barriers (see gagg.slang): one walk iteration
 //                   is one round, and the walk loop must be uniform across the workgroup, because
 //                   a barrier may not sit in divergent control flow.
+//
+// "Poison" (a GiST-index join whose join program could not decide an outer row: SOP_RECHECK_CODE or an
+// unreadable inner value) works in two passes. The aggregating modes cannot take back what a lane has
+// already accumulated for earlier matches of the row, so the service first runs this walk in mode 0
+// as a scout (kparam.extra bit 0: append only the poison records, no match records), reads the
+// poisoned rows, hands them to the backend (KDS_FORMAT_RECHECK) and builds a skip bitmap in the page
+// table buffer (read right after the outer row's scan quals below); the aggregating pass then ignores those outer rows altogether
+// (no match, no null-extended LEFT row: the CPU joins the whole row). The bitmap exists only when
+// the program header word 18 is nonzero. In modes 1 to 3 a poison that still shows up is a hard error.
 // Included inside the kernel's page loop. The kernel provides: page, lid, the program header words
 // (coloff, insnoff, ncols, nq, nins, qreg, nd, dtab, proj_begin) and the per-mode state.
 {
@@ -68,6 +77,17 @@
 #else
         if (lp < nlp)
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
+#endif
+#if JW_MODE != 0 && !defined(SPEC_PROG) && !defined(ARROW_SRC) && !defined(VM_NO_GEOM)
+        if (hit && prog[18] != 0u)
+        {
+            // the scout pass named this outer row: the backend joins it, this pass leaves it out.
+            // Bit (line pointers of the pages before this one) + lp of the bitmap that follows the
+            // 2 * npages page table words (word 1 of an entry is the line pointer prefix sum).
+            uint bi = ptab[2 * page + 1] + lp;
+            if (((ptab[2 * kparam.npages + (bi >> 5)] >> (bi & 31u)) & 1u) != 0u)
+                hit = false;                        // d stays 0: nothing is emitted for the row
+        }
 #endif
         if (hit)
         {
@@ -195,7 +215,15 @@
                             uint err = (g_recheck != 0) ? SOP_RECHECK_CODE
                                      : vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
 #else
+                            // The aggregating modes: for a GiST program (header word 18) the scout pass has
+                            // already named every row this would poison, so it is reported if it shows up;
+                            // other programs keep ignoring g_recheck here.
+#ifndef VM_NO_GEOM
+                            uint err = (g_recheck != 0 && prog[18] != 0u) ? SOP_RECHECK_CODE
+                                     : vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
+#else
                             uint err = vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
+#endif
 #endif
                             if (err == 0)
                             {
@@ -318,7 +346,12 @@
 #ifdef SPEC_PROG
             bool rec = emit;
 #else
+            // (kparam.extra bit 0, the scout pass of an aggregation over a GiST join: poison records only)
+#ifndef VM_NO_GEOM
+            bool rec = ((kparam.extra & 1u) != 0u) ? pz : (emit || pz);
+#else
             bool rec = emit || pz;
+#endif
 #endif
             uint cnt  = WaveActiveCountBits(rec);
             if (cnt > 0)

@@ -8,6 +8,10 @@
 // arguments and FILTER conditions; header words 10 and 11 give the number of aggregates and the
 // offset of their table, 4 words each: { class, argument register, filter register, 0 }.
 //
+// A GiST-index join (program header word 18 nonzero, interpreter only) skips the outer rows the
+// scout pass named (join_walk.inc: poison, bitmap behind the page table); a poison in this kernel
+// is an error.
+//
 // Output (outb): [1] first error, [2],[3] page and line pointer of it; from word 4, per workgroup
 // and aggregate 6 words { n, hits, A_lo, A_hi, B_lo, B_hi } as in agg.slang (hits only in the first
 // aggregate of a workgroup: the number of joined rows).

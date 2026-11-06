@@ -2848,6 +2848,28 @@ join_inner_free(scan_engine *eng, join_inner *ji)
 	memset(ji, 0, sizeof(*ji));
 }
 
+/* the VM join pipeline of a variant (registers 8/16/32, then the lite kernels), created on first use */
+static int
+ensure_join_pipeline(scan_engine *eng, int variant, char *err, size_t errlen)
+{
+	static const struct { const unsigned char *spv; const unsigned int *len; } jtab[6] = {
+		{kspv_gpujoin8, &kspv_gpujoin8_len}, {kspv_gpujoin16, &kspv_gpujoin16_len}, {kspv_gpujoin32, &kspv_gpujoin32_len},
+		{kspv_gpujoin8_lite, &kspv_gpujoin8_lite_len}, {kspv_gpujoin16_lite, &kspv_gpujoin16_lite_len},
+		{kspv_gpujoin32_lite, &kspv_gpujoin32_lite_len},
+	};
+
+	if (!eng->join_pipe_ready[variant])
+	{
+		if (gpu_vk_pipeline_create(eng->vk, &eng->join_pipe[variant], jtab[variant].spv, *jtab[variant].len, 6, 20) != 0)
+		{
+			snprintf(err, errlen, "cannot create the join pipeline: %s", eng->vk->err);
+			return -1;
+		}
+		eng->join_pipe_ready[variant] = 1;
+	}
+	return 0;
+}
+
 XpuCommand *
 scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 					join_inner *ji, const XpuCommand *task,
@@ -2917,20 +2939,8 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 	sp = spec_pipe(eng, prog, SPEC_JOIN, 0, 0, NULL, NULL, &eng->join_pipe[variant]);
 	if ((sp == &eng->join_pipe[variant] || spec_check_enabled(eng)) && !eng->join_pipe_ready[variant])
 	{
-		static const struct { const unsigned char *spv; const unsigned int *len; } jtab[6] = {
-			{kspv_gpujoin8, &kspv_gpujoin8_len}, {kspv_gpujoin16, &kspv_gpujoin16_len}, {kspv_gpujoin32, &kspv_gpujoin32_len},
-			{kspv_gpujoin8_lite, &kspv_gpujoin8_lite_len}, {kspv_gpujoin16_lite, &kspv_gpujoin16_lite_len},
-			{kspv_gpujoin32_lite, &kspv_gpujoin32_lite_len},
-		};
-		const unsigned char *spv = jtab[variant].spv;
-		size_t		spv_len = *jtab[variant].len;
-
-		if (gpu_vk_pipeline_create(vk, &eng->join_pipe[variant], spv, spv_len, 6, 20) != 0)
-		{
-			snprintf(err, errlen, "cannot create the join pipeline: %s", vk->err);
+		if (ensure_join_pipeline(eng, variant, err, errlen) != 0)
 			return NULL;
-		}
-		eng->join_pipe_ready[variant] = 1;
 	}
 	if (npages == 0)
 	{
@@ -3288,7 +3298,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	const io_vector *iovec = NULL;
 	gpu_vk_buffer bout, bprog, btab;
 	page_set	ps;
-	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant, grouped;
+	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, avariant, grouped, gist = 0;
 	uint32_t	npages, nloaded, nagg, ngroups_total, total_lps = 0, ppw;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	gpu_vk_pipeline *sp, *vmpipe;
@@ -3298,6 +3308,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	const uint32_t *out = NULL;
 	int			rv = -1;
 	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
+	uint32_t	bm_words = 0;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -3353,7 +3364,14 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	sh.agg_max = ga_variant_na[avariant];
 	sh.ga_c = ga_variant_cap[avariant];
 	scan_group_keystats(st, prog->nkeys, &ks);
-	sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, sh.agg_max, sh.ga_c, &ks, &sh, vmpipe);
+	/* a GiST-index join runs on the interpreter (specialize.c refuses it) after a scout pass, see below */
+	for (int i = 0; i < ji->nrels; i++)
+		if (ji->rels[i].gist_page0 != 0)
+			gist = 1;
+	if (gist)
+		sp = vmpipe;
+	else
+		sp = spec_pipe(eng, prog, grouped ? SPEC_JGAGG : SPEC_JAGG, sh.agg_max, sh.ga_c, &ks, &sh, vmpipe);
 	if (grouped)
 	{
 		cap = sh.ga_c;
@@ -3370,21 +3388,37 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	if (task_pages_open(eng, &ps, kds_src, pathname, iovec, &mapped, err, errlen) != 0)
 		goto done;
 	t1 = now_ms();
-	if (gpu_vk_buffer_create(vk, &btab, sizeof(uint32_t) * 2 * npages, 0) != 0)
-	{
-		snprintf(err, errlen, "cannot allocate the page table: %s", vk->err);
-		goto done;
-	}
-	have_tab = 1;
 	for (uint32_t i = 0; i < npages; i++)
 	{
 		uint16_t	pd_lower;
 
 		memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
-		((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
-		((uint32_t *) btab.map)[2 * i + 1] = 0;
 		if (pd_lower > 24)
 			total_lps += (pd_lower - 24) / 4;
+	}
+	/* a GiST join: the skip bitmap (one bit per line pointer) follows the 2 words per page */
+	if (gist)
+		bm_words = (total_lps + 31) / 32;
+	if (gpu_vk_buffer_create(vk, &btab, sizeof(uint32_t) * ((size_t) 2 * npages + bm_words), 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the page table: %s", vk->err);
+		goto done;
+	}
+	have_tab = 1;
+	memset(btab.map, 0, sizeof(uint32_t) * ((size_t) 2 * npages + bm_words));
+	{
+		uint32_t	lps_before = 0;
+
+		for (uint32_t i = 0; i < npages; i++)
+		{
+			uint16_t	pd_lower;
+
+			memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
+			((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
+			((uint32_t *) btab.map)[2 * i + 1] = lps_before;	/* line pointers before this page: the bitmap index */
+			if (pd_lower > 24)
+				lps_before += (pd_lower - 24) / 4;
+		}
 	}
 	st->nitems_raw += total_lps;
 	ppw = (grouped ? group_ppw(JGAGG_PAGES_PER_WG) : JAGG_PAGES_PER_WG);
@@ -3396,6 +3430,99 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	}
 	have_prog = 1;
 	memcpy(bprog.map, prog->words, prog->nwords * 4);
+
+	/*
+	 * A GiST-index join can poison an outer row (the join program cannot decide it: a geometry the kernel
+	 * cannot read, an instruction that needs the CPU). The aggregating kernels cannot take back what they
+	 * accumulated for the row's earlier matches, so the plain join kernel runs first as a scout (push
+	 * constant word 4 = 1: append the poison records only). Every poisoned outer row goes to the backend as
+	 * a KDS_FORMAT_RECHECK row (joined and aggregated on the CPU, combined by the Agg node above) and into
+	 * the skip bitmap behind the page table (bit = line pointers before the page + lp), which the
+	 * aggregating pass honours (join_walk.inc).
+	 */
+	if (gist && prog->feat != 0)		/* (a program without geometry instructions runs on the lite kernels and cannot poison) */
+	{
+		int			jvariant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2) + (prog->feat == 0 ? 3 : 0);
+		gpu_vk_buffer sbout;
+		gpu_vk_buffer *sbufs[6] = {&ps.bufF, &sbout, &bprog, &btab, &ps.bufL, &ji->buf};
+		size_t		sout_words = 4 + (size_t) prog->oj_words + (size_t) total_lps * (2 + prog->ndepth + 3 * prog->ncomp);
+		const uint32_t *sout;
+		uint32_t	spc[5], snrec;
+
+		if (ensure_join_pipeline(eng, jvariant, err, errlen) != 0)
+			goto done;
+		if (gpu_vk_buffer_create(vk, &sbout, sout_words * 4, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
+			goto done;
+		}
+		sout = (const uint32_t *) sbout.map;
+		memset(sbout.map, 0, 16 + (size_t) prog->oj_words * 4);
+		for (uint32_t base = 0; base < npages; base += SCAN_WG_MAX)
+		{
+			uint32_t	groups = npages - base;
+
+			if (groups > SCAN_WG_MAX)
+				groups = SCAN_WG_MAX;
+			spc[0] = npages;
+			spc[1] = base;
+			spc[2] = BLCKSZ;
+			spc[3] = total_lps;			/* record capacity: at most one poison record per line pointer */
+			spc[4] = 1;
+			if (gpu_vk_dispatch(vk, &eng->join_pipe[jvariant], sbufs, spc, groups, 1, 1, NULL) != 0)
+			{
+				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+				gpu_vk_buffer_destroy(vk, &sbout);
+				goto done;
+			}
+		}
+		snrec = sout[0];
+		if (sout[1] != 0)
+			describe_kernel_error(sout[1], sout[2], sout[3], err, errlen);
+		else if (snrec > total_lps)
+			snprintf(err, errlen, "the join scout produced more poison records than line pointers");
+		else
+		{
+			uint32_t   *bitmap = (uint32_t *) btab.map + 2 * (size_t) npages;
+			const uint32_t *lpsb = (const uint32_t *) btab.map;
+
+			for (uint32_t r = 0; r < snrec; r++)
+			{
+				const uint32_t *rec = &sout[4 + (size_t) prog->oj_words + (size_t) r * (2 + prog->ndepth + 3 * prog->ncomp)];
+				uint32_t	page = rec[0], lp = rec[1], lpd, bi;
+				const unsigned char *pg;
+
+				if (rec[2] != 0xfffffffeu)
+					continue;				/* (only poison records are appended in scout mode) */
+				if (page >= npages)
+				{
+					snprintf(err, errlen, "corrupt poison record");
+					break;
+				}
+				bi = lpsb[2 * page + 1] + lp;
+				if (bi >= total_lps)
+				{
+					snprintf(err, errlen, "corrupt poison record");
+					break;
+				}
+				if ((bitmap[bi >> 5] >> (bi & 31)) & 1u)
+					continue;
+				bitmap[bi >> 5] |= 1u << (bi & 31);
+				pg = PAGE_AT(&ps, page);
+				memcpy(&lpd, pg + 24 + (size_t) lp * 4, 4);
+				if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[page], lp + 1,
+							pg + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+				{
+					snprintf(err, errlen, "out of memory");
+					break;
+				}
+			}
+		}
+		gpu_vk_buffer_destroy(vk, &sbout);
+		if (err[0] != '\0')
+			goto done;
+	}
+
 
 	/*
 	 * Run. With GROUP BY the rows that found no slot in their workgroup's table are appended to an

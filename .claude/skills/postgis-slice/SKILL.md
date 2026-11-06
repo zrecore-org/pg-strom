@@ -37,7 +37,8 @@ ST_3DDistance/ST_3DMaxDistance of two points and ST_Length/ST_Length2D/ST_3DLeng
 Also on the GPU: exact multi-part lengths/perimeters, point-to-line/polygon distance, exact ST_DWithin, and the GiST join with ST_Contains/ST_Within/
 ST_Intersects (A13 slice 2: inner geometry string registers in join programs, undecidable rows go back through poison records).
 Also the GiST join with ST_DWithin / ST_3DDWithin (A13 slice 3: the walk grows the point's box by the tolerance; inner non-points go back through poison records).
-Still on the CPU: distances of two non-points, ST_DWithin of non-points, GpuPreAgg over a geometry GiST join, Arrow / GPU-Cache outer sources.
+Also GpuPreAgg over a geometry GiST join (ungrouped and GROUP BY: a scout pass finds the poisoned outer rows, the aggregating kernels skip them and the backend joins and aggregates them as a RECHECK chunk; a new geometry qual in the GiST join gets this for free if its poison goes through the join kernel's poison record, and needs a `gistagg` test).
+Still on the CPU: distances of two non-points, ST_DWithin of non-points, Arrow / GPU-Cache outer sources, aggregation over a RIGHT/FULL GiST join, GPU-Sort over a geometry GiST join.
 
 **The guard:** a function whose value must equal PostGIS' bit for bit is only pushed down after `vulkan_geom_*_calibrated` (codegen.c) called the
 installed PostGIS on fixed inputs and got the host formula's bits; a build that computes differently (no floating-point contraction) keeps the

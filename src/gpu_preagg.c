@@ -2533,6 +2533,22 @@ tryAddGpuSortedGroupByPath(xpugroupby_build_path_context *con, CustomPath *cpath
 
 	if (be_parallel || !pgstrom_enable_gpusort)
 		return;
+	/*
+	 * A13: a geometry GiST join sets undecidable outer rows aside as KDS_FORMAT_RECHECK rows that the backend
+	 * joins and aggregates on the CPU, and GPU-Sort needs the service to see every row (it refuses RECHECK).
+	 */
+	{
+		pgstromPlanInfo *pp_join = linitial(cpath_agg->custom_private);
+
+		for (int i=0; i < pp_join->num_inner_rels; i++)
+		{
+			if (OidIsValid(pp_join->inners[i].gist_func_oid))
+			{
+				elog(DEBUG2, "GpuPreAgg: GPU-Sort is not used over a GiST join with a geometry qual");
+				return;
+			}
+		}
+	}
 	if (!parse->groupClause || parse->distinctClause || con->havingProjQuals != NIL)
 		return;
 	if (!consider_sorted_groupby_path(root,
@@ -2607,12 +2623,6 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 			if (jtype == JOIN_RIGHT || jtype == JOIN_FULL)
 			{
 				elog(DEBUG2, "GpuPreAgg: aggregation over a RIGHT/FULL join stays on the CPU");
-				return;
-			}
-			/* a join program that reads an inner geometry hands undecidable rows back to the backend: not aggregated */
-			if (OidIsValid(pp_input->inners[i].gist_func_oid))
-			{
-				elog(DEBUG2, "GpuPreAgg: aggregation over a GiST join with a geometry qual stays on the CPU");
 				return;
 			}
 		}

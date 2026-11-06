@@ -270,4 +270,124 @@ sql "delete from pg_g3z where id % 9 = 0"
 sql "update pg_g3z set geom = ST_Translate(geom, 1, 1) where id % 13 = 3 and geom is not null"
 gistjoin "after delete and updates" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
 
+# ---- GpuPreAgg over a GiST join with a geometry qual (A13) ----
+# The service runs a scout pass first (the join kernel only marks the outer rows it cannot decide: Z/M polygons, lines, big or
+# compressed values, bad tolerances), the aggregating kernels skip those rows, and the backend joins them on the CPU and
+# aggregates them into partial states that the Agg node above GpuPreAgg combines. The result must be PostGIS's, whatever the mix.
+echo "GpuPreAgg over a GiST join (A13)"
+AGGSET="set pg_strom.gpupreagg_max_groups=1000000;"
+# gistagg: label, query [, settings]. The plan must have GpuPreAgg above a GPU GiST Join and the rows must equal the CPU rows
+gistagg() {
+	label=$1; qry=$2; set_extra=${3:-}
+	plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $AGGSET $set_extra explain $qry")
+	pa=$(echo "$plan" | grep -c "Custom Scan (GpuPreAgg)"); pg=$(echo "$plan" | grep -c "GPU GiST Join")
+	g=$(q "$GPU $JOINSET $GISTON $AGGSET $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$pa" -ge 1 ] && [ "$pg" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
+	else echo "  FAIL  $label (plan GpuPreAgg=$pa GPU GiST Join=$pg)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+# gistagg_any: the same comparison, the plan need not have GpuPreAgg (the planner may not offer it for the shape; and where the join's row
+# estimate equals the group estimate it sees no gain in pre-aggregating, though the data reduces a lot: use it for those shapes)
+gistagg_any() {
+	label=$1; qry=$2; set_extra=${3:-}
+	g=$(q "$GPU $JOINSET $GISTON $AGGSET $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
+	else echo "  FAIL  $label"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+C2="st_contains(i.geom, st_makepoint(o.x, o.y))"
+A2="select count(*), count(i.a), sum(i.a), min(i.id), max(o.id) from pg_g2p o join pg_g2z i on"
+gistagg "ungrouped aggregate, ST_Contains" "$A2 $C2"
+gistagg "ungrouped aggregate, ST_Intersects" "$A2 st_intersects(i.geom, st_makepoint(o.x, o.y))"
+gistagg "ungrouped aggregate, ST_Within (point first)" "$A2 st_within(st_makepoint(o.x, o.y), i.geom)"
+gistagg "avg and float8 sum, ungrouped" "select round(avg(i.a), 6), round(sum(o.x)::numeric, 3), count(*) from pg_g2p o join pg_g2z i on $C2"
+gistagg "GROUP BY an outer key" "select o.id % 7, count(*), sum(i.a), min(i.id), max(i.a) from pg_g2p o join pg_g2z i on $C2 group by o.id % 7"
+gistagg "GROUP BY an inner key" "select i.a % 5, count(*), sum(o.id), min(o.id), max(o.id) from pg_g2p o join pg_g2z i on $C2 group by i.a % 5"
+gistagg_any "GROUP BY two keys" "select o.id % 3, i.a % 4, count(*), sum(o.id), round(avg(i.a), 6) from pg_g2p o join pg_g2z i on $C2 group by o.id % 3, i.a % 4"
+gistagg "GROUP BY an outer key, ST_Intersects" "select o.id % 7, count(*), sum(i.a) from pg_g2p o join pg_g2z i on st_intersects(i.geom, st_makepoint(o.x, o.y)) group by o.id % 7"
+gistagg "GROUP BY an inner key, ST_Within" "select i.a % 5, count(*), sum(o.id) from pg_g2p o join pg_g2z i on st_within(st_makepoint(o.x, o.y), i.geom) group by i.a % 5"
+gistagg_any "with an inner qual" "select o.id % 7, count(*), sum(i.a) from pg_g2p o join pg_g2z i on $C2 and i.a % 3 = 0 group by o.id % 7"
+gistagg_any "with an outer qual" "select i.a % 5, count(*), sum(o.id) from pg_g2p o join pg_g2z i on $C2 where o.id % 5 = 0 group by i.a % 5"
+gistagg "fused 3-argument point" "select o.id % 7, count(*), sum(i.a) from pg_g2p o join pg_g2z i on st_intersects(i.geom, st_makepoint(o.x, o.y, 2)) group by o.id % 7"
+gistagg "LEFT join: unmatched outer rows counted" "select o.id % 7, count(*), count(i.id), sum(i.a) from pg_g2p o left join pg_g2z i on $C2 group by o.id % 7"
+gistagg "LEFT join, ungrouped" "select count(*), count(i.id), sum(i.a), max(o.id) from pg_g2p o left join pg_g2z i on $C2"
+# only the big polygons (3000 and 1000 vertices, stored compressed or out of line): per polygon counts
+gistagg_any "the big polygons, GROUP BY the polygon" "select i.id, count(*), sum(o.id) from pg_g2p o join pg_g2z i on $C2 where i.id >= 90001 group by i.id"
+gistagg_any "semi join (EXISTS), ungrouped" "select count(*), sum(o.id) from pg_g2p o where exists (select 1 from pg_g2z i where st_intersects(i.geom, st_makepoint(o.x, o.y)))"
+gistagg_any "semi join (EXISTS), GROUP BY" "select o.id % 7, count(*) from pg_g2p o where exists (select 1 from pg_g2z i where st_contains(i.geom, st_makepoint(o.x, o.y))) group by o.id % 7"
+gistagg_any "anti join (NOT EXISTS), ungrouped" "select count(*), sum(o.id) from pg_g2p o where not exists (select 1 from pg_g2z i where st_contains(i.geom, st_makepoint(o.x, o.y)))"
+gistagg_any "anti join (NOT EXISTS), GROUP BY" "select o.id % 7, count(*) from pg_g2p o where not exists (select 1 from pg_g2z i where st_intersects(i.geom, st_makepoint(o.x, o.y))) group by o.id % 7"
+# no outer row matches: count 0, sum NULL, no group
+gistagg_any "empty result, ungrouped" "select count(*), sum(i.a), min(i.id), max(o.id) from pg_g2p o join pg_g2z i on $C2 where o.x < -5"
+gistagg_any "empty result, GROUP BY" "select o.id % 7, count(*) from pg_g2p o join pg_g2z i on $C2 where o.x < -5 group by o.id % 7"
+# RIGHT and FULL joins stay on Aggregate -> GpuJoin; the answers are the same
+plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $AGGSET explain select count(*), count(o.id) from pg_g2p o right join pg_g2z i on $C2" 2>&1)
+check "aggregate over a RIGHT join stays off GpuPreAgg" "$(echo "$plan" | grep -q 'Custom Scan (GpuPreAgg)'; [ $? -ne 0 ]; echo $?)"
+gistagg_any "aggregate over a RIGHT join" "select count(*), count(o.id), sum(i.a) from pg_g2p o right join pg_g2z i on $C2"
+gistagg_any "GROUP BY over a RIGHT join" "select i.a % 5, count(*), count(o.id) from pg_g2p o right join pg_g2z i on $C2 group by i.a % 5"
+
+# outer rows that match many polygons and also a Z/M polygon or a line: the poison of such a row drops ALL its contributions on the
+# GPU and the CPU adds the whole row exactly once. pg_g4z: 30 overlapping polygons (every point of 5..12 lies in all of them), a Z, an
+# M and a ZM polygon, a line along y = x, a point, an empty and a NULL geometry, and far-away padding so that the index is worth
+# walking. pg_g4p: 400 points on a half-integer grid (some on the line y = x, one on the inner point), a NULL row.
+sql "drop table if exists pg_g4z; drop table if exists pg_g4p"
+sql "create table pg_g4z (id int4, geom geometry, a int4)"
+sql "insert into pg_g4z select i, ST_MakeEnvelope(i % 5, i % 3, 12 + i % 9, 12 + i % 7), i from generate_series(1, 30) i"
+sql "insert into pg_g4z values
+	(101, ST_Force3D(ST_MakeEnvelope(2, 2, 9, 9), 1), 101),
+	(102, ST_Force3DM(ST_MakeEnvelope(8, 8, 16, 16), 2), 102),
+	(103, ST_Force4D(ST_MakeEnvelope(14, 0, 19, 6), 1, 2), 103),
+	(104, ST_MakeLine(ST_MakePoint(0, 0), ST_MakePoint(20, 20)), 104),
+	(105, ST_MakePoint(10.5, 10.5), 105),
+	(106, ST_GeomFromText('POLYGON EMPTY'), 106),
+	(107, null, 107)"
+sql "insert into pg_g4z select 1000 + i, ST_MakeEnvelope(100 + i % 50, 100 + i / 50, 101 + i % 50, 101 + i / 50), 1000 + i from generate_series(1, 1500) i"
+sql "create index pg_g4z_gist on pg_g4z using gist (geom)"
+sql "create table pg_g4p (id int4, x float8, y float8)"
+sql "insert into pg_g4p select i, (i % 20) + 0.5, (i / 20) + 0.5 from generate_series(0, 399) i"
+sql "insert into pg_g4p values (500, null, 1)"
+sql "analyze pg_g4z; analyze pg_g4p"
+C4="st_intersects(i.geom, st_makepoint(o.x, o.y))"
+# the data: some outer rows hit a Z/M/line/point inner row, some do not, and some of those also hit ordinary polygons
+nz=$($PSQL -d scantest -c "$CPU select count(distinct o.id) from pg_g4p o join pg_g4z i on $C4 where ST_HasZ(i.geom) or ST_HasM(i.geom) or GeometryType(i.geom) <> 'POLYGON'" | tail -1)
+nn=$($PSQL -d scantest -c "$CPU select count(distinct o.id) from pg_g4p o join pg_g4z i on $C4 where not (ST_HasZ(i.geom) or ST_HasM(i.geom) or GeometryType(i.geom) <> 'POLYGON')" | tail -1)
+nb=$($PSQL -d scantest -c "$CPU select count(*) from (select o.id from pg_g4p o join pg_g4z i on $C4 group by o.id having count(*) > 20 and bool_or(ST_HasZ(i.geom) or ST_HasM(i.geom) or GeometryType(i.geom) <> 'POLYGON')) x" | tail -1)
+check "pg_g4: outer rows with many matches and a poisoned partner ($nb of $nz special, $nn ordinary)" "$([ "${nb:-0}" -gt 0 ] && [ "${nz:-0}" -lt 400 ] && [ "${nz:-0}" -gt 0 ]; echo $?)"
+gistagg "pg_g4 ungrouped (Intersects)" "select count(*), count(i.id), sum(i.a), min(i.id), max(o.id) from pg_g4p o join pg_g4z i on $C4"
+gistagg "pg_g4 ungrouped (Contains)" "select count(*), sum(i.a), min(o.id), max(o.id) from pg_g4p o join pg_g4z i on st_contains(i.geom, st_makepoint(o.x, o.y))"
+gistagg_any "pg_g4 GROUP BY an outer key" "select o.id % 3, count(*), sum(i.a), min(i.id), max(i.id) from pg_g4p o join pg_g4z i on $C4 group by o.id % 3"
+gistagg_any "pg_g4 GROUP BY the outer row" "select o.id, count(*), sum(i.a) from pg_g4p o join pg_g4z i on $C4 group by o.id"
+gistagg_any "pg_g4 GROUP BY an inner key" "select i.a % 10, count(*), sum(o.id) from pg_g4p o join pg_g4z i on $C4 group by i.a % 10"
+gistagg_any "pg_g4 GROUP BY two keys" "select o.id % 2, i.a % 3, count(*), sum(o.id) from pg_g4p o join pg_g4z i on $C4 group by o.id % 2, i.a % 3"
+gistagg_any "pg_g4 LEFT join" "select o.id % 4, count(*), count(i.id), sum(i.a) from pg_g4p o left join pg_g4z i on $C4 group by o.id % 4"
+gistagg_any "pg_g4 semi join" "select count(*), sum(o.id) from pg_g4p o where exists (select 1 from pg_g4z i where $C4)"
+gistagg_any "pg_g4 anti join" "select count(*), sum(o.id) from pg_g4p o where not exists (select 1 from pg_g4z i where $C4)"
+gistagg_any "pg_g4 RIGHT join" "select count(*), count(o.id), sum(i.a) from pg_g4p o right join pg_g4z i on $C4"
+
+# ST_DWithin / ST_3DDWithin (slice 3 tables): inner lines, polygons and empty points go back to the backend, points are decided
+D3="st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+gistagg "ST_DWithin ungrouped, constant tolerance" "select count(*), sum(i.a), min(i.id), max(o.id) from pg_g3p o join pg_g3z i on $D3"
+gistagg "ST_DWithin GROUP BY an outer key" "select o.id % 7, count(*), sum(i.a) from pg_g3p o join pg_g3z i on $D3 group by o.id % 7"
+gistagg "ST_DWithin GROUP BY an inner key" "select i.a % 5, count(*), sum(o.id) from pg_g3p o join pg_g3z i on $D3 group by i.a % 5"
+gistagg "ST_DWithin, tolerance of the outer row" "select o.id % 5, count(*), sum(i.a) from pg_g3p o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r) group by o.id % 5"
+gistagg "ST_DWithin, tolerance 0" "select count(*), sum(i.a), max(o.id) from pg_g3p o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0)"
+gistagg_any "ST_DWithin, the point first, two keys" "select o.id % 3, i.a % 4, count(*), sum(o.id) from pg_g3p o join pg_g3z i on st_dwithin(st_makepoint(o.x, o.y), i.geom, 1.5) group by o.id % 3, i.a % 4"
+gistagg "ST_3DDWithin ungrouped (fused Z)" "select count(*), sum(i.a), min(i.id) from pg_g3p o join pg_g3z i on st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), 2.5)"
+gistagg "ST_3DDWithin GROUP BY (per-row tolerance)" "select i.a % 4, count(*), sum(o.id) from pg_g3p o join pg_g3z i on st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), o.r) group by i.a % 4"
+gistagg "ST_3DDWithin, four-argument point (ZM)" "select o.id % 7, count(*), sum(i.a) from pg_g3p o join pg_g3z i on st_3ddwithin(i.geom, st_makepoint(o.x, o.y, 1, 2), 2.5) group by o.id % 7"
+gistagg "ST_DWithin LEFT join" "select o.id % 7, count(*), count(i.id), sum(i.a) from pg_g3p o left join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75) group by o.id % 7"
+gistagg_any "ST_DWithin semi join" "select count(*), sum(o.id) from pg_g3p o where exists (select 1 from pg_g3z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistagg_any "ST_DWithin anti join" "select count(*), sum(o.id) from pg_g3p o where not exists (select 1 from pg_g3z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistagg_any "ST_DWithin empty result" "select count(*), sum(i.a) from pg_g3p o join pg_g3z i on $D3 where o.x > 1000 and o.x < 1e299"
+# a NULL, NaN or infinite tolerance (pg_g3n rows 1 to 3): PostGIS' own answer through the backend; a negative one raises its error
+gistagg_any "NULL, NaN and infinite tolerance, ungrouped" "select count(*), count(i.id), sum(i.a) from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r) where o.id <= 3"
+gistagg_any "NULL, NaN and infinite tolerance, GROUP BY" "select o.id, count(*), sum(i.a) from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r) where o.id <= 3 group by o.id"
+eg=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $AGGSET select count(*), sum(i.a) from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r)" 2>&1 | grep -i 'tolerance' | head -1)
+ec=$($PSQL -d scantest -c "$CPU select count(*), sum(i.a) from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r)" 2>&1 | grep -i 'tolerance' | head -1)
+check "negative tolerance in an aggregate: the same error on both ($eg)" "$([ -n "$eg" ] && [ "$eg" = "$ec" ]; echo $?)"
+plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $AGGSET explain select count(*), count(o.id) from pg_g3p o right join pg_g3z i on $D3" 2>&1)
+check "ST_DWithin aggregate over a RIGHT join stays off GpuPreAgg" "$(echo "$plan" | grep -q 'Custom Scan (GpuPreAgg)'; [ $? -ne 0 ]; echo $?)"
+# GPU-Sort is not used over such a join (it needs the service to see every row)
+plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $AGGSET set pg_strom.enable_gpusort=on; explain select o.id % 7 k, count(*) from pg_g2p o join pg_g2z i on $C2 group by o.id % 7 order by 2 desc, 1" 2>&1)
+check "no GPU-Sort over a geometry GiST join" "$(echo "$plan" | grep -q 'GPU-Sort\|gpusort'; [ $? -ne 0 ]; echo $?)"
+gistagg_any "GROUP BY ... ORDER BY over the join" "select k, c from (select o.id % 7 k, count(*) c from pg_g2p o join pg_g2z i on $C2 group by o.id % 7 order by 2 desc, 1) x"
+
 fi

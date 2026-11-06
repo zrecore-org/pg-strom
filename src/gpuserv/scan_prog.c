@@ -2479,6 +2479,9 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			}
 		}
 		w[17] = prog->oj_words;
+		for (int depth = 1; depth <= nrels; depth++)
+			if (rels[depth - 1].gist_page0)
+				w[18] = 1;							/* a GiST join: the aggregating kernels read a skip bitmap (scan_exec.c) */
 		memcpy(w + insnoff, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 		memcpy(w + insnoff + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 		if (agg_mode)

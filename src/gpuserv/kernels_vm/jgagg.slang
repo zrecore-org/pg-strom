@@ -10,6 +10,10 @@
 // expressions, the aggregate arguments and the FILTER conditions; header words as in gagg.slang:
 // [10] aggregates, [11] aggregate table offset, [12] keys, [13] offset of the key registers.
 //
+// A GiST-index join (program header word 18 nonzero, interpreter only) skips the outer rows the
+// scout pass named (join_walk.inc: poison, bitmap behind the page table). A skipped lane only has
+// d == 0 from the start; the barrier rounds are driven by sh_flags as always.
+//
 // Output (outb): [1] first error, [2],[3] page and line pointer; from word 4, per workgroup a block
 // of 1 + GA_C * GA_REC words, exactly as gagg.slang writes it. A joined row whose key finds no slot
 // within a few probes (or whose min/max argument does not fit 32 bits) is not lost: its staged
