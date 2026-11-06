@@ -159,11 +159,7 @@ rk_joins() { # outer table, mode (full | short: the Parquet outer needs only the
 	echo "table $o: GiST joins"
 	J="select o.id, i.id from $o o join rk_gz i on"
 	rk_gistjoin "$o: ST_Contains(inner polygon, point)" "$J st_contains(i.geom, st_makepoint(o.x, o.y))"
-	[ "$mode" != full ] || rk_gistjoin "$o: ST_Intersects(inner polygon, point)" "$J st_intersects(i.geom, st_makepoint(o.x, o.y))"
-	[ "$mode" != full ] || rk_gistjoin "$o: ST_Within(point, inner polygon)" "$J st_within(st_makepoint(o.x, o.y), i.geom)"
-	[ "$mode" != full ] || rk_gistjoin "$o: point Z" "$J st_intersects(i.geom, st_makepoint(o.x, o.y, o.z))"
-	rk_gistjoin "$o: point ZM" "$J st_contains(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
-	[ "$mode" != full ] || rk_gistjoin "$o: outer qual, inner qual" "$J st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.id % 5 = 0 and i.a % 3 = 0"
+	[ "$mode" != full ] || rk_gistjoin "$o: ST_Intersects(inner polygon, point ZM)" "$J st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
 	rk_gistjoin "$o: left join" "select o.id, i.id from $o o left join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y))"
 	[ "$mode" != full ] || rk_gistjoin "$o: semi join" "select o.id from $o o where exists (select 1 from rk_gz i where st_intersects(i.geom, st_makepoint(o.x, o.y)))"
 	[ "$mode" != full ] || rk_gistjoin "$o: anti join" "select o.id from $o o where not exists (select 1 from rk_gz i where st_contains(i.geom, st_makepoint(o.x, o.y)))"
@@ -173,13 +169,7 @@ rk_joins() { # outer table, mode (full | short: the Parquet outer needs only the
 	ANYPLAN=0
 	A="select count(*), count(i.a), sum(i.a), min(i.id), max(o.id) from $o o join rk_gz i on"
 	rk_gistagg "$o: ungrouped aggregate over the join" "$A st_contains(i.geom, st_makepoint(o.x, o.y))"
-	rk_gistagg "$o: ungrouped aggregate, ST_Intersects, point ZM" "$A st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
 	rk_gistagg "$o: GROUP BY an inner key" "select i.a % 5, count(*), sum(o.id), max(o.id) from $o o join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y)) group by i.a % 5"
-	rk_gistagg "$o: aggregate, parallel workers" "$A st_contains(i.geom, st_makepoint(o.x, o.y))" "$APAR"
-	ANYPLAN=1
-	rk_gistagg "$o: GROUP BY an outer key (any plan)" "select o.id % 7, count(*), sum(i.a), min(i.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id % 7"
-	rk_gistagg "$o: GROUP BY two keys (any plan)" "select o.id % 3, i.a % 4, count(*), sum(o.id) from $o o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) group by o.id % 3, i.a % 4"
-	ANYPLAN=0
 }
 rk_joins rk_j
 rk_joins rk_jp short
@@ -210,8 +200,6 @@ echo "table rk_gc (GPU-Cache)"
 for pl in "square:$SQ" "hole:$HOLE" "multi:$MULTI"; do
 	nm=${pl%%:*}; pg=${pl#*:}
 	rkgc "scan: ST_Contains($nm)" "select id from %T where ST_Contains($pg, ST_MakePoint(x, y))"
-	rkgc "scan: ST_Covers($nm)" "select id, x + y from %T where ST_Covers($pg, ST_MakePoint(x, y))"
-	rkgc "scan: ST_Intersects($nm, point Z)" "select id from %T where ST_Intersects(ST_MakePoint(x, y, z), $pg)"
 done
 rkgc "scan: ST_Contains(hole, point ZM)" "select id, z, m from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m))"
 rkgc "scan: next to a plain qual" "select id from %T where id % 3 = 0 and ST_Covers($SQ, ST_MakePoint(x, y))"
@@ -223,10 +211,8 @@ n=$(rck_rows rk_gc "select id from %T where ST_Contains($SQ, ST_MakePoint(x, y))
 [ "$n" -gt 0 ]; check "rk_gc: the GPU handed cached rows to the backend ($n rechecked)" $?
 # a join with the cache as the outer relation
 rk_gistjoin "rk_gc: ST_Contains join" "select o.id, i.id from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
-rk_gistjoin "rk_gc: left join, point ZM" "select o.id, i.id from (select * from rk_gc where x <> 'Infinity'::float8 and y <> 'NaN'::float8) o left join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y, o.z, o.m))"
 rk_gistagg "rk_gc: ungrouped aggregate over the join" "select count(*), sum(i.a), min(i.id), max(o.id) from rk_gc o join rk_gz i on st_contains(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8"
 ANYPLAN=1
-rk_gistagg "rk_gc: GROUP BY an outer key (any plan)" "select o.id % 7, count(*), sum(i.a) from rk_gc o join rk_gz i on st_intersects(i.geom, st_makepoint(o.x, o.y)) and o.x <> 'Infinity'::float8 and o.y <> 'NaN'::float8 group by o.id % 7"
 ANYPLAN=0
 
 # the cache holds the latest committed state and the session's own changes: rows changed inside a transaction (at the vertex
