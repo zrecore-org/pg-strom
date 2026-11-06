@@ -175,8 +175,8 @@ done
 n=$(recheck_rows pg_grid "select id from %T where ST_Contains($SQ, ST_MakePoint(x, y))")
 [ "$n" -gt 0 ]; check "pg_grid: points on edges and vertices are rechecked (counter read: $n rows)" $?
 
-# A table with a GPU-Cache: the cache holds neither geometry nor a way to hand a row back to the backend, so the geometry
-# predicates stay on the CPU there (an error from the service would be the alternative); the answers are still PostGIS's.
+# A table with a GPU-Cache (A12): the cache loads a geometry column as a string and hands a row it cannot decide back to the
+# backend as a heap tuple built from the slot, so the predicates run on the GPU; the answers are still PostGIS's.
 sql "create table pg_gc as select id, g2 as g, x, y from pg_1 where g2 is not null and id <= 30000"
 sql "create trigger gc_sync after insert or update or delete on pg_gc for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=90000')"
 sql "analyze pg_gc"
@@ -184,6 +184,10 @@ run_any pg_gc "GPU-Cache table: fused ST_Contains" "select id from %T where ST_C
 run_any pg_gc "GPU-Cache table: ST_Intersects on a point column" "select id from %T where ST_Intersects(g, $SQ)"
 run_any pg_gc "GPU-Cache table: && on a point column" "select id from %T where g && $SQ"
 run_any pg_gc "GPU-Cache table: a plain qual next to ST_Contains" "select id from %T where x > 0 and ST_Contains($SQ, ST_MakePoint(x, y))"
+for q_ in "ST_Contains($MULTI, ST_MakePoint(x, y))" "ST_Intersects(g, $SQ)" "g && $SQ"; do
+	n=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; explain select id from pg_gc where $q_" | grep -c "GPU Cache:")
+	[ "$n" -ge 1 ]; check "pg_gc: the plan of $q_ reads the GPU-Cache" $?
+done
 
 # ---- A11 part 3: ST_DWithin of two points. PostGIS tests its own distance (which differs from plain binary64 in 8% of random
 # pairs) against the tolerance, so the instruction decides only beyond a relative 2^-47 of r*r and hands the boundary, a SRID
