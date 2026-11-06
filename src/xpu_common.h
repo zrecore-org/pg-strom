@@ -1317,16 +1317,36 @@ struct kern_fallbackitem
 typedef struct kern_fallbackitem	kern_fallbackitem;
 
 /*
- * kern_recheckitem - individual items for KDS_FORMAT_RECHECK: a heap tuple of the base relation
- * (HeapTupleHeaderData follows at t_data) and where it came from
+ * kern_recheckitem - individual items for KDS_FORMAT_RECHECK.  Each item is MAXALIGN'ed in size and
+ * has two kinds, told apart by 'kind' (the former __pad1; a writer that zeroes the header, as
+ * rck_add() does, produces kind 0):
+ *
+ * kind RECHECK_KIND_HEAP (0): a heap tuple of the base relation (HeapTupleHeaderData follows at
+ *   t_data, t_len bytes) and where it came from (blkno, offnum).  The item is
+ *   MAXALIGN(offsetof(kern_recheckitem, t_data) + t_len) bytes.  GPU-Cache rows use this kind
+ *   too: the service synthesizes a heap tuple from the cache slot (ctid of the slot, frozen xmin).
+ *
+ * kind RECHECK_KIND_ARROW (1): one row of an Arrow record batch or a Parquet row group; no tuple
+ *   bytes follow, t_len = 0 and the item is exactly offsetof(kern_recheckitem, t_data) = 16 bytes.
+ *   The row is named by the (scan relation, record batch, row) triple, in the same fields:
+ *     t_len        = 0
+ *     blkno        = rb_flat: index of the record batch in ArrowFdwState.rb_states[] (the flat
+ *                    index over all files; NOT the per-file index of kds->parquet_row_group).
+ *                    The service copies it from kern_exec_task.arrow_rb_flat of the task
+ *     offnum       = scan_relidx of the task (kern_exec_task.scan_relidx; < 65536)
+ *     kind         = RECHECK_KIND_ARROW
+ *     arrow_row    = row index within that record batch / row group, counted from 0
+ *   The backend decodes the row itself (execCpuRecheckOneChunk).
  */
+#define RECHECK_KIND_HEAP		0
+#define RECHECK_KIND_ARROW		1
 struct kern_recheckitem
 {
-	uint32_t		t_len;		/* length of the heap tuple */
-	uint32_t		blkno;		/* block number of the tuple */
-	uint16_t		offnum;		/* line pointer number (1 ...) */
-	uint16_t		__pad1;
-	uint32_t		__pad2;
+	uint32_t		t_len;		/* length of the heap tuple (kind ARROW: 0) */
+	uint32_t		blkno;		/* block number of the tuple (kind ARROW: rb_flat) */
+	uint16_t		offnum;		/* line pointer number 1... (kind ARROW: scan_relidx) */
+	uint16_t		kind;		/* RECHECK_KIND_* */
+	uint32_t		arrow_row;	/* kind ARROW only: row index in the record batch; else 0 */
 	char			t_data[1]	__MAXALIGNED__;
 };
 typedef struct kern_recheckitem		kern_recheckitem;
@@ -2889,6 +2909,10 @@ typedef struct {
 	uint32_t	kds_src_iovec;		/* offset to strom_io_vector */
 	uint32_t	kds_src_offset;		/* offset to kds_src */
 	gpumask_t	optimal_gpus;		/* schedulable GPUs in this task */
+	uint32_t	arrow_rb_flat;		/* Arrow / Parquet scan only: index of the record batch (row group)
+									 * in ArrowFdwState.rb_states[] (flat over all files), which the
+									 * service copies into every kern_recheckitem of kind ARROW of
+									 * this task.  0 for any other task. */
 	char		data[1]				__MAXALIGNED__;
 } kern_exec_task;
 

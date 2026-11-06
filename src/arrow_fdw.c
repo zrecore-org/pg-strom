@@ -136,6 +136,17 @@ struct ArrowFdwState
 	pg_atomic_uint32   *ncaches_parquet_load;
 	pg_atomic_uint32	__ncaches_parquet_load;	/* if single process */
 	LargeStringInfoData	chunk_buffer;	/* buffer to load record-batch */
+	/*
+	 * CPU re-evaluation of rows the GPU could not decide (KDS_FORMAT_RECHECK, kind ARROW).
+	 * The record batch (row group) is reloaded into a buffer of its own, because chunk_buffer
+	 * may still be referenced by a task in flight, and the last one is kept: the rows of a
+	 * chunk usually come from a few batches and a Parquet row group is expensive to decode.
+	 */
+	LargeStringInfoData	recheck_buffer;	/* initialized on first use */
+	bool				recheck_buffer_ready;
+	uint32_t			recheck_rb_flat1;	/* flat index + 1 of the batch in recheck_buffer; 0 = none */
+	kern_data_store	   *recheck_kds;
+	TupleTableSlot	   *recheck_slot;	/* virtual slot of the scan relation */
 	File				curr_filp;		/* current arrow file to read */
 	kern_data_store	   *curr_kds;		/* current chunk to read */
 	uint32_t			curr_index;		/* current index on the chunk */
@@ -5390,7 +5401,7 @@ ArrowBeginForeignScan(ForeignScanState *node, int eflags)
  * ExecArrowScanChunk
  */
 static inline RecordBatchState *
-__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state)
+__arrowFdwNextRecordBatch(ArrowFdwState *arrow_state, uint32_t *p_rb_flat)
 {
 	RecordBatchState *rb_state;
 	uint32_t	rb_index;
@@ -5409,6 +5420,8 @@ retry:
 		}
 		pg_atomic_fetch_add_u32(arrow_state->rbatch_nload, 1);
 	}
+	if (p_rb_flat)
+		*p_rb_flat = rb_index;
 	return rb_state;
 }
 
@@ -5429,8 +5442,9 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	uint32_t	kds_src_offset = 0;
 	uint32_t	kds_src_iovec = 0;
 	uint32_t	kds_src_pathname;
+	uint32_t	rb_flat = 0;
 
-	rb_state = __arrowFdwNextRecordBatch(arrow_state);
+	rb_state = __arrowFdwNextRecordBatch(arrow_state, &rb_flat);
 	if (!rb_state)
 	{
 		pts->curr_scan_rel++;
@@ -5514,11 +5528,78 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
 	xcmd->u.task.kds_src_pathname = kds_src_pathname;
 	xcmd->u.task.kds_src_iovec    = kds_src_iovec;
 	xcmd->u.task.kds_src_offset   = kds_src_offset;
+	/* the service copies it into the recheck items of this task (kern_recheckitem, kind ARROW) */
+	xcmd->u.task.arrow_rb_flat    = rb_flat;
 	xcmd_iov->iov_base = xcmd;
 	xcmd_iov->iov_len  = xcmd->length;
 	*xcmd_iovcnt = 1;
 
 	return xcmd;
+}
+
+/*
+ * pgstromArrowFdwRecheckTuple
+ *
+ * Builds the heap tuple of one row of the scan, for the CPU re-evaluation of a row that the GPU
+ * could not decide (kern_recheckitem of kind ARROW). 'rb_flat' is the index of the record batch
+ * (Parquet row group) in rb_states[] and 'row' the row in it, both as the GPU service reports
+ * them. All columns the plan references (arrow_state->referenced, the set the GPU loads too) are
+ * filled; the other ones are NULL. The tuple and the by-reference values are allocated in the
+ * current memory context. t_tableOid is set; there is no valid t_self.
+ */
+HeapTuple
+pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
+							Relation scan_rel,
+							uint32_t rb_flat,
+							uint32_t row)
+{
+	TupleDesc		tupdesc = RelationGetDescr(scan_rel);
+	kern_data_store *kds;
+	HeapTuple		htup;
+
+	if (rb_flat >= arrow_state->rb_nitems)
+		elog(ERROR, "arrow_fdw: record batch %u of the CPU re-evaluation is out of range (%u batches)",
+			 rb_flat, arrow_state->rb_nitems);
+	if (arrow_state->recheck_rb_flat1 != rb_flat + 1)
+	{
+		RecordBatchState *rb_state = arrow_state->rb_states[rb_flat];
+		MemoryContext	oldcxt;
+
+		/* the buffer and the slot live as long as the scan state */
+		oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(arrow_state));
+		if (!arrow_state->recheck_buffer_ready)
+		{
+			initLargeStringInfo(&arrow_state->recheck_buffer);
+			arrow_state->recheck_buffer_ready = true;
+		}
+		if (!arrow_state->recheck_slot)
+			arrow_state->recheck_slot = MakeSingleTupleTableSlot(tupdesc, &TTSOpsVirtual);
+		arrow_state->recheck_rb_flat1 = 0;		/* invalid while loading */
+		arrow_state->recheck_kds = NULL;
+		if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
+			kds = parquetFillupRowGroup(scan_rel,
+										arrow_state->referenced,
+										rb_state,
+										&arrow_state->recheck_buffer);
+		else
+			kds = arrowFdwFillupRecordBatch(scan_rel,
+											arrow_state->referenced,
+											rb_state,
+											&arrow_state->recheck_buffer);
+		MemoryContextSwitchTo(oldcxt);
+		arrow_state->recheck_kds = kds;
+		arrow_state->recheck_rb_flat1 = rb_flat + 1;
+	}
+	kds = arrow_state->recheck_kds;
+	if (!kds_arrow_fetch_tuple(arrow_state->recheck_slot, kds, row,
+							   arrow_state->referenced))
+		elog(ERROR, "arrow_fdw: row %u of the record batch %u (%u rows) is out of range in the CPU re-evaluation",
+			 row, rb_flat, kds->nitems);
+	htup = heap_form_tuple(tupdesc,
+						   arrow_state->recheck_slot->tts_values,
+						   arrow_state->recheck_slot->tts_isnull);
+	htup->t_tableOid = RelationGetRelid(scan_rel);
+	return htup;
 }
 
 /*
@@ -5538,7 +5619,7 @@ ArrowIterateForeignScan(ForeignScanState *node)
 
 		arrow_state->curr_index = 0;
 		arrow_state->curr_kds = NULL;
-		rb_state = __arrowFdwNextRecordBatch(arrow_state);
+		rb_state = __arrowFdwNextRecordBatch(arrow_state, NULL);
 		if (!rb_state)
 			return NULL;
 		if (ArrowMetadataVersionIsParquet(rb_state->af_state->version))
@@ -5573,6 +5654,8 @@ void
 pgstromArrowFdwExecReset(ArrowFdwState *arrow_state)
 {
 	pg_atomic_write_u32(arrow_state->rbatch_index, 0);
+	arrow_state->recheck_rb_flat1 = 0;
+	arrow_state->recheck_kds = NULL;
 	if (arrow_state->curr_kds)
 		pfree(arrow_state->curr_kds);
 	arrow_state->curr_kds = NULL;

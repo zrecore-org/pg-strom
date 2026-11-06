@@ -953,6 +953,10 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index,
 									  const Bitmapset *referenced);
+extern HeapTuple pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
+											 Relation scan_rel,
+											 uint32_t rb_flat,
+											 uint32_t row);
 extern void		pgstrom_init_arrow_fdw(void);
 
 /*
