@@ -124,6 +124,13 @@ jobs:
       # A kernel changes rarely, so the driver's compiled shaders (lavapipe: Mesa's shader cache; the service's
       # pipeline cache) are kept between runs. The key follows the kernel sources: a changed kernel recompiles,
       # the others are found in the restored cache.
+      # lavapipe JIT-compiles for the host CPU and Mesa's shader cache is not keyed by CPU features: objects cached on a
+      # runner with a wider instruction set made the probe die with SIGILL (status 0x84) on a narrower one.
+      - name: CPU fingerprint for the cache key
+        run: |
+          grep -m1 -i -E '^(model name|Features|flags)' /proc/cpuinfo | cut -c1-200
+          echo "CPUKEY=$(grep -i -E '^(model name|flags|Features)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-12)" >> "$GITHUB_ENV"
+
       # restore and save are separate steps: actions/cache saves only when the whole job succeeds, so a run that
       # fails after its slow cold compiles would leave the next run just as cold (the saving step below runs always).
       - name: Restore the shader and pipeline caches
@@ -132,9 +139,9 @@ jobs:
           path: |
             .cache/mesa
             .cache/xdg
-          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ env.CPUKEY }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
           restore-keys: |
-            shader-cache-${{ runner.os }}-${{ runner.arch }}-
+            shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ env.CPUKEY }}-
 
       - name: Show the Vulkan devices (informational)
         continue-on-error: true
@@ -187,7 +194,7 @@ jobs:
           path: |
             .cache/mesa
             .cache/xdg
-          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ env.CPUKEY }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
 
       - name: Server and GPU service logs of the failed test
         if: failure()
