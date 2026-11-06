@@ -54,5 +54,8 @@ int			gcache_fetch(const gcache *g, int colno, uint32_t row, unsigned char *tmp,
 /* ctid of a row (6 bytes) */
 void		gcache_ctid(const gcache *g, uint32_t row, unsigned char *out);
 uint32_t	gcache_ncols(const gcache *g);
+/* A12: a heap tuple of the row (every cached column, frozen xmin, the slot's ctid) for the backend's CPU re-evaluation */
+int			gcache_form_tuple(const gcache *g, uint32_t row, unsigned char **p_buf, uint32_t *p_len,
+							  uint32_t *p_blkno, uint32_t *p_offnum, char *err, size_t errlen);
 
 #endif	/* GPUSERV_GCACHE_H */

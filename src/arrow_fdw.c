@@ -5678,6 +5678,11 @@ pgstromArrowFdwExecEnd(ArrowFdwState *arrow_state)
 		FileClose(arrow_state->curr_filp);
 	if (arrow_state->stats_hint)
 		execEndArrowStatsHint(arrow_state->stats_hint);
+	if (arrow_state->recheck_slot)
+	{
+		ExecDropSingleTupleTableSlot(arrow_state->recheck_slot);	/* unpins the scan relation's descriptor */
+		arrow_state->recheck_slot = NULL;
+	}
 }
 
 static void

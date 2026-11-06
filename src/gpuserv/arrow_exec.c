@@ -1145,6 +1145,7 @@ typedef struct
 	uint32_t   *tab;
 	uint32_t	ncols, nrows;
 	gcache	   *gc;					/* a GPU-Cache task: bg is the cache's buffer (not owned), bdummy its row filter */
+	uint32_t	skip_words;			/* words of the skip bitmap behind the column table (aggregation over a GiST join) */
 	uint32_t	rb_flat;			/* Arrow / Parquet task: index of the record batch in the backend's ArrowFdwState (A12) */
 	int32_t		relidx;				/* the task's scan_relidx */
 	gpu_vk_buffer bg, btab, bprog, bdummy;
@@ -1233,7 +1234,7 @@ arrow_task_parse(const XpuCommand *task, arrow_task *at, char *err, size_t errle
 static int
 arrow_task_setup_gcache(gpu_vk_ctx *vk, arrow_task *at, const scan_prog *prog, char *err, size_t errlen)
 {
-	size_t		tabbytes = sizeof(uint32_t) * (ARROW_TAB_COLWORDS * (size_t) at->ncols + ARROW_TAB_EXTRA);
+	size_t		tabbytes = sizeof(uint32_t) * (ARROW_TAB_COLWORDS * (size_t) at->ncols + ARROW_TAB_EXTRA + at->skip_words);
 	const kern_session_info *session = gcache_cur_session;
 	const SerializedTransactionState *xs = NULL;
 	int			own = 0;
@@ -1288,7 +1289,7 @@ arrow_task_setup(gpu_vk_ctx *vk, arrow_task *at, const scan_prog *prog, char *er
 		snprintf(err, errlen, "the program reads more columns than the Arrow store has");
 		return -1;
 	}
-	tabbytes = sizeof(uint32_t) * (ARROW_TAB_COLWORDS * (size_t) at->ncols + ARROW_TAB_EXTRA);
+	tabbytes = sizeof(uint32_t) * (ARROW_TAB_COLWORDS * (size_t) at->ncols + ARROW_TAB_EXTRA + at->skip_words);
 	if (arrow_data_open(&at->ad, kds_src, at->pathname, at->iovec, err, errlen) != 0)
 		return -1;
 	at->have_data = 1;
@@ -1372,6 +1373,14 @@ arrow_kernel_error(uint32_t code, uint32_t row, char *err, size_t errlen)
 		snprintf(p, errlen - (size_t)(p - err), ", row %u)", row);
 }
 
+static int
+arrow_cmp_u32(const void *a, const void *b)
+{
+	uint32_t	x = *(const uint32_t *) a, y = *(const uint32_t *) b;
+
+	return (x < y ? -1 : x > y ? 1 : 0);
+}
+
 /*
  * A12: row `row` of the task's batch could not be decided on the GPU: it goes to the backend (a
  * KDS_FORMAT_RECHECK chunk). An Arrow / Parquet row is named by (record batch, row); a GPU-Cache row
@@ -1383,12 +1392,18 @@ arrow_rck_row(const arrow_task *at, recheck_buf *r, uint32_t row, char *err, siz
 	int			rv;
 
 	if (at->gc)
-		rv = -2;
+	{
+		unsigned char *htup;
+		uint32_t	len, blkno, offnum;
+
+		if (gcache_form_tuple(at->gc, row, &htup, &len, &blkno, &offnum, err, errlen) != 0)
+			return -1;
+		rv = rck_add(r, blkno, offnum, htup, len);
+		free(htup);
+	}
 	else
 		rv = rck_add_arrow(r, at->rb_flat, (uint32_t) at->relidx, row);
-	if (rv == -2)
-		snprintf(err, errlen, "a GPU-Cache row needs the CPU, which is not implemented yet");
-	else if (rv != 0)
+	if (rv != 0)
 		snprintf(err, errlen, "out of memory");
 	return rv;
 }
@@ -2012,6 +2027,26 @@ done:
 	return rv;
 }
 
+static int
+arrow_ensure_join_pipeline(scan_engine *eng, int variant, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const unsigned char *spv = (variant == 0 ? kspv_ajoin16 : variant == 1 ? kspv_ajoin32 :
+								variant == 2 ? kspv_ajoin16_lite : kspv_ajoin32_lite);
+	size_t		spv_len = (variant == 0 ? kspv_ajoin16_len : variant == 1 ? kspv_ajoin32_len :
+						   variant == 2 ? kspv_ajoin16_lite_len : kspv_ajoin32_lite_len);
+
+	if (eng->ajoin_ready[variant])
+		return 0;
+	if (gpu_vk_pipeline_create(vk, &eng->ajoin_pipe[variant], spv, spv_len, 6, 20) != 0)
+	{
+		snprintf(err, errlen, "cannot create the Arrow join pipeline: %s", vk->err);
+		return -1;
+	}
+	eng->ajoin_ready[variant] = 1;
+	return 0;
+}
+
 /* ---------------------------------------------------------------- */
 /*
  * GpuJoin with an Arrow record batch as the outer relation: join.slang built with -DARROW_SRC. The
@@ -2034,6 +2069,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 	int			have_out = 0, have_result = 0, have_form = 0, variant;
 	uint32_t	nrows, ncomp, rec_words;
 	XpuCommand *resp = NULL;
+	uint32_t   *pz = NULL;
 	arrow_result rs;
 	arrow_form	af;
 	double		t0 = arrow_now_ms(), t1 = 0, tg = 0, tf = 0;
@@ -2067,20 +2103,9 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 	variant = (prog->nregs <= 16 ? 0 : 1) + (prog->feat == 0 ? 2 : 0);
 	memset(&sh, 0, sizeof(sh));
 	sp = spec_pipe(eng, prog, SPEC_JOIN | SPEC_ARROW, 0, 0, NULL, NULL, &eng->ajoin_pipe[variant]);
-	if ((sp == &eng->ajoin_pipe[variant] || spec_check_enabled(eng)) && !eng->ajoin_ready[variant])
-	{
-		const unsigned char *spv = (variant == 0 ? kspv_ajoin16 : variant == 1 ? kspv_ajoin32 :
-									variant == 2 ? kspv_ajoin16_lite : kspv_ajoin32_lite);
-		size_t		spv_len = (variant == 0 ? kspv_ajoin16_len : variant == 1 ? kspv_ajoin32_len :
-							   variant == 2 ? kspv_ajoin16_lite_len : kspv_ajoin32_lite_len);
-
-		if (gpu_vk_pipeline_create(vk, &eng->ajoin_pipe[variant], spv, spv_len, 6, 20) != 0)
-		{
-			snprintf(err, errlen, "cannot create the Arrow join pipeline: %s", vk->err);
-			return NULL;
-		}
-		eng->ajoin_ready[variant] = 1;
-	}
+	if ((sp == &eng->ajoin_pipe[variant] || spec_check_enabled(eng)) &&
+		arrow_ensure_join_pipeline(eng, variant, err, errlen) != 0)
+		return NULL;
 	if (arrow_task_setup(vk, &at, prog, err, errlen) != 0)
 		goto error;
 	t1 = arrow_now_ms();
@@ -2096,7 +2121,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 
 	for (uint32_t first = 0; first < nrows; first += ARROW_JOIN_PASS_ROWS)
 	{
-		uint32_t	n = nrows - first, pages, cap, nmatch = 0;
+		uint32_t	n = nrows - first, pages, cap, nmatch = 0, npz = 0;
 		const uint32_t *out = NULL;
 		double		tp = arrow_now_ms();
 
@@ -2158,6 +2183,41 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 		tp = arrow_now_ms();
 		if (prog->oj_words > 0)
 			scan_join_merge_ojmap(prog, ji, out);
+		/*
+		 * Poison records (item word of depth 1 = 0xfffffffe, join_walk.inc): the outer row could not be decided on the
+		 * GPU (a scan qual or the join program needed the CPU). Whatever matches it appended are dropped and the row
+		 * goes to the backend, which joins it on the CPU (KDS_FORMAT_RECHECK).
+		 */
+		npz = 0;
+		free(pz);
+		pz = NULL;
+		for (uint32_t r = 0; r < nmatch; r++)
+		{
+			const uint32_t *rec = &out[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
+
+			if (rec[2] != 0xfffffffeu)
+				continue;
+			if (rec[0] >= pages || rec[1] >= ARROW_VP || first + rec[0] * ARROW_VP + rec[1] >= nrows)
+			{
+				snprintf(err, errlen, "corrupt poison record");
+				goto error;
+			}
+			if (!pz)
+			{
+				pz = malloc(sizeof(uint32_t) * (size_t) nmatch);
+				if (!pz)
+				{
+					snprintf(err, errlen, "out of memory");
+					goto error;
+				}
+			}
+			pz[npz++] = first + rec[0] * ARROW_VP + rec[1];
+		}
+		if (npz > 1)
+			qsort(pz, npz, sizeof(uint32_t), arrow_cmp_u32);
+		for (uint32_t i = 0; i < npz; i++)
+			if ((i == 0 || pz[i] != pz[i - 1]) && arrow_rck_row(&at, &rs.rck, pz[i], err, errlen) != 0)
+				goto error;
 		for (uint32_t r = 0; r < nmatch; r++)
 		{
 			const uint32_t *rec = &out[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
@@ -2168,6 +2228,10 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 				snprintf(err, errlen, "corrupt match record");
 				goto error;
 			}
+			if (rec[2] == 0xfffffffeu)
+				continue;
+			if (npz > 0 && bsearch(&row, pz, npz, sizeof(uint32_t), arrow_cmp_u32))
+				continue;				/* the backend joins this row */
 			af.inner[0] = NULL;
 			for (int d = 1; d <= prog->ndepth; d++)
 			{
@@ -2187,6 +2251,8 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 		gpu_vk_buffer_destroy(vk, &bout);
 		have_out = 0;
 	}
+	free(pz);
+	pz = NULL;
 	resp = arrow_result_finish(&rs, task, nrows, nrows,
 							   (uint32_t)((at.kds_src->length > (uint64_t) at.ad.as.head
 										   ? at.kds_src->length - at.ad.as.head : 0) / BLCKSZ),
@@ -2202,6 +2268,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 	return resp;
 
 error:
+	free(pz);
 	if (have_form)
 		arrow_form_close(&af);
 	if (have_result)
@@ -2212,6 +2279,100 @@ error:
 	if (err[0] == '\0')
 		snprintf(err, errlen, "Arrow join failed");
 	return NULL;
+}
+
+/*
+ * The scout pass of an aggregation over a GiST-index join (see join_walk.inc): the VM join kernel appends the poison
+ * records only (push constant word 4 = 1). Every poisoned outer row of the pass (rows first ... first + n - 1) goes to
+ * the backend (a KDS_FORMAT_RECHECK row) and sets its bit in the skip bitmap behind the column table (bit = row of
+ * the pass), which the aggregating kernels honour.
+ */
+static int
+arrow_join_scout(scan_engine *eng, join_inner *ji, const scan_prog *prog, arrow_task *at, int variant,
+				 uint32_t first, uint32_t n, recheck_buf *rck, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	uint32_t	pages = (n + ARROW_VP - 1) / ARROW_VP;
+	uint32_t	cap = 4096, nrec = 0;
+	size_t		rec_words = 2 + prog->ndepth + 3 * prog->ncomp;
+	uint32_t   *bitmap = (uint32_t *) at->btab.map + ARROW_TAB_COLWORDS * (size_t) at->ncols + ARROW_TAB_EXTRA;
+
+	if (arrow_ensure_join_pipeline(eng, variant, err, errlen) != 0)
+		return -1;
+	memset(bitmap, 0, sizeof(uint32_t) * at->skip_words);
+	for (int attempt = 0; attempt < 2; attempt++)
+	{
+		gpu_vk_buffer sbout;
+		gpu_vk_buffer *sbufs[6] = {&at->bg, &sbout, &at->bprog, &at->btab, &at->bdummy, &ji->buf};
+		size_t		words = 4 + (size_t) prog->oj_words + (size_t) cap * rec_words;
+		const uint32_t *sout;
+
+		if (words > 0xffffffffULL / 8 || gpu_vk_buffer_create(vk, &sbout, words * 4, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
+			return -1;
+		}
+		sout = (const uint32_t *) sbout.map;
+		memset(sbout.map, 0, 16 + (size_t) prog->oj_words * 4);
+		for (uint32_t base = 0; base < pages; base += ARROW_WG_MAX)
+		{
+			uint32_t	groups = pages - base;
+			uint32_t	pc[5];
+
+			if (groups > ARROW_WG_MAX)
+				groups = ARROW_WG_MAX;
+			pc[0] = pages;
+			pc[1] = base;
+			pc[2] = 0;
+			pc[3] = cap;
+			pc[4] = 1;
+			if (gpu_vk_dispatch(vk, &eng->ajoin_pipe[variant], sbufs, pc, groups, 1, 1, NULL) != 0)
+			{
+				snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+				gpu_vk_buffer_destroy(vk, &sbout);
+				return -1;
+			}
+		}
+		nrec = sout[0];
+		if (sout[1] != 0)
+		{
+			arrow_kernel_error(sout[1], first + sout[2] * ARROW_VP + sout[3], err, errlen);
+			gpu_vk_buffer_destroy(vk, &sbout);
+			return -1;
+		}
+		if (nrec > cap)
+		{
+			cap = nrec;					/* the exact number of records */
+			gpu_vk_buffer_destroy(vk, &sbout);
+			continue;
+		}
+		for (uint32_t r = 0; r < nrec; r++)
+		{
+			const uint32_t *rec = &sout[4 + (size_t) prog->oj_words + (size_t) r * rec_words];
+			uint32_t	bi = rec[0] * ARROW_VP + rec[1];
+
+			if (rec[2] != 0xfffffffeu)
+				continue;				/* (only poison records are appended in scout mode) */
+			if (rec[0] >= pages || rec[1] >= ARROW_VP || bi >= n)
+			{
+				snprintf(err, errlen, "corrupt poison record");
+				gpu_vk_buffer_destroy(vk, &sbout);
+				return -1;
+			}
+			if ((bitmap[bi >> 5] >> (bi & 31)) & 1u)
+				continue;
+			bitmap[bi >> 5] |= 1u << (bi & 31);
+			if (arrow_rck_row(at, rck, first + bi, err, errlen) != 0)
+			{
+				gpu_vk_buffer_destroy(vk, &sbout);
+				return -1;
+			}
+		}
+		gpu_vk_buffer_destroy(vk, &sbout);
+		return 0;
+	}
+	snprintf(err, errlen, "the join scout produced more poison records than it announced");
+	return -1;
 }
 
 /* ---------------------------------------------------------------- */
@@ -2269,7 +2430,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	const kern_session_info *session = &session_cmd->u.session;
 	arrow_task	at;
 	gpu_vk_buffer bout;
-	int			have_out = 0, variant, avariant, grouped, rv = -1;
+	int			have_out = 0, variant, avariant, grouped, rv = -1, gist = 0;
 	gpu_vk_pipeline *vmpipe;
 	spec_keystats ks;
 	uint32_t	nrows, nagg, ppw, pass_rows;
@@ -2319,6 +2480,15 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		return -1;
 	if (nrows == 0)
 		return 0;
+	/* a GiST join can poison an outer row: the scout pass and the skip bitmap (a program without geometry instructions
+	 * runs on the lite kernels and cannot) */
+	for (int i = 0; i < ji->nrels; i++)
+		if (ji->rels[i].gist_page0 != 0)
+			gist = 1;
+	if (gist && prog->feat != 0)
+		at.skip_words = (nrows + 31) / 32;
+	else
+		gist = 0;
 	if (arrow_task_setup(vk, &at, prog, err, errlen) != 0)
 		goto done;
 	t1 = arrow_now_ms();
@@ -2347,6 +2517,9 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		pages = (n + ARROW_VP - 1) / ARROW_VP;
 		ngroups = (pages + ppw - 1) / ppw;
 		arrow_task_pass(&at, first, n);
+		if (gist && arrow_join_scout(eng, ji, prog, &at, (prog->nregs <= 16 ? 0 : 1) + (prog->feat == 0 ? 2 : 0), first, n,
+									 &st->rck, err, errlen) != 0)
+			goto done;
 		bufs[0] = &at.bg;
 		bufs[2] = &at.bprog;
 		bufs[3] = &at.btab;

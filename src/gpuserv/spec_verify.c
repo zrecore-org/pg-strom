@@ -231,6 +231,18 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 						return 1;
 					}
 			}
+			else if (arrow)
+			{
+				/* A12: one flag word per row of the pass (2 = the backend evaluates the row) follows the overflow list */
+				size_t		flags0 = fb + 1 + (size_t) pc[4] * (1 + 2 * V_GA_NK + 3 * (size_t) agg_max);
+
+				for (size_t i = flags0; i < words; i++)
+					if (a[i] != b[i])
+					{
+						snprintf(msg, msglen, "row flag %zu: %u vs %u", i - flags0, a[i], b[i]);
+						return 1;
+					}
+			}
 			return 0;
 		}
 

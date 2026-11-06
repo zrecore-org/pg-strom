@@ -49,7 +49,7 @@
 #endif
         uint d = 0;                                 // current depth; 0: this lane is done
         uint mflag = 0;                             // bit d: depth d has found a match
-#if JW_MODE == 0 && !defined(SPEC_PROG)
+#if JW_MODE == 0
         bool pz = false;                            // "poison": the join program could not decide this outer row (see below)
 #endif
         for (uint i = 0; i <= JOIN_MAXD; i++)
@@ -78,14 +78,25 @@
         if (lp < nlp)
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nq, qreg, regs);
 #endif
-#if JW_MODE != 0 && !defined(SPEC_PROG) && !defined(ARROW_SRC) && !defined(VM_NO_GEOM)
+#if JW_MODE == 0
+        if (!hit && lp < nlp && g_recheck != 0)
+            pz = true;          // A12: the outer row's scan quals could not be decided on the GPU: the backend joins the row
+#endif
+#if JW_MODE != 0 && !defined(SPEC_PROG) && !defined(VM_NO_GEOM)
         if (hit && prog[18] != 0u)
         {
             // the scout pass named this outer row: the backend joins it, this pass leaves it out.
             // Bit (line pointers of the pages before this one) + lp of the bitmap that follows the
-            // 2 * npages page table words (word 1 of an entry is the line pointer prefix sum).
+            // 2 * npages page table words (word 1 of an entry is the line pointer prefix sum); an Arrow
+            // record batch: bit page * AR_VP + lp (the row of the pass) of the bitmap at word 8 * ncols + 4.
+#ifdef ARROW_SRC
+            uint bi = page * AR_VP + lp;
+            uint bw = ptab[8 * ncols + 4 + (bi >> 5)];
+#else
             uint bi = ptab[2 * page + 1] + lp;
-            if (((ptab[2 * kparam.npages + (bi >> 5)] >> (bi & 31u)) & 1u) != 0u)
+            uint bw = ptab[2 * kparam.npages + (bi >> 5)];
+#endif
+            if (((bw >> (bi & 31u)) & 1u) != 0u)
                 hit = false;                        // d stays 0: nothing is emitted for the row
         }
 #endif
@@ -154,7 +165,11 @@
 #endif
         {
 #if JW_MODE != 2
+#if JW_MODE == 0
+            if (!WaveActiveAnyTrue(d != 0 || pz))      // (a poisoned outer row still has its record to append)
+#else
             if (!WaveActiveAnyTrue(d != 0))
+#endif
                 break;
 #endif
             bool emit = false;
@@ -233,7 +248,7 @@
 #endif
                             else
                             {
-#if JW_MODE == 0 && !defined(SPEC_PROG)
+#if JW_MODE == 0
                                 if (err == SOP_RECHECK_CODE)
                                     pz = true;
                                 else
@@ -293,7 +308,12 @@
 #endif
                             if (err != 0)
                             {
-                                report_error(page, lp, err);
+#if JW_MODE == 0
+                                if (err == SOP_RECHECK_CODE)
+                                    pz = true;              // the projection could not be computed: the backend joins the row
+                                else
+#endif
+                                    report_error(page, lp, err);
                                 emit = false;
                                 d = 0;
                             }
@@ -344,7 +364,7 @@
             // record of its own, marked by 0xfffffffe in the item word of depth 1: the service drops the
             // records of that row and returns the outer tuple to the backend (KDS_FORMAT_RECHECK).
 #ifdef SPEC_PROG
-            bool rec = emit;
+            bool rec = emit || pz;
 #else
             // (kparam.extra bit 0, the scout pass of an aggregation over a GiST join: poison records only)
 #ifndef VM_NO_GEOM
@@ -371,10 +391,8 @@
                         outb[rb + 1] = lp;
                         for (uint k = 0; k < nd; k++)
                             outb[rb + 2 + k] = cur[k + 1];
-#ifndef SPEC_PROG
                         if (pz)
                             outb[rb + 2] = 0xfffffffeu;
-#endif
 #ifdef SPEC_PROG
                         spec_store_comp_j(regs, rb + 2 + nd);
 #else
@@ -389,9 +407,7 @@
                     }
                 }
             }
-#ifndef SPEC_PROG
             pz = false;                                     // the record names the row once
-#endif
 #elif JW_MODE == 1
             if (emit)
             {

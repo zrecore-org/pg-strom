@@ -1892,11 +1892,28 @@ codegen_var_expression(codegen_context *context,
 }
 
 /*
- * A11: the geometry predicates hand the rows they cannot decide (a point on an edge, a geometry the kernel does not
- * read) back to the backend, which re-evaluates them from the heap tuple. An Arrow_Fdw table and a GPU-Cache have no
- * such path (a recheck there would be an error, and a geometry column cannot be cached or read from Arrow), so a scan
- * of either keeps these predicates on the CPU.
+ * A12: can the scan source of a relation hand a row it cannot decide back to the backend? An instruction that returns
+ * SOP_RECHECK_CODE (the geometry predicates on a point on an edge, a numeric that does not fit 64 bits, ...) makes the
+ * service set the row aside as a KDS_FORMAT_RECHECK item, which the backend evaluates on the CPU
+ * (execCpuRecheckOneChunk). All three sources do it:
+ *   - a heap table: the tuple itself (RECHECK_KIND_HEAP);
+ *   - an Arrow_Fdw / Parquet table: (record batch, row), decoded by the backend (RECHECK_KIND_ARROW);
+ *   - a table with a GPU-Cache: a heap tuple the service builds from the cache slot (RECHECK_KIND_HEAP).
+ * A source that cannot (a new kind of scan) returns false here and the planner keeps every recheck-capable
+ * instruction off it; the callers need no special case.
  */
+bool
+pgstrom_source_can_recheck(PlannerInfo *root, RelOptInfo *rel)
+{
+	if (!rel)
+		return true;
+	if (baseRelIsArrowFdw(rel))
+		return true;
+	if (baseRelHasGpuCache(root, rel))
+		return true;
+	return true;
+}
+
 static bool
 vulkan_geom_source_ok(codegen_context *context)
 {
@@ -1906,9 +1923,7 @@ vulkan_geom_source_ok(codegen_context *context)
 	if (!root || context->base_relid == 0 || context->base_relid >= root->simple_rel_array_size)
 		return true;
 	rel = root->simple_rel_array[context->base_relid];
-	if (!rel)
-		return true;
-	return !baseRelHasGpuCache(root, rel);
+	return pgstrom_source_can_recheck(root, rel);
 }
 
 /*

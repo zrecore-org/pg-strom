@@ -431,15 +431,15 @@ __gpuScanAddCustomPathOne(PlannerInfo *root,
 }
 
 /*
- * A11: the geometry predicates hand the rows they cannot decide back to the backend, which an Arrow_Fdw table and a
- * GPU-Cache have no way to take (codegen.c vulkan_geom_source_ok() refuses them again at plan creation).
+ * A12: a geometry predicate hands the rows it cannot decide back to the backend; the scan source must be able to take
+ * them (codegen.c pgstrom_source_can_recheck(); heap, Arrow_Fdw / Parquet and GPU-Cache all can).
  */
 static bool
 gpuScanGeometryQualOk(PlannerInfo *root, RelOptInfo *baserel, Expr *clause)
 {
 	if (!pgstrom_expr_has_geometry_func(clause))
 		return true;
-	return !baseRelHasGpuCache(root, baserel);
+	return pgstrom_source_can_recheck(root, baserel);
 }
 
 /*

@@ -1383,3 +1383,96 @@ gcache_ctid(const gcache *g, uint32_t row, unsigned char *out)
 	memcpy(out + 2, &lo, 2);
 	memcpy(out + 4, &offnum, 2);
 }
+
+/*
+ * A12: the heap tuple of a cached row, for the backend's CPU re-evaluation of a row the GPU could not decide
+ * (a KDS_FORMAT_RECHECK item of kind heap). The cache is not a snapshot (it holds the latest committed state and the
+ * session's own changes), so the backend cannot fetch the version from the heap by ctid; the tuple is built from the
+ * cache's columns instead: every column the cache holds (a column that is not cached is NULL), frozen xmin, the
+ * slot's ctid. On success *p_buf is a malloc'ed buffer of *p_len bytes (the caller frees it) and *p_blkno / *p_offnum
+ * the ctid; -1 with a message in err otherwise.
+ */
+int
+gcache_form_tuple(const gcache *g, uint32_t row, unsigned char **p_buf, uint32_t *p_len,
+				  uint32_t *p_blkno, uint32_t *p_offnum, char *err, size_t errlen)
+{
+	uint32_t	natts = g->ncols;
+	size_t		hoff = MAXALIGN(offsetof(HeapTupleHeaderData, t_bits) + (natts + 7) / 8);
+	size_t		cap = hoff + 256, pos = hoff;
+	unsigned char *buf = calloc(1, cap);
+	HeapTupleHeaderData *th;
+	uint16_t	infomask = HEAP_XMIN_FROZEN | HEAP_XMAX_INVALID;
+	unsigned char ct[6];
+	uint16_t	hi, lo, off;
+
+	if (!buf)
+	{
+		gc_err(err, errlen, "out of memory");
+		return -1;
+	}
+	for (uint32_t c = 0; c < natts; c++)
+	{
+		const gcache_col *col = &g->cols[c];
+		unsigned char tmp[8];
+		const unsigned char *ptr = NULL;
+		uint32_t	len = 0;
+		size_t		al = 1, npos;
+		int			rv = gcache_fetch(g, (int)(c + 1), row, tmp, &ptr, &len, err, errlen);
+
+		if (rv < 0)
+		{
+			free(buf);
+			return -1;
+		}
+		if (rv == GCF_NULL)
+		{
+			infomask |= HEAP_HASNULL;
+			continue;
+		}
+		buf[offsetof(HeapTupleHeaderData, t_bits) + (c >> 3)] |= (unsigned char)(1U << (c & 7));
+		if (rv == GCF_RAW_VARLENA)
+		{
+			infomask |= HEAP_HASVARWIDTH;
+			if ((ptr[0] & 1) == 0)				/* a 4-byte header is aligned (a short one is not) */
+				al = col->attalign ? col->attalign : 4;
+		}
+		else
+			al = col->attalign ? col->attalign : 1;
+		npos = TYPEALIGN(al, pos);
+		if (npos + len > cap)
+		{
+			unsigned char *nb;
+
+			cap = (npos + len) * 2;
+			nb = realloc(buf, cap);
+			if (!nb)
+			{
+				free(buf);
+				gc_err(err, errlen, "out of memory");
+				return -1;
+			}
+			buf = nb;
+		}
+		memset(buf + pos, 0, npos - pos);
+		memcpy(buf + npos, ptr, len);
+		pos = npos + len;
+	}
+	th = (HeapTupleHeaderData *) buf;
+	th->t_choice.t_heap.t_xmin = GC_FROZEN_XID;
+	th->t_choice.t_heap.t_xmax = 0;
+	gcache_ctid(g, row, ct);
+	memcpy(&hi, ct, 2);
+	memcpy(&lo, ct + 2, 2);
+	memcpy(&off, ct + 4, 2);
+	th->t_ctid.ip_blkid.bi_hi = hi;
+	th->t_ctid.ip_blkid.bi_lo = lo;
+	th->t_ctid.ip_posid = off;
+	th->t_infomask2 = (uint16_t) natts;
+	th->t_infomask = infomask;
+	th->t_hoff = (uint8_t) hoff;
+	*p_buf = buf;
+	*p_len = (uint32_t) pos;
+	*p_blkno = ((uint32_t) hi << 16) | lo;
+	*p_offnum = off;
+	return 0;
+}
