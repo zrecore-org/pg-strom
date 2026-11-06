@@ -39,6 +39,9 @@ for f in $files; do
 		test/gpuserv/spec_*) add spec_dev.sh ;;
 		test/gpuserv/jsonb_*) add jsonb_test.sh ;;
 		test/gpuserv/numeric_*) add numeric_test.sh ;;
+		src/gpuserv/pcache_check.c|test/gpuserv/pcache_test.sh) add pcache_test.sh ;;
+		src/gpuserv/gpu_vk.c|src/gpuserv/gpu_vk.h)
+			full=1; add service_test.sh; add pcache_test.sh ;;
 		src/executor.c|src/gpu_client.c|src/gpuserv/wire.c|src/gpuserv/gpu_vk*|src/gpuserv/gpu_vk.h|src/gpu_launcher.c)
 			full=1; add service_test.sh ;;
 		src/*|test/gpuserv/scan_test.sh|test/gpuserv/types_tests.inc|test/gpuserv/fuzz_regress.inc|test/vulkan_*) full=1 ;;

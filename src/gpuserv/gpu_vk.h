@@ -68,6 +68,9 @@ typedef struct gpu_vk_ctx
 	VkCommandPool		cmd_pool;
 	VkCommandBuffer		cmd;
 	VkFence				fence;
+	VkPipelineCache		pcache;					/* persisted compiled pipelines, or VK_NULL_HANDLE */
+	size_t				pcache_saved;			/* size of the data last written to pcache_path */
+	char				pcache_path[768];
 
 	gpu_vk_devinfo		info;
 	gpu_vk_feat			feat;

@@ -173,6 +173,13 @@ gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
 gpusort_check: gpusort_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS) -lpthread
 
+# time to create the VM pipelines with and without the persisted pipeline cache (not part of "all"; test/gpuserv/pcache_test.sh)
+pcache_check.o: pcache_check.c gpu_vk.h kernels_spv.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+pcache_check: pcache_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ pcache_check.o libgpuserv.a $(VK_LIBS) -lpthread
+
 # self-check of the software binary64 (kernels_vm/f64_soft.inc): the library as C against the host's hardware double,
 # and the same source compiled by slangc against the device (not part of "all"; test/gpuserv/f64soft_check.sh)
 build/f64soft_check.spv: kernels_check/f64soft_check.slang kernels_vm/f64_soft.inc | build
@@ -268,6 +275,6 @@ check: gpuserv-probe proto_check
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check f64soft_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check f64soft_check pcache_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
 
 .PHONY: all check clean
