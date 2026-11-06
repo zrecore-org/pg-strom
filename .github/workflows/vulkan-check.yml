@@ -124,8 +124,10 @@ jobs:
       # A kernel changes rarely, so the driver's compiled shaders (lavapipe: Mesa's shader cache; the service's
       # pipeline cache) are kept between runs. The key follows the kernel sources: a changed kernel recompiles,
       # the others are found in the restored cache.
+      # restore and save are separate steps: actions/cache saves only when the whole job succeeds, so a run that
+      # fails after its slow cold compiles would leave the next run just as cold (the saving step below runs always).
       - name: Restore the shader and pipeline caches
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             .cache/mesa
@@ -178,6 +180,24 @@ jobs:
           GCJOINS: "off"       # lavapipe needs more than 5 minutes and 7 GB to compile the Arrow-source join kernel
         run: sh test/gpuserv/gpucache_dev.sh
 
+      - name: Save the shader and pipeline caches
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/mesa
+            .cache/xdg
+          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+
+      - name: Server and GPU service logs of the failed test
+        if: failure()
+        run: |
+          for f in /tmp/f8_dev/log /tmp/gc_dev/log; do
+            [ -f "$f" ] || continue
+            echo "=== $f (last 150 lines)"
+            tail -n 150 "$f"
+          done
+
       - name: Upload the PostgreSQL log of the failed test
         if: failure()
         uses: actions/upload-artifact@v4
@@ -190,7 +210,7 @@ jobs:
 
   macos-build:
     name: macOS Apple Silicon, build only (no GPU test), PostgreSQL 17
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - name: Checkout
