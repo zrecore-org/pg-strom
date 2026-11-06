@@ -99,6 +99,9 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   queries with more than `pg_strom.gpupreagg_max_groups` (default 128) estimated groups on PostgreSQL.
 - Aggregation over a join runs on the device as well (`GpuPreAgg` on the join; plan A4): without GROUP BY
   4.8x faster than 8-process PostgreSQL with the specialized kernels (28 ms against 136 ms on 16.8M rows).
+  This includes RIGHT and FULL joins: the matched rows are aggregated on the device and the inner rows
+  without a partner are joined with NULL outer columns by the backend, which adds them to the partial
+  states (a RIGHT/FULL join combined with a GiST join, and GPU-Sort over a RIGHT/FULL join, stay on the CPU).
 - GpuPreAgg and GpuJoin run directly on an Arrow or Parquet outer source (`Custom Scan (GpuPreAgg) on <arrow table>`,
   GpuJoin whose outer relation is the Arrow table, and aggregation over such a join), with the same shapes as for heap
   tables. Quals, join keys and group keys may read integer, float4, bool, date, time, timestamp (every unit), utf8,
