@@ -48,6 +48,15 @@ typedef struct scan_prog
 	uint32_t		ncomp;			/* number of computed values per matching row */
 	int				nregs;			/* registers the program needs (selects the kernel variant) */
 	uint32_t		feat;			/* SCAN_FEAT_* groups the instructions use (0: the lite kernels will do) */
+	/*
+	 * Join programs (A14): which parts of the program can answer "the backend must decide" (SOP_RECHECK_CODE,
+	 * or an unreadable inner value). rck_outer: the scan quals of the outer row (the row has contributed
+	 * nothing yet, so the aggregating kernel only flags it); rck_walk: the join walk or the projection (an
+	 * accumulator cannot take back what the row's earlier matches added, so the service first runs a scout
+	 * pass that names those rows and the aggregating pass skips them).
+	 */
+	int				rck_outer;
+	int				rck_walk;
 	int				max_src_resno;	/* highest source column copied as is */
 	/* join (GpuJoin) */
 	int				join_mode;

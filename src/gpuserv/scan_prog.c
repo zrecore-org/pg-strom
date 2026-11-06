@@ -102,6 +102,15 @@ emit(builder *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0
 	return (int)(b->ninsn - 1);
 }
 
+/* instructions that can return SOP_RECHECK_CODE (the row is evaluated by the backend), see scan_common.slang */
+static int
+op_may_recheck(uint32_t op)
+{
+	return (op >= SOP_NUMCONST && op <= SOP_NUMRND) || (op >= SOP_JSONGET && op <= SOP_JSONCONT) ||
+		(op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW) || op == SOP_GEOMFLAG || op == SOP_GEOMDIST || op == SOP_GEOMLEN ||
+		op == SOP_FARITH || op == SOP_STRCMP || op == SOP_STRLIKE || op == SOP_STRLEN;
+}
+
 static int
 new_reg(builder *b, int *next)
 {
@@ -2508,9 +2517,20 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			}
 		}
 		w[17] = prog->oj_words;
+		/* which parts of the program can recheck (A14): see scan_prog.h */
+		for (uint32_t i = 0; i < b.ninsn; i++)
+			if (op_may_recheck(b.insn[6 * i]))
+			{
+				if (i < nq)
+					prog->rck_outer = 1;
+				else
+					prog->rck_walk = 1;
+			}
 		for (int depth = 1; depth <= nrels; depth++)
 			if (rels[depth - 1].gist_page0)
-				w[18] = 1;							/* a GiST join: the aggregating kernels read a skip bitmap (scan_exec.c) */
+				prog->rck_walk = 1;
+		if (prog->rck_walk)
+			w[18] = 1;								/* the aggregating kernels read a skip bitmap (scan_exec.c, arrow_exec.c) */
 		memcpy(w + insnoff, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 		memcpy(w + insnoff + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 		if (agg_mode)

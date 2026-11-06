@@ -170,6 +170,11 @@ for t in a1 a2 a3 p1; do
 	ajagg $t "RIGHT JOIN, nothing matches" "select count(*), count(t.i), sum(d.grp), min(d.pay) from %T t right join %D d on t.b = d.k + 1000000"
 	ajagg $t "FULL JOIN" "select count(*), count(t.i), count(d.k), sum(d.grp), sum(t.a) from %T t full join %D d on t.b = d.k and t.a > 9000"
 	ajagg $t "RIGHT JOIN, GROUP BY a key of the inner side" "select d.grp, count(*), count(t.i), sum(t.a) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	# A14: float4 results that are denormal are decided by the backend (qual only: flagged; projection: scout pass)
+	ajagg $t "recheck: float4 underflow in the scan qual" "select count(*), sum(d.grp), sum(t.a) from %T t join %D d on t.b = d.k where t.d / 1e38::float4 > 0::float4"
+	ajagg $t "recheck: float4 underflow in the scan qual, GROUP BY" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k where t.d / 1e38::float4 > 0::float4 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	ajagg $t "recheck: float4 underflow in the projection, GROUP BY" "select d.grp, count(*), sum((t.d / 1e38::float4 * 1e38::float4)::int) from %T t join %D d on t.b = d.k where t.d < 'Infinity'::float4 and t.d > '-Infinity'::float4 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	ajagg $t "recheck: LEFT JOIN, float4 underflow in the ON qual" "select count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and t.d / 1e38::float4 > 0::float4"
 	adim=ad; adim2=ad2
 	ajagg $t "Arrow dimension table: GROUP BY" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
 	adim=sd; adim2=sd2

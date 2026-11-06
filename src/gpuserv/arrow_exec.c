@@ -2437,6 +2437,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	uint32_t	nrows, nagg, ppw, pass_rows;
 	uint32_t	cap = 0, rec_words = 0, blk_words = 0, ov_rec = 0, ovf_cap = 0, ovf_count = 0;
 	uint64_t	n_overflow = 0;
+	uint32_t	flag_words = 0, flag_base = 0;
 	double		t0 = arrow_now_ms(), t1 = 0, tg = 0, tm = 0;
 
 	err[0] = '\0';
@@ -2481,15 +2482,12 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		return -1;
 	if (nrows == 0)
 		return 0;
-	/* a GiST join can poison an outer row: the scout pass and the skip bitmap (a program without geometry instructions
-	 * runs on the lite kernels and cannot) */
-	for (int i = 0; i < ji->nrels; i++)
-		if (ji->rels[i].gist_page0 != 0)
-			gist = 1;
-	if (gist && prog->feat != 0)
+	/* a program whose walk or projection can poison an outer row (a GiST join, numeric / float4 / jsonb instructions):
+	 * the scout pass and the skip bitmap. A program whose scan quals alone can recheck needs no scout: the kernel
+	 * flags those rows in a bitmap behind its results (A14). */
+	gist = prog->rck_walk;
+	if (gist)
 		at.skip_words = (nrows + 31) / 32;
-	else
-		gist = 0;
 	if (arrow_task_setup(vk, &at, prog, err, errlen) != 0)
 		goto done;
 	t1 = arrow_now_ms();
@@ -2541,6 +2539,10 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			/* RIGHT/FULL joins: the outer-join map follows the results */
 			oj_base = out_words;
 			out_words += prog->oj_words;
+			/* the bitmap (bit = row of the pass) of the rows whose scan quals the kernel could not decide (header word 19) */
+			flag_words = (!gist && prog->rck_outer) ? (n + 31) / 32 : 0;
+			flag_base = (uint32_t) out_words;
+			out_words += flag_words;
 			if (out_words > 0xffffffffULL / 8 ||
 				gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 			{
@@ -2558,6 +2560,11 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 				memset((uint32_t *) bout.map + oj_base, 0, (size_t) prog->oj_words * 4);
 				memcpy(at.bprog.map, prog->words, prog->nwords * 4);
 				scan_prog_ojmap_place(prog, (uint32_t *) at.bprog.map, oj_base);
+			}
+			if (flag_words > 0)
+			{
+				memset((uint32_t *) bout.map + flag_base, 0, (size_t) flag_words * 4);
+				((uint32_t *) at.bprog.map)[19] = flag_base;
 			}
 			for (uint32_t base = 0; base < ngroups; base += ARROW_JOINAGG_DISPATCH_GROUPS)
 			{
@@ -2596,6 +2603,21 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		}
 		tg += arrow_now_ms() - tp;
 		tp = arrow_now_ms();
+		for (uint32_t wi = 0; wi < flag_words; wi++)
+		{
+			uint32_t	m = out[flag_base + wi];
+
+			while (m != 0)
+			{
+				uint32_t	bi = wi * 32 + (uint32_t) __builtin_ctz(m);
+
+				m &= m - 1;
+				if (bi >= n)
+					break;
+				if (arrow_rck_row(&at, &st->rck, first + bi, err, errlen) != 0)
+					goto done;
+			}
+		}
 		if (prog->oj_words > 0)
 			scan_join_merge_ojmap(prog, ji, out, oj_base);
 		if (!grouped)

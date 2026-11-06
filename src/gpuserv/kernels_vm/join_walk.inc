@@ -10,14 +10,18 @@
 //                   is one round, and the walk loop must be uniform across the workgroup, because
 //                   a barrier may not sit in divergent control flow.
 //
-// "Poison" (a GiST-index join whose join program could not decide an outer row: SOP_RECHECK_CODE or an
-// unreadable inner value) works in two passes. The aggregating modes cannot take back what a lane has
-// already accumulated for earlier matches of the row, so the service first runs this walk in mode 0
-// as a scout (kparam.extra bit 0: append only the poison records, no match records), reads the
-// poisoned rows, hands them to the backend (KDS_FORMAT_RECHECK) and builds a skip bitmap in the page
-// table buffer (read right after the outer row's scan quals below); the aggregating pass then ignores those outer rows altogether
-// (no match, no null-extended LEFT row: the CPU joins the whole row). The bitmap exists only when
-// the program header word 18 is nonzero. In modes 1 to 3 a poison that still shows up is a hard error.
+// "Poison" (the join program could not decide an outer row: SOP_RECHECK_CODE, a numeric or float4 result
+// the kernel cannot give, or an unreadable inner value of a GiST-index join) works in two ways.
+//  - The outer row's own scan quals could not be decided (hit = false, g_recheck): the row has contributed
+//    nothing yet, so the aggregating modes only flag it (program header word 19 = the word of outb where
+//    the flag bitmap starts, 0: none) and the service hands it to the backend (A14).
+//  - The walk or the projection could not decide it (rck_walk of the program, header word 18 nonzero): the
+//    aggregating modes cannot take back what a lane has already accumulated for earlier matches of the row,
+//    so the service first runs this walk in mode 0 as a scout (kparam.extra bit 0: append only the poison
+//    records, no match records), reads the poisoned rows, hands them to the backend (KDS_FORMAT_RECHECK) and
+//    builds a skip bitmap in the page table buffer (read right after the outer row's scan quals below); the
+//    aggregating pass then ignores those outer rows altogether (no match, no null-extended LEFT row: the CPU
+//    joins the whole row). In modes 1 to 3 a poison that still shows up is a hard error.
 // Included inside the kernel's page loop. The kernel provides: page, lid, the program header words
 // (coloff, insnoff, ncols, nq, nins, qreg, nd, dtab, proj_begin) and the per-mode state.
 {
@@ -82,22 +86,34 @@
         if (!hit && lp < nlp && g_recheck != 0)
             pz = true;          // A12: the outer row's scan quals could not be decided on the GPU: the backend joins the row
 #endif
-#if JW_MODE != 0 && !defined(SPEC_PROG) && !defined(VM_NO_GEOM)
-        if (hit && prog[18] != 0u)
+#if JW_MODE != 0
+        if (lp < nlp && ((!hit && g_recheck != 0 && prog[19] != 0u) || (hit && prog[18] != 0u)))
         {
-            // the scout pass named this outer row: the backend joins it, this pass leaves it out.
-            // Bit (line pointers of the pages before this one) + lp of the bitmap that follows the
-            // 2 * npages page table words (word 1 of an entry is the line pointer prefix sum); an Arrow
-            // record batch: bit page * AR_VP + lp (the row of the pass) of the bitmap at word 8 * ncols + 4.
+            // Bit (line pointers of the pages before this one) + lp of the bitmaps; an Arrow record batch:
+            // bit page * AR_VP + lp (the row of the pass).
 #ifdef ARROW_SRC
             uint bi = page * AR_VP + lp;
-            uint bw = ptab[8 * ncols + 4 + (bi >> 5)];
 #else
             uint bi = ptab[2 * page + 1] + lp;
-            uint bw = ptab[2 * kparam.npages + (bi >> 5)];
 #endif
-            if (((bw >> (bi & 31u)) & 1u) != 0u)
-                hit = false;                        // d stays 0: nothing is emitted for the row
+            if (!hit)
+            {
+                // the row's scan quals could not be decided: flag it for the backend (the service leaves out
+                // the rows the scout pass has named already)
+                InterlockedOr(outb[prog[19] + (bi >> 5)], 1u << (bi & 31u));
+            }
+            else
+            {
+                // the scout pass named this outer row: the backend joins it, this pass leaves it out. The skip
+                // bitmap follows the 2 * npages page table words (heap) / sits at word 8 * ncols + 4 (Arrow).
+#ifdef ARROW_SRC
+                uint bw = ptab[8 * ncols + 4 + (bi >> 5)];
+#else
+                uint bw = ptab[2 * kparam.npages + (bi >> 5)];
+#endif
+                if (((bw >> (bi & 31u)) & 1u) != 0u)
+                    hit = false;                    // d stays 0: nothing is emitted for the row
+            }
         }
 #endif
         if (hit)
@@ -109,7 +125,14 @@
             uint err = vm_run(insnoff, prog[dt], prog[dt + 1], regs);
 #endif
             if (err != 0)
-                report_error(page, lp, err);
+            {
+#if JW_MODE == 0
+                if (err == SOP_RECHECK_CODE)
+                    pz = true;                      // the key of the outer row could not be computed: the backend joins the row
+                else
+#endif
+                    report_error(page, lp, err);
+            }
             else
             {
 #ifndef SPEC_PROG
@@ -230,15 +253,10 @@
                             uint err = (g_recheck != 0) ? SOP_RECHECK_CODE
                                      : vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
 #else
-                            // The aggregating modes: for a GiST program (header word 18) the scout pass has
-                            // already named every row this would poison, so it is reported if it shows up;
-                            // other programs keep ignoring g_recheck here.
-#ifndef VM_NO_GEOM
+                            // The aggregating modes: for a program whose walk can poison (header word 18) the scout pass
+                            // has already named every row this would poison, so it is reported if it shows up.
                             uint err = (g_recheck != 0 && prog[18] != 0u) ? SOP_RECHECK_CODE
                                      : vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
-#else
-                            uint err = vm_run(insnoff, prog[dt + 1], prog[dt + 2], regs);
-#endif
 #endif
                             if (err == 0)
                             {
@@ -331,7 +349,12 @@
 #endif
                         if (err != 0)
                         {
-                            report_error(page, lp, err);
+#if JW_MODE == 0
+                            if (err == SOP_RECHECK_CODE)
+                                pz = true;          // the key could not be computed: the backend joins the row
+                            else
+#endif
+                                report_error(page, lp, err);
                             d = 0;
                         }
                         else
@@ -366,12 +389,8 @@
 #ifdef SPEC_PROG
             bool rec = emit || pz;
 #else
-            // (kparam.extra bit 0, the scout pass of an aggregation over a GiST join: poison records only)
-#ifndef VM_NO_GEOM
+            // (kparam.extra bit 0, the scout pass of an aggregation over a join: poison records only)
             bool rec = ((kparam.extra & 1u) != 0u) ? pz : (emit || pz);
-#else
-            bool rec = emit || pz;
-#endif
 #endif
             uint cnt  = WaveActiveCountBits(rec);
             if (cnt > 0)
