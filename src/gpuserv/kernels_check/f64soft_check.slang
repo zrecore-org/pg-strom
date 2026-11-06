@@ -3,6 +3,26 @@
 #include "f64_soft.inc"
 
 struct PC { uint n; uint op; uint mode; };
+
+// c for the fma check, the same as fma_c() of f64soft_check.c
+uint64_t fma_c(uint64_t a, uint64_t b)
+{
+	uint64_t m = (a * 0x9E3779B97F4A7C15ull) ^ (b >> 5) ^ (b << 11);
+	int ea = int((a >> 52) & 0x7FFull), eb = int((b >> 52) & 0x7FFull), ec = ea + eb - 1023 + int((a >> 7) % 9ull) - 4;
+	uint sel = uint((a >> 20) & 15ull);
+
+	if (sel < 4u)
+	{
+		uint64_t p = f64_mul(a, b) ^ 0x8000000000000000ull;
+		return p + uint64_t(int64_t(int(b & 3ull) - 1));
+	}
+	if (sel == 4u) return 0ull;
+	if (sel == 5u) return 0x8000000000000000ull;
+	if (sel == 6u) return 0x7FF0000000000000ull | (m & 0x8000000000000000ull);
+	if (ec < 0) ec = 0;
+	if (ec > 2046) ec = 2046;
+	return (m & 0x800FFFFFFFFFFFFFull) | (uint64_t(ec) << 52);
+}
 [[vk::push_constant]] ConstantBuffer<PC> pc;
 [[vk::binding(0,0)]] StructuredBuffer<uint64_t> inA;
 [[vk::binding(1,0)]] StructuredBuffer<uint64_t> inB;
@@ -49,6 +69,7 @@ void main(uint3 tid : SV_DispatchThreadID)
 	else if (pc.op == 30u) r = f64_math(3u, a);
 	else if (pc.op == 23u) r = (uint64_t) f64_to_f32_err(a, f64_to_f32(a, 0u));
 	else if (pc.op == 31u) r = f64_sqr_add(a, b);
+	else if (pc.op == 32u) r = f64_fma(a, b, fma_c(a, b));
 	else                   r = ~0ull;
 	outR[i] = r;
 }

@@ -178,6 +178,29 @@ static uint64_t h_sub(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u
 static uint64_t h_mul(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(u2d(a) * u2d(b)); }
 static uint64_t h_div(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(u2d(a) / u2d(b)); }
 static uint64_t h_sqrt(uint64_t a, uint64_t b, uint32_t m) { (void) b; (void) m; return d2u(sqrt(u2d(a))); }
+/* c for the fma check, derived from the pair: near the exponent of a * b (alignment), exactly -(a * b) rounded plus or minus a few ulps
+ * (cancellation), and now and then a special; the same code is in kernels_check/f64soft_check.slang (with the soft multiply) */
+static uint64_t fma_c(uint64_t a, uint64_t b)
+{
+	uint64_t m = (a * 0x9E3779B97F4A7C15ULL) ^ (b >> 5) ^ (b << 11);
+	int ea = (int)((a >> 52) & 0x7FF), eb = (int)((b >> 52) & 0x7FF), ec = ea + eb - 1023 + (int)((a >> 7) % 9) - 4;
+	uint32_t sel = (uint32_t)((a >> 20) & 15);
+
+	if (sel < 4)
+	{
+		uint64_t p = f64_mul(a, b) ^ 0x8000000000000000ull;		/* -(a * b) rounded: the sum cancels */
+
+		return p + (uint64_t)(int64_t)((int)(b & 3) - 1);
+	}
+	if (sel == 4) return 0;
+	if (sel == 5) return 0x8000000000000000ull;
+	if (sel == 6) return 0x7FF0000000000000ull | (m & 0x8000000000000000ull);
+	if (ec < 0) ec = 0;
+	if (ec > 2046) ec = 2046;
+	return (m & 0x800FFFFFFFFFFFFFull) | (((uint64_t) ec) << 52);
+}
+static uint64_t s_fma(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_fma(a, b, fma_c(a, b)); }
+static uint64_t h_fma(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(fma(u2d(a), u2d(b), u2d(fma_c(a, b)))); }
 static uint64_t s_sqr_add(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_sqr_add(a, b); }
 static uint64_t h_sqr_add(uint64_t a, uint64_t b, uint32_t m) { (void) m; return d2u(fma(u2d(a), u2d(a), u2d(b))); }
 
@@ -328,6 +351,7 @@ static const f64op ops[] = {
 	{ "math_sqrt", s_math_sqrt, h_sqrt, 0, 0 },
 	{ "math_rint", s_math_rint, h_rint, 0, 0 },
 	{ "sqr_add", s_sqr_add, h_sqr_add, 0, 0 },			/* index 31 in kernels_check/f64soft_check.slang */
+	{ "fma", s_fma, h_fma, 0, 0 },						/* index 32 */
 };
 
 /* the error numbers of the library are those of the VM */

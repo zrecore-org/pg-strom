@@ -6,6 +6,7 @@
 // used: nothing here depends on the compiler's fast-math, flush-to-zero or contraction (FMA) settings.
 //
 //   f64_add f64_sub f64_mul f64_div f64_sqrt
+//   f64_fma(a, b, c)                a * b + c with ONE rounding for any signs: the hardware fma() (f64_sqr_add is the cheaper special case a * a + c, c >= 0)
 //   f64_sqr_add(a, c)               a * a + c with ONE rounding (a fused multiply-add) for c >= 0: what a compiler that contracts
 //                                   x*x + y*y + z*z into fma() computes, as PostGIS' distance and length functions do
 //   f64_key                         order-preserving integer key: PostgreSQL's float8 order (NaN = NaN, the largest;
@@ -315,6 +316,122 @@ F64S_FN uint64_t f64_sqr_add(uint64_t a, uint64_t c)
 	else
 		sig = (rh << 1) | (rl >> 63) | (((rl << 1) != 0ull) ? 1ull : 0ull);
 	return f64s_round_pack(0u, e, sig);
+}
+
+// a * b + c rounded once (nearest, ties to even), any signs: bit-identical to the hardware fma(a, b, c). The 106-bit product and the addend
+// are put in a 128-bit frame whose leading bit is bit 125 for the larger magnitude; the smaller is shifted right with a sticky bit (an
+// effective subtraction can only cancel when the exponents are within 1, where nothing is shifted out), added or subtracted, and the
+// result normalized to a 63-bit significand for the common rounding. NaN, infinity and a zero operand take the two-rounding path,
+// which is exact there.
+F64S_FN uint64_t f64_fma(uint64_t a, uint64_t b, uint64_t c)
+{
+	uint64_t ma = a & F64_MAG, mb = b & F64_MAG, mc = c & F64_MAG;
+	uint64_t xa, xb, xc, hi, lo, bh, bl, sh, sl, rh, rl, sig;
+	int ep, ec, e;
+	uint n, d, sp, sc, sbig, lead;
+	bool pbig;
+
+	if (ma >= F64_INF || mb >= F64_INF || mc >= F64_INF || ma == 0ull || mb == 0ull || mc == 0ull)
+	{
+		// a finite non-zero product with a zero addend is the product rounded once, keeping its sign even when it underflows to zero, and
+		// with an infinite or NaN addend it is that addend whatever the product's magnitude (a rounded product could overflow to the
+		// opposite infinity and make a NaN); otherwise (a zero, infinite or NaN factor) the two-step path is exact
+		if (ma < F64_INF && mb < F64_INF && ma != 0ull && mb != 0ull)
+			return (mc == 0ull) ? f64_mul(a, b) : c;
+		return f64_add(f64_mul(a, b), c);
+	}
+	sp = (uint)((a ^ b) >> 63);
+	sc = (uint)(c >> 63);
+	ep = f64s_unpack_exp(a) + f64s_unpack_exp(b) - 1023;
+	xa = f64s_unpack_sig(a);
+	xb = f64s_unpack_sig(b);
+	hi = f64s_mulhi(xa, xb);
+	lo = xa * xb;
+	if ((hi & (1ull << 41)) != 0ull)
+	{
+		ep += 1;
+		n = 20u;
+	}
+	else
+		n = 21u;
+	bh = (hi << n) | (lo >> (64u - n));
+	bl = lo << n;
+	ec = f64s_unpack_exp(c);
+	xc = f64s_unpack_sig(c);
+	sh = xc << 9;
+	sl = 0ull;
+	pbig = (ep > ec) || (ep == ec && (bh > sh || (bh == sh && bl >= sl)));
+	if (pbig)
+	{
+		sbig = sp;
+		d = (uint)(ep - ec);
+		e = ep;
+	}
+	else
+	{
+		rh = bh; rl = bl;
+		bh = sh; bl = sl;
+		sh = rh; sl = rl;
+		sbig = sc;
+		d = (uint)(ec - ep);
+		e = ec;
+	}
+	if (d >= 128u)
+	{
+		sl = ((sh | sl) != 0ull) ? 1ull : 0ull;
+		sh = 0ull;
+	}
+	else if (d >= 65u)
+	{
+		uint64_t lost = ((sh << (128u - d)) != 0ull || sl != 0ull) ? 1ull : 0ull;
+
+		sl = (sh >> (d - 64u)) | lost;
+		sh = 0ull;
+	}
+	else if (d == 64u)
+	{
+		sl = sh | ((sl != 0ull) ? 1ull : 0ull);
+		sh = 0ull;
+	}
+	else if (d != 0u)
+	{
+		uint64_t lost = ((sl << (64u - d)) != 0ull) ? 1ull : 0ull;
+
+		sl = (sl >> d) | (sh << (64u - d)) | lost;
+		sh = sh >> d;
+	}
+	if (sp == sc)
+	{
+		rl = bl + sl;
+		rh = bh + sh + ((rl < bl) ? 1ull : 0ull);
+	}
+	else
+	{
+		rl = bl - sl;
+		rh = bh - sh - ((bl < sl) ? 1ull : 0ull);
+		if (rh == 0ull && rl == 0ull)
+			return 0ull;						// exact cancellation is +0
+	}
+	// the leading bit of (rh:rl): 125 or 126 after an addition, anywhere below after a cancellation
+	if (rh != 0ull)
+		lead = 64u + 63u - f64s_clz64(rh);
+	else
+		lead = 63u - f64s_clz64(rl);
+	e += (int) lead - 125;
+	// shift left so that the leading bit is bit 126 (bit 62 of rh), or right by one when it is already there... it never exceeds 126
+	n = 126u - lead;
+	if (n >= 64u)
+	{
+		rh = rl << (n - 64u);
+		rl = 0ull;
+	}
+	else if (n != 0u)
+	{
+		rh = (rh << n) | (rl >> (64u - n));
+		rl = rl << n;
+	}
+	sig = rh | ((rl != 0ull) ? 1ull : 0ull);
+	return f64s_round_pack(sbig, e, sig);
 }
 
 F64S_FN uint64_t f64_div(uint64_t a, uint64_t b)
