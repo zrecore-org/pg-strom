@@ -1291,6 +1291,7 @@ __gpuCacheColumnVt(Form_pg_attribute attr)
 			return (attr->attbyval && attr->attlen == 8) ? GCVT_FLOAT8 : GCVT_NONE;
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:
+		case TypeOpCode__geometry:		/* A12: a string register to the kernel, as on a heap table (PostGIS predicates) */
 			return (attr->attlen == -1) ? GCVT_STR : GCVT_NONE;
 		default:
 			break;
