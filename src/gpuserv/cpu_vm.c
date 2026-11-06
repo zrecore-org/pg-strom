@@ -687,7 +687,7 @@ ld64u(const unsigned char *p)
 
 /* the winding number of a ring of n points at p (16 bytes each) around the point (px, py) */
 static int
-pip_ring(const unsigned char *p, uint32_t n, uint64_t px, uint64_t py)
+pip_ring(const unsigned char *p, uint32_t n, uint64_t px, uint64_t py, uint32_t stride)
 {
 	uint64_t	x1, y1;
 	int			wn = 0;
@@ -700,8 +700,8 @@ pip_ring(const unsigned char *p, uint32_t n, uint64_t px, uint64_t py)
 		return PIP_UNSURE;
 	for (uint32_t i = 1; i < n; i++)
 	{
-		uint64_t	x2 = ld64u(p + 16 * (size_t) i);
-		uint64_t	y2 = ld64u(p + 16 * (size_t) i + 8);
+		uint64_t	x2 = ld64u(p + (size_t) stride * i);
+		uint64_t	y2 = ld64u(p + (size_t) stride * i + 8);
 		uint64_t	ymin, ymax;
 
 		if (F64_NONFINITE(x2) || F64_NONFINITE(y2))
@@ -775,7 +775,7 @@ pip_polygon(const unsigned char *p, uint32_t len, uint32_t pos, uint64_t px, uin
 			return PIP_UNSURE;
 		if (res != PIP_UNSURE && (r == 0 || res == PIP_IN))
 		{
-			rr = pip_ring(p + off, n, px, py);
+			rr = pip_ring(p + off, n, px, py, 16);
 			if (rr == PIP_UNSURE)
 				res = PIP_UNSURE;
 			else if (r == 0)
@@ -965,7 +965,7 @@ geom_dwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, ui
 	vm_reg		a = regs[ra], b = regs[rb];
 	vm_reg		ya = regs[(k0 >> 8) & 0xff], yb = regs[(k0 >> 16) & 0xff], t = regs[k0 >> 24];
 	int			fa = (k0 & SOP_GDW_FUSED_A) != 0, fb = (k0 & SOP_GDW_FUSED_B) != 0;
-	uint32_t	sa = k1, sb = k1;
+	uint32_t	sa = k1 & 0xfffff, sb = sa;
 	uint64_t	ax = (uint64_t) a.v, ay = (uint64_t) ya.v, bx = (uint64_t) b.v, by = (uint64_t) yb.v, tol, dx, dy;
 	int			ea = 0, eb = 0;
 
@@ -989,6 +989,14 @@ geom_dwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, ui
 		return SOP_RECHECK_CODE;
 	if (((dx | dy) & F64_MAG) == 0)
 		*res = 1;
+	else if (k1 & SOP_GDW_EXACT)
+	{
+		uint64_t	q = f64_sqr_add(dx, f64_mul(dy, dy));
+
+		if (F64_NONFINITE(q))
+			return SOP_RECHECK_CODE;
+		*res = f64_le(f64_sqrt(q), tol);
+	}
 	else
 	{
 		uint64_t	d2 = f64_add(f64_mul(dx, dx), f64_mul(dy, dy));
@@ -1056,6 +1064,215 @@ geom_zm(const unsigned char *p, uint32_t len, uint32_t k0, int *isnull, uint64_t
 	return 0;
 }
 
+/* the type word, SRID, dimension count and type-word offset of a geometry value; 0 when it is not readable here */
+static uint32_t
+gd_hdr(const unsigned char *s, uint32_t len, uint32_t *srid, uint32_t *nd, uint32_t *o)
+{
+	uint32_t	gflags;
+
+	if (len < 12 || (s[0] & 0xe0) != 0)
+		return 0;
+	gflags = s[3];
+	if (gflags & 0x08)
+		return 0;
+	*nd = 2 + (gflags & 1) + ((gflags >> 1) & 1);
+	*srid = ((uint32_t)(s[0] & 0x1f) << 16) | ((uint32_t) s[1] << 8) | s[2];
+	*o = 4;
+	if ((gflags & 0x40) && (gflags & 0x10))
+		*o += 8;
+	if (gflags & 0x04)
+		*o += 8 * *nd;
+	if (*o + 8 > len)
+		return 0;
+	return ld32u(s + *o);
+}
+
+/* ---- ST_Distance of a point and a line, polygon, multi-geometry or collection: the same as gd_geom() of scan_common.slang (see the comment
+ * there: one loop over the members, one containment test, one segment projection, one distance) ---- */
+static int
+gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t *best, int *found)
+{
+	uint32_t	srid = 0, nd = 2, o = 0, gtype = gd_hdr(s, len, &srid, &nd, &o), p = o, end = len, stride, rem0 = 1, rem1 = 0;
+
+	if (gtype == 0 || gtype > 7)
+		return 1;
+	stride = 8 * nd;
+	if (gtype >= 4)
+	{
+		rem0 = ld32u(s + p + 4);
+		p += 8;
+		if (rem0 > (end - p) / 8)
+			return 1;
+	}
+	for (uint32_t guard = 0; guard < 65536; guard++)
+	{
+		uint32_t	t, n, base, aoff = 0, an = 0;
+		int			measure = 0;
+
+		if (rem1 > 0)
+			rem1--;
+		else
+		{
+			if (rem0 == 0)
+				break;
+			rem0--;
+			if (gtype == 7)
+			{
+				uint32_t	st;
+
+				if (p + 8 > end)
+					return 1;
+				st = ld32u(s + p);
+				if (st >= 4 && st <= 6)
+				{
+					rem1 = ld32u(s + p + 4);
+					p += 8;
+					if (rem1 > (end - p) / 8)
+						return 1;
+					continue;
+				}
+			}
+		}
+		if (p + 8 > end)
+			return 1;
+		t = ld32u(s + p);
+		n = ld32u(s + p + 4);
+		base = p + 8;
+		if (t == 1)
+		{
+			if (n > 1 || (n == 1 && base + stride > end))
+				return 1;
+			aoff = base;
+			an = n;
+			measure = (n == 1);
+			p = base + n * stride;
+		}
+		else if (t == 2)
+		{
+			if (n > (end - base) / stride)
+				return 1;
+			aoff = base;
+			an = n;
+			measure = (n > 0);
+			p = base + n * stride;
+		}
+		else if (t == 3)
+		{
+			uint32_t	data = base + 4 * n + ((n & 1) ? 4 : 0), q = data;
+			int			decided = 0;
+
+			if (n > (end - base) / 4 || data > end)
+				return 1;
+			for (uint32_t r = 0; r < n; r++)
+			{
+				uint32_t	np = ld32u(s + base + 4 * r);
+
+				if (np > (end - q) / stride)
+					return 1;
+				if (!decided)
+				{
+					uint32_t	rr = pip_ring(s + q, np, px, py, stride);
+
+					if (rr == PIP_UNSURE)
+						return 1;
+					if (r == 0 ? (rr == PIP_OUT) : (rr == PIP_IN))
+					{
+						aoff = q;
+						an = np;
+						measure = 1;
+						decided = 1;
+					}
+				}
+				q += np * stride;
+			}
+			if (n > 0)
+			{
+				*found = 1;
+				if (!decided)
+					*best = 0;
+			}
+			p = q;
+		}
+		else
+			return 1;
+		if (measure)
+		{
+			uint64_t	ax = ld64u(s + aoff), ay = ld64u(s + aoff + 8);
+
+			*found = 1;
+			for (uint32_t i = 0; i < an; i++)
+			{
+				uint64_t	bx = ax, by = ay, qx, qy, rad = 0, scl = 0x3FF0000000000000ull, dd;
+				int			inside = 0;
+
+				if (i > 0)
+				{
+					bx = ld64u(s + aoff + i * stride);
+					by = ld64u(s + aoff + i * stride + 8);
+				}
+				if (F64_NONFINITE(bx) || F64_NONFINITE(by))
+					return 1;
+				qx = bx;
+				qy = by;
+				if (i > 0)
+				{
+					qx = ax;
+					qy = ay;
+					if (!(f64_eq(ax, bx) && f64_eq(ay, by)))
+					{
+						uint64_t	bxa = f64_sub(bx, ax), bya = f64_sub(by, ay);
+						uint64_t	pxa = f64_sub(px, ax), pya = f64_sub(py, ay);
+						uint64_t	num = f64_fma(pxa, bxa, f64_mul(pya, bya));
+						uint64_t	den = f64_fma(bxa, bxa, f64_mul(bya, bya)), mag;
+
+						if (F64_NONFINITE(bxa) || F64_NONFINITE(bya) || F64_NONFINITE(pxa) || F64_NONFINITE(pya) ||
+							F64_NONFINITE(num) || F64_NONFINITE(den) || (den & F64_MAG) == 0)
+							return 1;
+						mag = f64_add(f64_mul(pxa, bxa) & F64_MAG, f64_mul(pya, bya) & F64_MAG);
+						if (f64_le(num & F64_MAG, f64_mul(mag, 0x3D70000000000000ull)) ||
+							f64_le(f64_sub(num, den) & F64_MAG, f64_mul(f64_add(mag, den), 0x3D70000000000000ull)))
+							return 1;
+						if (f64_gt(num, den))
+						{
+							qx = bx;
+							qy = by;
+						}
+						else if (!f64_lt(num, 0))
+						{
+							uint64_t	cross = f64_fma(f64_sub(ay, py), bxa, f64_mul(f64_sub(ax, px), bya) ^ F64_SIGN);
+							uint64_t	sv = f64_div(cross, den);
+
+							if (F64_NONFINITE(sv))
+								return 1;
+							scl = sv & F64_MAG;
+							rad = den;
+							inside = 1;
+						}
+					}
+				}
+				if (!inside)
+				{
+					uint64_t	h = f64_sub(qx, px), v = f64_sub(qy, py);
+
+					rad = f64_sqr_add(h, f64_mul(v, v));
+					if (F64_NONFINITE(h) || F64_NONFINITE(v))
+						return 1;
+				}
+				if (F64_NONFINITE(rad))
+					return 1;
+				dd = f64_mul(scl, f64_sqrt(rad));
+				if (F64_NONFINITE(dd))
+					return 1;
+				if (f64_lt(dd, *best))
+					*best = dd;
+				ax = bx;
+				ay = by;
+			}
+		}
+	}
+	return (rem0 > 0 || rem1 > 0) ? 1 : 0;
+}
+
 /* ST_Distance / ST_3DDistance / ST_3DMaxDistance of two points: the same as vm_geom_dist() of scan_common.slang. *isnull: an empty operand */
 static uint32_t
 geom_dist(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1, int *isnull, uint64_t *val)
@@ -1072,6 +1289,50 @@ geom_dist(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint3
 	int			ea = 0, eb = 0, hza = 1, hzb = 1;
 
 	*isnull = 0;
+	/* a point and something else (a line, a polygon, a multi-geometry, a collection): the 2D distance only */
+	{
+		uint32_t	hsa = 0, hsb = 0, hna = 0, hnb = 0, hoa = 0, hob = 0;
+		uint32_t	ta = fa ? 1 : gd_hdr(str_ptr(env, a.v), str_len(a.v), &hsa, &hna, &hoa);
+		uint32_t	tb = fb ? 1 : gd_hdr(str_ptr(env, b.v), str_len(b.v), &hsb, &hnb, &hob);
+
+		if (ta == 0 || tb == 0)
+			return SOP_RECHECK_CODE;
+		if (ta != 1 || tb != 1)
+		{
+			int			pa = (ta == 1), pe = 0, phz = 1, found = 0;
+			uint64_t	px = pa ? ax : bx, py = pa ? ay : by, pz = 0, best = 0x7FEFFFFFFFFFFFFFull;
+			uint32_t	psrid = k1 & 0xfffff;
+			vm_reg		g = pa ? b : a;
+
+			if (d3 || (ta != 1 && tb != 1))
+				return SOP_RECHECK_CODE;
+			if (pa ? !fa : !fb)
+			{
+				vm_reg		pr = pa ? a : b;
+
+				if (gdw3_load(str_ptr(env, pr.v), str_len(pr.v), &psrid, &px, &py, &pz, &phz, &pe))
+					return SOP_RECHECK_CODE;
+			}
+			if ((pa ? hsb : hsa) != psrid)
+				return SOP_RECHECK_CODE;
+			if (pe)
+			{
+				*isnull = 1;
+				return 0;
+			}
+			if (F64_NONFINITE(px) || F64_NONFINITE(py))
+				return SOP_RECHECK_CODE;
+			if (gd_geom(str_ptr(env, g.v), str_len(g.v), px, py, &best, &found))
+				return SOP_RECHECK_CODE;
+			if (!found)
+			{
+				*isnull = 1;
+				return 0;
+			}
+			*val = best;
+			return 0;
+		}
+	}
 	if (!fa && gdw3_load(str_ptr(env, a.v), str_len(a.v), &sa, &ax, &ay, &az, &hza, &ea))
 		return SOP_RECHECK_CODE;
 	if (!fb && gdw3_load(str_ptr(env, b.v), str_len(b.v), &sb, &bx, &by, &bz, &hzb, &eb))
@@ -1105,16 +1366,18 @@ geom_dist(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint3
 	return 0;
 }
 
-/* ST_Length / ST_Length2D (k0 = 0), ST_3DLength (k0 = 1): the same as vm_geom_len() of scan_common.slang */
+/* ST_Length / ST_Length2D (k0 0), ST_3DLength (1), ST_Perimeter / ST_Perimeter2D (2), ST_3DPerimeter (3): the same as vm_geom_len() of
+ * scan_common.slang (see the comment there for the summation order, and for why it is written as single loops) */
 static uint32_t
-geom_len(const unsigned char *p, uint32_t len, uint32_t k0, uint64_t *val)
+geom_len(const unsigned char *s, uint32_t len, uint32_t k0, uint64_t *val)
 {
-	uint32_t	gflags, hz, hm, nd, o = 4, gtype;
-	uint64_t	tot = 0;
+	uint32_t	gflags, hz, hm, nd, o = 4, p, end = len, gtype, stride, rem0 = 1, rem1 = 0;
+	int			per = (k0 >= 2), d3, inner = 0;
+	uint64_t	tot = 0, sub = 0;
 
-	if (len < 12 || (p[0] & 0xe0) != 0)
+	if (len < 12 || (s[0] & 0xe0) != 0)
 		return SOP_RECHECK_CODE;
-	gflags = p[3];
+	gflags = s[3];
 	if (gflags & 0x08)
 		return SOP_RECHECK_CODE;
 	hz = gflags & 1;
@@ -1126,31 +1389,140 @@ geom_len(const unsigned char *p, uint32_t len, uint32_t k0, uint64_t *val)
 		o += 8 * nd;
 	if (o + 8 > len)
 		return SOP_RECHECK_CODE;
-	gtype = ld32u(p + o);
-	if (gtype == 2)
+	d3 = ((k0 & 1) != 0) && hz;
+	p = o;
+	gtype = ld32u(s + p);
+	if (gtype == 0 || gtype > 7)
+		return SOP_RECHECK_CODE;
+	stride = 8 * nd;
+	if (gtype >= 4)
 	{
-		uint32_t	npts = ld32u(p + o + 4), base = o + 8;
-		int			d3 = (k0 == 1) && hz;
-
-		if (npts > (len - o - 8) / (8 * nd))
+		rem0 = ld32u(s + p + 4);
+		p += 8;
+		if (rem0 > (end - p) / 8)
 			return SOP_RECHECK_CODE;
-		for (uint32_t i = 0; i + 1 < npts; i++)
-		{
-			uint32_t	p0 = base + i * 8 * nd, p1 = p0 + 8 * nd;
-			uint64_t	dx = f64_sub(ld64u(p + p1), ld64u(p + p0));
-			uint64_t	dy = f64_sub(ld64u(p + p1 + 8), ld64u(p + p0 + 8));
-			uint64_t	q = f64_sqr_add(dx, f64_mul(dy, dy));
-
-			if (d3)
-				q = f64_sqr_add(f64_sub(ld64u(p + p1 + 16), ld64u(p + p0 + 16)), q);
-			if (F64_NONFINITE(dx) || F64_NONFINITE(dy) || F64_NONFINITE(q))
-				return SOP_RECHECK_CODE;
-			tot = f64_add(tot, f64_sqrt(q));
-			if (F64_NONFINITE(tot))
-				return SOP_RECHECK_CODE;
-		}
 	}
-	else if (gtype != 1 && gtype != 3)
+	for (uint32_t guard = 0; guard < 65536; guard++)
+	{
+		uint32_t	t, n, base, narr = 0, rbase = 0, data = 0, q;
+		uint64_t	c = 0;
+
+		if (inner)
+		{
+			if (rem1 == 0)
+			{
+				tot = f64_add(tot, sub);
+				inner = 0;
+				if (F64_NONFINITE(tot))
+					return SOP_RECHECK_CODE;
+			}
+			else
+				rem1--;
+		}
+		if (!inner)
+		{
+			if (rem0 == 0)
+				break;
+			rem0--;
+			if (gtype == 7)
+			{
+				uint32_t	st;
+
+				if (p + 8 > end)
+					return SOP_RECHECK_CODE;
+				st = ld32u(s + p);
+				if (st >= 4 && st <= 6)
+				{
+					rem1 = ld32u(s + p + 4);
+					p += 8;
+					if (rem1 > (end - p) / 8)
+						return SOP_RECHECK_CODE;
+					sub = 0;
+					inner = 1;
+					continue;
+				}
+			}
+		}
+		if (p + 8 > end)
+			return SOP_RECHECK_CODE;
+		t = ld32u(s + p);
+		n = ld32u(s + p + 4);
+		base = p + 8;
+		if (t == 1)
+		{
+			if (n > 1 || (n == 1 && base + stride > end))
+				return SOP_RECHECK_CODE;
+			p = base + n * stride;
+		}
+		else if (t == 2)
+		{
+			if (n > (end - base) / stride)
+				return SOP_RECHECK_CODE;
+			narr = per ? 0 : 1;
+			data = base;
+		}
+		else if (t == 3)
+		{
+			data = base + 4 * n + ((n & 1) ? 4 : 0);
+			if (n > (end - base) / 4 || data > end)
+				return SOP_RECHECK_CODE;
+			narr = per ? n : 0;
+			rbase = base;
+		}
+		else
+			return SOP_RECHECK_CODE;
+		q = data;
+		for (uint32_t ar = 0; ar < narr; ar++)
+		{
+			uint32_t	np = (t == 2) ? n : ld32u(s + rbase + 4 * ar);
+			uint64_t	asum = 0;
+
+			if (np > (end - q) / stride)
+				return SOP_RECHECK_CODE;
+			for (uint32_t i = 0; i + 1 < np; i++)
+			{
+				uint32_t	p0 = q + i * stride, p1 = p0 + stride;
+				uint64_t	dx = f64_sub(ld64u(s + p1), ld64u(s + p0));
+				uint64_t	dy = f64_sub(ld64u(s + p1 + 8), ld64u(s + p0 + 8));
+				uint64_t	qq = f64_sqr_add(dx, f64_mul(dy, dy));
+
+				if (d3)
+					qq = f64_sqr_add(f64_sub(ld64u(s + p1 + 16), ld64u(s + p0 + 16)), qq);
+				if (F64_NONFINITE(dx) || F64_NONFINITE(dy) || F64_NONFINITE(qq))
+					return SOP_RECHECK_CODE;
+				asum = f64_add(asum, f64_sqrt(qq));
+				if (F64_NONFINITE(asum))
+					return SOP_RECHECK_CODE;
+			}
+			c = f64_add(c, asum);
+			q += np * stride;
+		}
+		if (t == 2)
+			p = base + n * stride;
+		else if (t == 3)
+		{
+			uint32_t	qe = data;
+
+			for (uint32_t ar = 0; ar < n; ar++)
+			{
+				uint32_t	np = ld32u(s + rbase + 4 * ar);
+
+				if (np > (end - qe) / stride)
+					return SOP_RECHECK_CODE;
+				qe += np * stride;
+			}
+			p = qe;
+		}
+		if (inner)
+			sub = f64_add(sub, c);
+		else
+			tot = f64_add(tot, c);
+		if (F64_NONFINITE(sub) || F64_NONFINITE(tot))
+			return SOP_RECHECK_CODE;
+	}
+	if (inner)
+		tot = f64_add(tot, sub);
+	if (rem0 > 0 || rem1 > 0 || F64_NONFINITE(tot))
 		return SOP_RECHECK_CODE;
 	*val = tot;
 	return 0;
@@ -1213,6 +1585,14 @@ geom_3ddwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, 
 	*res = 0;
 	if (((dx | dy | dz) & F64_MAG) == 0)
 		*res = 1;
+	else if (k1 & SOP_GDW_EXACT)
+	{
+		uint64_t	q = f64_sqr_add(dz, f64_sqr_add(dx, f64_mul(dy, dy)));
+
+		if (F64_NONFINITE(q))
+			return SOP_RECHECK_CODE;
+		*res = f64_le(f64_sqrt(q), tol);
+	}
 	else
 	{
 		uint64_t	d2 = f64_add(f64_add(f64_mul(dx, dx), f64_mul(dy, dy)), f64_mul(dz, dz));

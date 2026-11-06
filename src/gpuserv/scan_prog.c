@@ -577,7 +577,7 @@ emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
 	if (dst < 0 ||
 		emit(b, SOP_GEOMDWITHIN, dst, ra, rb,
 			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16) | ((uint32_t) rt << 24),
-			 (uint32_t) (kmk[0] ? srid[0] : srid[1])) < 0)
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((kexp->expflags & KEXP_FLAG__GEOM_EXACT) ? SOP_GDW_EXACT : 0)) < 0)
 		return -1;
 	return dst;
 }
@@ -795,7 +795,8 @@ emit_geom3ddw(builder *b, const kern_expression *kexp, int *next)
 	if (dst < 0 ||
 		emit(b, SOP_GEOM3DDW, dst, ra, rb,
 			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16) | ((uint32_t) rt << 24),
-			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) rza << 20) | ((uint32_t) rzb << 25)) < 0)
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) rza << 20) | ((uint32_t) rzb << 25) |
+			 ((kexp->expflags & KEXP_FLAG__GEOM_EXACT) ? SOP_GDW_EXACT : 0)) < 0)
 		return -1;
 	return dst;
 }

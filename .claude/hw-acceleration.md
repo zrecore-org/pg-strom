@@ -1020,3 +1020,26 @@ The earlier A11 decision "no bit-exact emulation of PostGIS' distance" is revers
   point pairs / lines when the function is first planned and compare the bits with the host formula (`fma()` from libm); one difference
   and the function stays on the CPU for that backend (LOG line). A PostGIS built without contraction therefore keeps today's behaviour.
 - **Possible next step:** ST_DWithin / ST_3DDWithin could use the exact distance instead of the 2^-47 band (no boundary rechecks).
+
+## Distances, lengths and DWithin, exact (2026-11-05, evening)
+
+- **ST_DWithin / ST_3DDWithin of two points** decide "exact distance <= tolerance" (`postgis/dwithin_probe.c`: 0 mismatches over 40,000 pairs at d and its float
+  neighbours). The planner calls the installed PostGIS at d, nextafter(d, 0) and nextafter(d, inf) first (`vulkan_geom_dwithin_exact_calibrated`) and sets
+  `KEXP_FLAG__GEOM_EXACT` on the expression; without it the kernel keeps the 2^-47 band (safe on any PostGIS build). The flag travels in `kexp->expflags`
+  and `SOP_GDW_EXACT` (bit 30 of k1).
+- **Lengths and perimeters** of multi-geometries and collections: `ST_Perimeter`, `ST_Perimeter2D`, `ST_3DPerimeter` and multi-parts for `ST_Length*`
+  (`GEOMLEN` kinds 2-3). Each member's own total is added to its container's running total, a polygon's rings in order; 30,000 random geometries, 0 differences.
+- **Distance of a point to a line, polygon, multi-geometry or collection** (2D, inside `GEOMDIST`): the minimum over the members of the distance to the first
+  vertex and to each segment; a point in a polygon's exterior ring but in no hole is at 0, one in a hole at the distance to that hole's ring, one outside at the
+  distance to the exterior ring. **The interior of a segment is PostGIS' `distance2d_pt_seg`, not the foot of the perpendicular**: `|s| * sqrt(L2)` with
+  `s = fma(Ay-py, Bx-Ax, -((Ax-px)(By-Ay))) / L2`, `L2 = fma(Bx-Ax, Bx-Ax, (By-Ay)^2)` (`postgis/seg_probe.c`: 0 differences in 89,523 interior rows; the foot model
+  failed the planner's calibration and the offline probe, but passed the first dev tests). A point whose projection `r` is within 2^-40 of 0 or 1 is re-checked
+  (the fusing of `r` itself is not known to the last bit); a point near a polygon edge is re-checked by the winding test.
+- **Software fma:** `f64_fma(a, b, c)` for any signs (the general case; `f64_sqr_add` is the cheap one for squares), exact against the hardware on 40 million host and
+  16.7 million device cases including constructed cancellation.
+- **Testing lesson:** a float8 in a projection can be computed by the CPU above the scan, so value tests compare in a **qual** against a value PostGIS stored when
+  the table was built (`... where ST_Distance(g, pt) = dist`): any last-bit difference loses rows. Do this for every value-returning function.
+- **Kernel size lesson:** the Slang compiler inlines every call; a heavy soft-float step written once but called from many places multiplies the kernel (the first
+  point-to-geometry walker made every full scan kernel 28 MB instead of 5). Write walkers as single loops with one copy of each heavy step. The embedded SPIR-V is
+  also no longer turned into C source (`gen_kspv.sh` uses `.incbin`): the C array had passed Clang's 2 GB source-location limit. Full kernels carry all geometry;
+  a "no geometry" tier would shrink the 406 MB service binary (open).

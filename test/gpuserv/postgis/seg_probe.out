@@ -1,0 +1,5 @@
+# 200,000 random point/segment pairs by region of the projection (seg_probe.c); the model of the inside is PostGIS' distance2d_pt_seg
+rows: before A 55066, after B 55411, inside 89523
+vertex A candidate: 0 mismatches; vertex B: 0 mismatches
+inside cross0 den0 form0        46701 mismatches
+inside s: cross0 den0 sqrtden0  0 mismatches

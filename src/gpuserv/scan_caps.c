@@ -1298,6 +1298,10 @@ classify_geometry(const char *name)
 		{ fc.cls = SOP_GEOMLEN; fc.kind = 0; }
 	else if (!strcmp(name, "st_3dlength"))
 		{ fc.cls = SOP_GEOMLEN; fc.kind = 1; }
+	else if (!strcmp(name, "st_perimeter") || !strcmp(name, "st_perimeter2d"))
+		{ fc.cls = SOP_GEOMLEN; fc.kind = 2; }
+	else if (!strcmp(name, "st_3dperimeter"))
+		{ fc.cls = SOP_GEOMLEN; fc.kind = 3; }
 	else if (!strcmp(name, "st_3dintersects"))
 		{ fc.cls = SOP_GEOM3DDW; fc.kind = SOP_G3DDW_INTERSECTS; }
 	else if (!strcmp(name, "geometry_overlaps_nd"))

@@ -2060,6 +2060,112 @@ vulkan_geom_3ddwithin_args_ok(List *func_args)
  * it is called on 240 fixed pairs and the bits are compared with the same formula on the host; one difference and the function
  * stays on the CPU (decided once per function and backend). The points are built as version 1 GSERIALIZED values.
  */
+/*
+ * ST_Distance(point, line) against the host's version of PostGIS' way (lw_dist2d_pt_ptarray / pt_seg): the minimum of the distance to the first
+ * vertex and, per segment, to the end A when r < 0, to B when r > 1, else |s| * sqrt(L2) with r = ((p - A).(B - A)) / L2, L2 = |B - A|^2,
+ * s = ((Ay - py) (Bx - Ax) - (Ax - px) (By - Ay)) / L2, with every a * b + c written as the fma() a compiler contracts it to (the
+ * expressions were found with test/gpuserv/postgis/seg_probe.c). 60 fixed lines of 3 to 6 points.
+ */
+static double
+calib_pt_dist(double px, double py, double qx, double qy)
+{
+	volatile double v2 = (qy - py) * (qy - py);
+	double		h = qx - px;
+
+	return sqrt(fma(h, h, v2));
+}
+
+static bool
+vulkan_geom_ptline_calibrated(Oid func_oid)
+{
+	static const double scales[3] = {1000.0, 1.0, 1e-3};
+	uint64_t	rng = 0x2545F4914F6CDD1DULL;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 2);
+	bool		ok = true;
+	MemoryContext oldcxt = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int i = 0; i < 60 && ok; i++)
+		{
+			int			npts = 3 + (i % 4);
+			double		v[6][3], pt[3], sc = scales[i % 3], best;
+			unsigned char *line = palloc0(VARHDRSZ + 4 + 8 + 24 * npts);
+			unsigned char *pnt = palloc0(VARHDRSZ + 4 + 8 + 24);
+			uint32		two = 2, one = 1, np = npts;
+			Datum		r;
+			double		got;
+
+			for (int k = 0; k < npts + 1; k++)
+				for (int c = 0; c < 3; c++)
+				{
+					rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+					if (k < npts)
+						v[k][c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+					else
+						pt[c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+				}
+			SET_VARSIZE(line, VARHDRSZ + 4 + 8 + 24 * npts);
+			line[VARHDRSZ + 3] = 0x01;
+			memcpy(line + VARHDRSZ + 4, &two, 4);
+			memcpy(line + VARHDRSZ + 8, &np, 4);
+			memcpy(line + VARHDRSZ + 12, v, 24 * npts);
+			SET_VARSIZE(pnt, VARHDRSZ + 4 + 8 + 24);
+			pnt[VARHDRSZ + 3] = 0x01;
+			memcpy(pnt + VARHDRSZ + 4, &one, 4);
+			memcpy(pnt + VARHDRSZ + 8, &one, 4);
+			memcpy(pnt + VARHDRSZ + 12, pt, 24);
+			best = calib_pt_dist(pt[0], pt[1], v[0][0], v[0][1]);
+			for (int k = 1; k < npts; k++)
+			{
+				double		ax = v[k - 1][0], ay = v[k - 1][1], bx = v[k][0], by = v[k][1];
+				double		bxa = bx - ax, bya = by - ay, pxa = pt[0] - ax, pya = pt[1] - ay, d;
+				volatile double t1 = pya * bya, t2 = bya * bya, t3 = (ax - pt[0]) * bya;
+				double		num = fma(pxa, bxa, t1), den = fma(bxa, bxa, t2), rr = num / den;
+
+				if (rr < 0)
+					d = calib_pt_dist(pt[0], pt[1], ax, ay);
+				else if (rr > 1)
+					d = calib_pt_dist(pt[0], pt[1], bx, by);
+				else
+				{
+					/* PostGIS' distance2d_pt_seg inside the segment: |s| * sqrt(L2), s = cross / L2 */
+					double		cross = fma(ay - pt[1], bxa, -t3);
+
+					d = fabs(cross / den) * sqrt(den);
+				}
+				if (d < best)
+					best = d;
+			}
+			InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
+			fcinfo->args[0].value = PointerGetDatum(pnt);
+			fcinfo->args[0].isnull = false;
+			fcinfo->args[1].value = PointerGetDatum(line);
+			fcinfo->args[1].isnull = false;
+			r = FunctionCallInvoke(fcinfo);
+			got = DatumGetFloat8(r);
+			if (fcinfo->isnull || memcmp(&best, &got, sizeof(double)) != 0)
+			{
+				elog(LOG, "PG-Strom: ST_Distance(point, line) calibration case %d (%d points): model %.17g, PostGIS %.17g%s", i, npts, best, got,
+					 fcinfo->isnull ? " (NULL)" : "");
+				ok = false;
+			}
+			pfree(line);
+			pfree(pnt);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	return ok;
+}
+
 static bool
 vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
 {
@@ -2140,6 +2246,11 @@ vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
 		ok = false;
 	}
 	PG_END_TRY();
+	/* the 2D distance of a point and a line: the model of the segment projection (a different build could contract it differently) */
+	if (ok && !d3)
+		ok = vulkan_geom_ptline_calibrated(func_oid);
+	if (!ok && getenv("PGSTROM_GEOM_NO_CALIBRATION"))
+		ok = true;						/* debugging aid: trust the kernel without the calibration */
 	if (!ok)
 		elog(LOG, "PG-Strom: PostGIS function %u does not compute distances the way the GPU kernel does; it stays on the CPU", func_oid);
 	if (ndone < lengthof(done))
@@ -2152,11 +2263,161 @@ vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
 }
 
 /*
- * The same for the length of a line: ST_Length / ST_Length2D / ST_3DLength are called on 120 fixed lines of 2 to 6 points (Z, so the
- * 3D form measures them in 3D) and compared bit for bit with the segment lengths sqrt(fma(...)) added left to right on the host.
+ * Does the installed PostGIS decide ST_DWithin / ST_3DDWithin of two points as "the exact distance <= the tolerance"? (The exact distance is
+ * the one vulkan_geom_dist_calibrated checks.) Called on 90 fixed pairs at the distance itself, at its float neighbour below (not within
+ * unless the distance is 0) and above (within). When it holds the kernel decides exactly; when it does not, the kernel keeps its
+ * 2^-47 band and re-checks the boundary: that is safe on any PostGIS build, so a failure costs only speed.
  */
 static bool
-vulkan_geom_len_calibrated(Oid func_oid, bool d3)
+vulkan_geom_dwithin_exact_calibrated(Oid func_oid, bool d3)
+{
+	static struct { Oid oid; bool ok; } done[16];
+	static int	ndone = 0;
+	static const double scales[5] = {1000.0, 1e-3, 1e8, 1.0, 1e-120};
+	uint64_t	rng = 0xA24BAED4963EE407ULL;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 3);
+	bool		ok = true;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < ndone; i++)
+		if (done[i].oid == func_oid)
+			return done[i].ok;
+	oldcxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int i = 0; i < 90 && ok; i++)
+		{
+			double		v[2][3];
+			struct varlena *pt[2];
+			double		sc = scales[i % 5], dy2, dx, dz, q, d, tol[3];
+
+			for (int k = 0; k < 3; k++)
+			{
+				rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+				v[0][k] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+				rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+				v[1][k] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+			}
+			for (int p = 0; p < 2; p++)
+			{
+				unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24);
+				uint32		one = 1;
+
+				SET_VARSIZE(buf, VARHDRSZ + 4 + 8 + 24);
+				buf[VARHDRSZ + 3] = 0x01;
+				memcpy(buf + VARHDRSZ + 4, &one, 4);
+				memcpy(buf + VARHDRSZ + 8, &one, 4);
+				memcpy(buf + VARHDRSZ + 12, v[p], 24);
+				pt[p] = (struct varlena *) buf;
+			}
+			{
+				volatile double vy = (v[1][1] - v[0][1]) * (v[1][1] - v[0][1]);
+
+				dy2 = vy;
+			}
+			dx = v[1][0] - v[0][0];
+			dz = v[1][2] - v[0][2];
+			q = fma(dx, dx, dy2);
+			if (d3)
+				q = fma(dz, dz, q);
+			d = sqrt(q);
+			tol[0] = d;
+			tol[1] = nextafter(d, 0.0);
+			tol[2] = nextafter(d, INFINITY);
+			for (int k = 0; k < 3 && ok; k++)
+			{
+				bool		want = (d <= tol[k]);
+				Datum		r;
+
+				InitFunctionCallInfoData(*fcinfo, &flinfo, 3, InvalidOid, NULL, NULL);
+				fcinfo->args[0].value = PointerGetDatum(pt[0]);
+				fcinfo->args[0].isnull = false;
+				fcinfo->args[1].value = PointerGetDatum(pt[1]);
+				fcinfo->args[1].isnull = false;
+				fcinfo->args[2].value = Float8GetDatum(tol[k]);
+				fcinfo->args[2].isnull = false;
+				r = FunctionCallInvoke(fcinfo);
+				if (fcinfo->isnull || DatumGetBool(r) != want)
+					ok = false;
+			}
+			pfree(pt[0]);
+			pfree(pt[1]);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	if (!ok)
+		elog(LOG, "PG-Strom: PostGIS function %u does not decide ST_DWithin as the exact distance <= tolerance; the GPU keeps a band around the boundary", func_oid);
+	if (ndone < lengthof(done))
+	{
+		done[ndone].oid = func_oid;
+		done[ndone].ok = ok;
+		ndone++;
+	}
+	return ok;
+}
+
+/*
+ * The same for lengths and perimeters (kind 0 ST_Length / ST_Length2D, 1 ST_3DLength, 2 ST_Perimeter / ST_Perimeter2D, 3 ST_3DPerimeter):
+ * the function is called on 120 fixed geometries (Z, so the 3D forms measure in 3D) and compared bit for bit with what the host computes
+ * the way PostGIS adds up: segment lengths sqrt(fma(...)) left to right within a line or ring, a polygon's rings in order, and the totals
+ * of the members of a multi-geometry in order. Even shapes are one line (or a polygon with a hole), odd ones a multilinestring of three
+ * lines (or a multipolygon of two polygons).
+ */
+static size_t
+calib_put_poly_or_line(unsigned char *buf, size_t off, const double (*pt)[3], const int *cnt, int nrings, bool line)
+{
+	uint32		t = line ? 2 : 3, nr = nrings, tot = 0, k;
+
+	memcpy(buf + off, &t, 4);
+	if (line)
+	{
+		uint32		n = cnt[0];
+
+		memcpy(buf + off + 4, &n, 4);
+		memcpy(buf + off + 8, pt, 24 * n);
+		return off + 8 + 24 * n;
+	}
+	memcpy(buf + off + 4, &nr, 4);
+	for (int r = 0; r < nrings; r++)
+	{
+		uint32		c = cnt[r];
+
+		memcpy(buf + off + 8 + 4 * r, &c, 4);
+		tot += c;
+	}
+	k = off + 8 + 4 * nrings + ((nrings & 1) ? 4 : 0);
+	memcpy(buf + k, pt, 24 * tot);
+	return k + 24 * tot;
+}
+
+static double
+calib_host_ring(const double (*pt)[3], int n, bool d3)
+{
+	double		total = 0.0;
+
+	for (int i = 0; i + 1 < n; i++)
+	{
+		volatile double dy2 = (pt[i + 1][1] - pt[i][1]) * (pt[i + 1][1] - pt[i][1]);
+		double		dx = pt[i + 1][0] - pt[i][0], dz = pt[i + 1][2] - pt[i][2];
+		double		q = fma(dx, dx, dy2);
+
+		if (d3)
+			q = fma(dz, dz, q);
+		total += sqrt(q);
+	}
+	return total;
+}
+
+static bool
+vulkan_geom_len_calibrated(Oid func_oid, int kind)
 {
 	static struct { Oid oid; bool ok; } done[16];
 	static int	ndone = 0;
@@ -2164,7 +2425,7 @@ vulkan_geom_len_calibrated(Oid func_oid, bool d3)
 	uint64_t	rng = 0xD1B54A32D192ED03ULL;
 	FmgrInfo	flinfo;
 	LOCAL_FCINFO(fcinfo, 1);
-	bool		ok = true;
+	bool		ok = true, d3 = ((kind & 1) != 0), per = (kind >= 2);
 	MemoryContext oldcxt;
 
 	for (int i = 0; i < ndone; i++)
@@ -2176,34 +2437,72 @@ vulkan_geom_len_calibrated(Oid func_oid, bool d3)
 		fmgr_info(func_oid, &flinfo);
 		for (int i = 0; i < 120 && ok; i++)
 		{
-			int			npts = 2 + (i % 5);
-			double		v[6][3];
+			double		v[24][3];
 			double		sc = scales[i % 5], want = 0.0, got;
-			unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24 * npts);
-			uint32		two = 2, np = npts;
+			unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24 * 24 + 64);
+			size_t		off = VARHDRSZ + 4;
+			bool		multi = (i % 2 == 1);
 			Datum		r;
 
-			for (int k = 0; k < npts; k++)
+			for (int k = 0; k < 24; k++)
 				for (int c = 0; c < 3; c++)
 				{
 					rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
 					v[k][c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
 				}
-			SET_VARSIZE(buf, VARHDRSZ + 4 + 8 + 24 * npts);
 			buf[VARHDRSZ + 3] = 0x01;				/* Z */
-			memcpy(buf + VARHDRSZ + 4, &two, 4);		/* LINESTRING */
-			memcpy(buf + VARHDRSZ + 8, &np, 4);
-			memcpy(buf + VARHDRSZ + 12, v, 24 * npts);
-			for (int k = 0; k + 1 < npts; k++)
+			if (!per && !multi)
 			{
-				volatile double dy2 = (v[k + 1][1] - v[k][1]) * (v[k + 1][1] - v[k][1]);
-				double		dx = v[k + 1][0] - v[k][0], dz = v[k + 1][2] - v[k][2];
-				double		q = fma(dx, dx, dy2);
+				int			cnt[1] = {2 + (i % 5)};
 
-				if (d3)
-					q = fma(dz, dz, q);
-				want += sqrt(q);
+				off = calib_put_poly_or_line(buf, off, v, cnt, 1, true);
+				want = calib_host_ring(v, cnt[0], d3);
 			}
+			else if (!per)
+			{
+				int			cnt[3] = {2, 3 + (i % 3), 4};
+				uint32		t = 5, n = 3;
+				int			at = 0;
+
+				memcpy(buf + off, &t, 4);
+				memcpy(buf + off + 4, &n, 4);
+				off += 8;
+				for (int k = 0; k < 3; k++)
+				{
+					off = calib_put_poly_or_line(buf, off, v + at, &cnt[k], 1, true);
+					want += calib_host_ring(v + at, cnt[k], d3);
+					at += cnt[k];
+				}
+			}
+			else if (!multi)
+			{
+				int			cnt[2] = {5, 4};
+
+				off = calib_put_poly_or_line(buf, off, v, cnt, 2, false);
+				want = calib_host_ring(v, cnt[0], d3);
+				want += calib_host_ring(v + cnt[0], cnt[1], d3);
+			}
+			else
+			{
+				int			cnt[2][2] = {{4, 5}, {4, 4}};
+				uint32		t = 6, n = 2;
+				int			at = 0;
+
+				memcpy(buf + off, &t, 4);
+				memcpy(buf + off + 4, &n, 4);
+				off += 8;
+				for (int k = 0; k < 2; k++)
+				{
+					double		poly = 0.0;
+
+					off = calib_put_poly_or_line(buf, off, v + at, cnt[k], 2, false);
+					poly += calib_host_ring(v + at, cnt[k][0], d3);
+					poly += calib_host_ring(v + at + cnt[k][0], cnt[k][1], d3);
+					want += poly;
+					at += cnt[k][0] + cnt[k][1];
+				}
+			}
+			SET_VARSIZE(buf, off);
 			InitFunctionCallInfoData(*fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
 			fcinfo->args[0].value = PointerGetDatum(buf);
 			fcinfo->args[0].isnull = false;
@@ -2302,7 +2601,7 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0);
 	if (fc.cls == SOP_GEOMLEN)
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0 &&
-				vulkan_geom_len_calibrated(dfunc->func_oid, fc.kind == 1));
+				vulkan_geom_len_calibrated(dfunc->func_oid, (int) fc.kind));
 	if (fc.cls == SOP_GEOMDIST)
 		return (vulkan_geom_dist_args_ok(func_args, fc.kind == 1) &&
 				vulkan_geom_dist_calibrated(dfunc->func_oid, fc.kind == 1));
@@ -2440,6 +2739,14 @@ __codegen_func_expression(codegen_context *context,
 	kexp.opcode = dfunc->func_code;
 	kexp.nr_args = list_length(func_args);
 	kexp.args_offset = SizeOfKernExpr(0);
+	{
+		scan_func_class xfc = scan_vm_classify_func(dfunc->func_code);
+
+		/* ST_DWithin / ST_3DDWithin (not ST_3DIntersects): the exact decision, if this PostGIS makes it */
+		if ((xfc.cls == SOP_GEOMDWITHIN || (xfc.cls == SOP_GEOM3DDW && xfc.kind == 0)) &&
+			vulkan_geom_dwithin_exact_calibrated(dfunc->func_oid, xfc.cls == SOP_GEOM3DDW))
+			kexp.expflags |= KEXP_FLAG__GEOM_EXACT;
+	}
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
 	jb_const_saved = codegen_jsonb_const_ok;

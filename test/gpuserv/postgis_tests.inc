@@ -262,9 +262,9 @@ for t in pg_1 pg_2; do
 	[ "$n" -le $((nrows / 100)) ]; check "$t: two fused points: $n of $nrows rows rechecked (at most 1%)" $?
 done
 n=$(recheck_rows pg_grid "select id from %T where ST_DWithin(ST_MakePoint(x, y), 'POINT(3 4)'::geometry, 5)")
-[ "$n" -gt 0 ]; check "pg_grid: pairs exactly at the tolerance are rechecked (counter read: $n rows)" $?
+[ "$n" -eq 0 ]; check "pg_grid: pairs exactly at the tolerance are decided exactly, no recheck (counter read: $n rows)" $?
 n=$(recheck_rows pg_dw "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, d)")
-[ "$n" -gt 0 ]; check "pg_dw: a tolerance equal to the plain distance is rechecked (counter read: $n rows)" $?
+[ "$n" -eq 0 ]; check "pg_dw: a tolerance equal to the plain distance is decided exactly, no recheck (counter read: $n rows)" $?
 
 # GPU-Cache table: the same gates as the point-in-polygon predicates (no recheck path there yet), the answers are PostGIS's.
 run_any pg_gc "GPU-Cache table: fused ST_DWithin" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $P55, 3)"

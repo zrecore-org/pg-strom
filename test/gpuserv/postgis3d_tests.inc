@@ -150,11 +150,78 @@ sql "create table pg_3dl as select (row_number() over ())::int4 as id, g::geomet
 	('GEOMETRYCOLLECTION Z (LINESTRING Z (0 0 0, 3 4 12), POINT Z (1 1 1))'), ('SRID=4326;LINESTRING Z (0 0 0, 3 4 12)'),
 	('LINESTRING Z (0.1 0.2 0.3, 0.4 0.5 0.6, 0.7 0.9 0.2, 1.3 1.1 0.8, 2.1 0.4 0.5, 0.3 0.3 0.3, 9.9 8.8 7.7)')) v(g),
 	generate_series(1, 2500)"
+sql "set pg_strom.enabled = off; alter table pg_3dl add column l3 float8, add column l2 float8; update pg_3dl set l3 = ST_3DLength(g), l2 = ST_Length(g)"
 sql "analyze pg_3dl"
+run_any pg_3dl "ST_3DLength equals the stored value over the edge lines" "select id from %T where ST_3DLength(g) is not distinct from l3 and l3 is not null"
+run_any pg_3dl "ST_Length equals the stored value over the edge lines" "select id from %T where ST_Length(g) is not distinct from l2 and l2 is not null"
 run_any pg_3dl "ST_3DLength over the edge lines" "select id, ST_3DLength(g) from %T"
 run_any pg_3dl "ST_Length over the edge lines" "select id, ST_Length(g) from %T"
 run_any pg_3dl "ST_Length2D over the edge lines" "select id, ST_Length2D(g) from %T"
+run_any pg_3dl "ST_Perimeter over the edge lines (always 0 for lines)" "select id, ST_Perimeter(g), ST_3DPerimeter(g) from %T"
 run_any pg_3dl "the edge lengths compared" "select id from %T where ST_3DLength(g) > 10 or ST_Length(g) = 5"
+
+# lengths and perimeters of multi-geometries: PostGIS adds each member's own total to the container's running total, a polygon's rings in
+# order; random lines, polygons with holes, multi-lines, multi-polygons and mixed collections at several magnitudes (Z, and 2D every 7th)
+sql "create or replace function pg3d_line(n int, sc float8) returns geometry language sql as
+	'select ST_MakeLine(array_agg(ST_MakePoint((random()*2-1)*sc, (random()*2-1)*sc, (random()*2-1)*sc))) from generate_series(1, n)'"
+sql "create or replace function pg3d_ring(n int, sc float8) returns geometry language sql as
+	'select ST_MakePolygon(ST_AddPoint(l, ST_StartPoint(l))) from (select pg3d_line(n, sc) l) q'"
+sql "create or replace function pg3d_hole(sc float8) returns geometry language sql as
+	'select ST_ExteriorRing(pg3d_ring(4, sc))'"
+sql "drop table if exists pg_3dm"
+sql "create table pg_3dm as select id, case when id % 7 = 0 then ST_Force2D(g) else g end as g from (select i::int4 as id,
+	case i % 8
+		when 0 then ST_Collect(ARRAY[pg3d_line(2 + i % 4, sc), pg3d_line(3, sc), pg3d_line(2 + i % 3, sc)])
+		when 1 then ST_MakePolygon(ST_ExteriorRing(pg3d_ring(4 + i % 3, sc)), ARRAY[pg3d_hole(sc), pg3d_hole(sc)])
+		when 2 then ST_Collect(pg3d_ring(4 + i % 3, sc), ST_MakePolygon(ST_ExteriorRing(pg3d_ring(5, sc)), ARRAY[pg3d_hole(sc)]))
+		when 3 then ST_Collect(ARRAY[pg3d_line(3, sc), pg3d_ring(4, sc), ST_Collect(pg3d_line(2, sc), pg3d_line(4, sc))])
+		when 4 then ST_Collect(pg3d_line(2 + i % 5, sc), pg3d_line(2 + i % 3, sc))
+		when 5 then pg3d_line(2 + i % 9, sc)
+		when 6 then ST_Collect(ARRAY[pg3d_ring(4, sc), pg3d_line(3, sc), ST_MakePoint(sc, sc, sc)])
+		else ST_Collect(ARRAY[ST_MakePoint(1, 2, 3), ST_MakePoint(4, 5, 6)])
+	end as g
+	from (select i, case i % 5 when 0 then 1000.0 when 1 then 1e-3 when 2 then 1e8 when 3 then 1.0 else 1e-120 end as sc
+	      from generate_series(1, 30000) i) s) t"
+sql "set pg_strom.enabled = off; alter table pg_3dm add column l2 float8, add column l3 float8, add column p2 float8, add column p3 float8;
+	update pg_3dm set l2 = ST_Length(g), l3 = ST_3DLength(g), p2 = ST_Perimeter(g), p3 = ST_3DPerimeter(g)"
+sql "analyze pg_3dm"
+run pg_3dm "ST_Length equals PostGIS' stored value, bit for bit" "select id from %T where ST_Length(g) = l2"
+run pg_3dm "ST_3DLength equals the stored value" "select id from %T where ST_3DLength(g) = l3"
+run pg_3dm "ST_Perimeter equals the stored value" "select id from %T where ST_Perimeter(g) = p2"
+run pg_3dm "ST_3DPerimeter equals the stored value" "select id from %T where ST_3DPerimeter(g) = p3"
+for fn in ST_Length ST_Length2D ST_3DLength ST_Perimeter ST_Perimeter2D ST_3DPerimeter; do
+	run pg_3dm "$fn of random lines, polygons with holes, multi-geometries and collections" "select id, $fn(g) from %T where id % 2 = 0"
+done
+run pg_3dm "ST_3DLength and ST_3DPerimeter compared" "select id from %T where ST_3DLength(g) > ST_3DPerimeter(g) and ST_Length(g) > 0"
+runagg pg_3dm "max of ST_3DPerimeter" "select max(ST_3DPerimeter(g)), count(*) filter (where ST_Perimeter(g) > 1) from %T"
+pushed "ST_Perimeter" st_perimeter "select id from %T where ST_Perimeter(g) > 6"
+pushed "ST_3DPerimeter" st_3dperimeter "select id from %T where ST_3DPerimeter(g) > 6"
+
+# ST_Distance of a point and a line, a polygon (with holes), a multi-geometry or a collection (2D): the minimum over the members of the distance
+# to the vertices and to the feet of the perpendiculars, computed with the fused operations PostGIS' build contracts them to; a point near an
+# edge or on a vertex of a polygon is re-checked on the CPU (the winding test cannot tell), on a line vertex it is exact
+sql "drop table if exists pg_3dp"
+sql "create table pg_3dp as select id, g, ST_MakePoint(px, py, pz) as pt, px, py, pz,
+	case when id % 4 = 0 then (select geom from ST_DumpPoints(g) limit 1) else ST_MakePoint(px, py) end as pv from (
+	select id, g, (random()*2-1)*sc*1.2 as px, (random()*2-1)*sc*1.2 as py, (random()*2-1)*sc as pz from (
+	select id, g, case id % 5 when 0 then 1000.0 when 1 then 1e-3 when 2 then 1e8 when 3 then 1.0 else 1e-120 end as sc from pg_3dm) a) b"
+sql "set pg_strom.enabled = off; alter table pg_3dp add column dist float8, add column distv float8; update pg_3dp set dist = ST_Distance(g, pt), distv = ST_Distance(g, pv)"
+sql "analyze pg_3dp"
+# A float8 in a projection may be computed by the CPU above the scan, so the decisive check is an equality in a qual (always evaluated by the
+# GPU) against the value PostGIS computed when the table was built: any difference in the last bit loses rows (the first model of the
+# segment distance passed every other test here and failed this one).
+run pg_3dp "ST_Distance equals PostGIS' stored value, bit for bit" "select id from %T where ST_Distance(g, pt) = dist"
+run pg_3dp "ST_Distance to a vertex equals the stored value" "select id from %T where ST_Distance(g, pv) = distv"
+run pg_3dp "ST_Distance differs from the stored value by nothing" "select id from %T where ST_Distance(pt, g) <> dist"
+run pg_3dp "ST_Distance(geometry, point column)" "select id, ST_Distance(g, pt) from %T where id % 2 = 0"
+run pg_3dp "ST_Distance(point column, geometry)" "select id, ST_Distance(pt, g) from %T where id % 2 = 1"
+run pg_3dp "ST_Distance(geometry, fused 2-argument point)" "select id, ST_Distance(g, ST_MakePoint(px, py)) from %T where id % 3 = 0"
+run pg_3dp "ST_Distance(geometry, fused 3-argument point) (Z is ignored)" "select id, ST_Distance(g, ST_MakePoint(px, py, pz)) from %T where id % 3 = 1"
+run pg_3dp "ST_Distance to a point that is a vertex of the geometry (on a polygon: re-checked)" "select id, ST_Distance(g, pv) from %T where id % 5 <> 4"
+run pg_3dp "ST_Distance compared" "select id from %T where ST_Distance(g, pt) < 100 or ST_Distance(g, pv) = 0"
+run_any pg_3dp "ST_3DDistance of a point and a non-point (the CPU)" "select id, ST_3DDistance(g, pt) from %T where id % 5 = 0"
+runagg pg_3dp "min and max of ST_Distance to the geometry" "select min(ST_Distance(g, pt)), max(ST_Distance(g, pt)), count(*) filter (where ST_Distance(g, pv) > 0) from %T"
+pushed "ST_Distance (point to geometry)" st_distance "select id from %T where ST_Distance(g, g2) < 100"
 
 # the edge pairs of postgis/dist_probe2.out, many copies of each: empty, NaN, overflow, underflow, -0, the same point, 2D operands, M, ZM
 sql "drop table if exists pg_3dd"
@@ -167,7 +234,10 @@ sql "create table pg_3dd as select (row_number() over ())::int4 as id, a::geomet
 	('SRID=4326;POINT Z (1 2 3)', 'SRID=4326;POINT Z (4 6 8)'), ('POINT Z (1e154 1e154 1e154)', 'POINT Z (-1e154 -1e154 -1e154)'),
 	('POINT Z (1e-170 1e-170 1e-170)', 'POINT Z (-1e-170 -1e-170 -1e-170)'), ('POINT Z (3 4 0)', 'POINT Z (0 0 12)')) v(a, b),
 	generate_series(1, 2500)"
+sql "set pg_strom.enabled = off; alter table pg_3dd add column d3 float8, add column d2 float8; update pg_3dd set d3 = ST_3DDistance(ga, gb), d2 = ST_Distance(ga, gb)"
 sql "analyze pg_3dd"
+run_any pg_3dd "ST_3DDistance equals the stored value over the edge pairs (NULL, NaN, overflow and underflow rows are the CPU's)" "select id from %T where ST_3DDistance(ga, gb) is not distinct from d3 and d3 is not null"
+run_any pg_3dd "ST_Distance equals the stored value over the edge pairs" "select id from %T where ST_Distance(ga, gb) is not distinct from d2 and d2 is not null"
 run_any pg_3dd "ST_3DDistance over the edge pairs" "select id, ST_3DDistance(ga, gb) from %T"
 run_any pg_3dd "ST_Distance over the edge pairs" "select id, ST_Distance(ga, gb) from %T"
 run_any pg_3dd "ST_3DMaxDistance over the edge pairs" "select id, ST_3DMaxDistance(ga, gb) from %T"
@@ -256,13 +326,26 @@ for ec in "select count(*) from pg_3d where ST_3DDWithin(g2, 'POINT Z(1 1 1)'::g
 done
 # the decision band: pairs at the distance r itself and a hair either side (PostGIS' distance is not bit-reproducible)
 sql "drop table if exists pg_3dn"
-sql "create table pg_3dn as select i::int4 as id, x, y, z, qx, qy, qz, sqrt((qx-x)*(qx-x) + (qy-y)*(qy-y) + (qz-z)*(qz-z)) as r from (
+sql "create table pg_3dn as select i::int4 as id, x, y, z, qx, qy, qz, sqrt((qx-x)*(qx-x) + (qy-y)*(qy-y) + (qz-z)*(qz-z)) as r,
+	ST_3DDistance(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz)) as d3, ST_Distance(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz)) as d2 from (
 	select i, (random()*2-1)*10 as x, (random()*2-1)*10 as y, (random()*2-1)*10 as z, (random()*2-1)*10 as qx, (random()*2-1)*10 as qy,
 	       (random()*2-1)*10 as qz from generate_series(1, 50000) i) s"
 sql "analyze pg_3dn"
 for f in "1" "1 - 1e-15" "1 + 1e-15" "1 - 1e-13" "1 + 1e-13" "1 - 1e-9" "1 + 1e-9"; do
 	run pg_3dn "ST_3DDWithin at r * ($f)" "select id from %T where ST_3DDWithin(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz), r * ($f))"
 done
+# the tolerance is PostGIS' own distance of the pair: every row is exactly on the boundary (the GPU decides "distance <= tolerance" exactly
+# when the installed PostGIS does, instead of re-checking a band around it); a few ulps below and above
+D3=d3        # PostGIS' own distance of the pair, computed by the CPU when the table was built (columns d3 and d2)
+D2=d2
+run pg_3dn "ST_3DDistance equals PostGIS' stored value, bit for bit" "select id from %T where ST_3DDistance(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz)) = d3"
+run pg_3dn "ST_Distance equals the stored value" "select id from %T where ST_Distance(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz)) = d2"
+run pg_3dn "ST_3DMaxDistance equals the stored 3D distance" "select id from %T where ST_3DMaxDistance(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz)) = d3"
+for f in "1" "1 - 1.2e-16" "1 + 2.3e-16" "1 - 3.4e-16" "1 + 1.1e-16"; do
+	run pg_3dn "ST_3DDWithin at the stored ST_3DDistance * ($f)" "select id from %T where ST_3DDWithin(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz), $D3 * ($f))"
+	run pg_3dn "ST_DWithin at the stored ST_Distance * ($f)" "select id from %T where ST_DWithin(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz), $D2 * ($f))"
+done
+run pg_3dn "NOT ST_3DDWithin just below the stored distance" "select id from %T where not ST_3DDWithin(ST_MakePoint(x, y, z), ST_MakePoint(qx, qy, qz), $D3 * (1 - 1.2e-16))"
 # exact Pythagorean quadruples: the distance is an integer, tolerance = the distance is true, a hair below is false
 sql "drop table if exists pg_3dq"
 sql "create table pg_3dq as select (row_number() over ())::int4 as id, 0::float8 as x, 0::float8 as y, 0::float8 as z, (d[1] * m)::float8 as qx, (d[2] * m)::float8 as qy,

@@ -2595,6 +2595,9 @@ typedef struct
 #define KERN_EXPRESSION_MAGIC			(0x4b657870)	/* 'K' 'e' 'x' 'p' */
 
 #define KEXP_FLAG__IS_PUSHED_DOWN		0x0001U
+/* ST_DWithin / ST_3DDWithin of two points: the installed PostGIS decides "exact distance <= tolerance" (calibrated by the planner), so the
+ * kernel need not keep a band around the boundary (codegen.c vulkan_geom_dwithin_exact_calibrated) */
+#define KEXP_FLAG__GEOM_EXACT			0x0002U
 
 #define SPECIAL_DEPTH__PREAGG_FINAL		(-2)
 

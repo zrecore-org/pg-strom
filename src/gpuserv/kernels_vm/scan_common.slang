@@ -1606,7 +1606,7 @@ uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg re
 bool f64_nonfinite(uint64_t a) { return (a & F64_MAG) >= F64_INF; }
 
 // the winding number of a ring of n points at off (16 bytes each) around (px, py)
-uint pip_ring(uint src, uint off, uint n, uint64_t px, uint64_t py)
+uint pip_ring(uint src, uint off, uint n, uint64_t px, uint64_t py, uint stride)
 {
     if (n < 4u)
         return PIP_UNSURE;
@@ -1617,8 +1617,8 @@ uint pip_ring(uint src, uint off, uint n, uint64_t px, uint64_t py)
         return PIP_UNSURE;
     for (uint i = 1u; i < n; i++)
     {
-        uint64_t x2 = ld64s(src, off + 16u * i);
-        uint64_t y2 = ld64s(src, off + 16u * i + 8u);
+        uint64_t x2 = ld64s(src, off + stride * i);
+        uint64_t y2 = ld64s(src, off + stride * i + 8u);
         if (f64_nonfinite(x2) || f64_nonfinite(y2))
             return PIP_UNSURE;
         if (f64_eq(y1, y2))
@@ -1685,7 +1685,7 @@ uint pip_polygon(uint src, uint base, uint len, uint pos, uint64_t px, uint64_t 
             return PIP_UNSURE;
         if (res != PIP_UNSURE && (r == 0u || res == PIP_IN))
         {
-            uint rr = pip_ring(src, base + off, n, px, py);
+            uint rr = pip_ring(src, base + off, n, px, py, 16u);
             if (rr == PIP_UNSURE)
                 res = PIP_UNSURE;
             else if (r == 0u)
@@ -1787,8 +1787,8 @@ uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         regs[dst].isnull = 1u;
         return 0u;
     }
-    uint sa = k1;
-    uint sb = k1;
+    uint sa = k1 & 0xfffffu;
+    uint sb = sa;
     uint64_t ax = uint64_t(a.v);
     uint64_t ay = uint64_t(ya.v);
     uint64_t bx = uint64_t(b.v);
@@ -1815,6 +1815,14 @@ uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return SOP_RECHECK_CODE;
         if (((dx | dy) & F64_MAG) == 0ull)
             res = true;                                 // the same point: distance 0 <= tolerance
+        else if ((k1 & SOP_GDW_EXACT) != 0u)
+        {
+            // the installed PostGIS decides "exact distance <= tolerance" (calibrated by the planner): PostGIS' own double, no band
+            uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
+            if (f64_nonfinite(q))
+                return SOP_RECHECK_CODE;
+            res = f64_le(f64_sqrt(q), tol);
+        }
         else
         {
             uint64_t d2 = f64_add(f64_mul(dx, dx), f64_mul(dy, dy));
@@ -1893,6 +1901,236 @@ uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
     return 0u;
 }
 
+// ---- ST_Distance of a point and a line, a polygon or a multi-geometry or collection of those (2D; GEOMDIST), the same as gd_* of cpu_vm.c ----
+// PostGIS (lw_dist2d_*, mode DIST_MIN): the minimum over the members of the distance to the first vertex of every line or ring and to each
+// segment, a segment's being that to the foot of the perpendicular (r = ((p-A).(B-A)) / |B-A|^2 with the fused operations a compiler
+// contracts it to, 0 <= r <= 1) or to the nearer end; a point in a polygon's exterior ring but not in a hole is at distance 0, one in a hole
+// is at the distance to that hole's ring, one outside the exterior ring is at the distance to it. A point near an edge (the winding test
+// cannot tell), non-finite values and anything unusual are the backend's.
+// The type word of a geometry string register, its SRID, dimension count and the offset of the type word; 0 when it is not readable here.
+uint gd_hdr(Reg r, inout uint srid, inout uint nd, inout uint o)
+{
+    uint s = str_src(r);
+    uint b = str_off(r);
+    uint l = str_len(r);
+    if (l < 12u || (ldb_s(s, b) & 0xe0u) != 0u)
+        return 0u;
+    uint gflags = ldb_s(s, b + 3u);
+    if ((gflags & 0x08u) != 0u)
+        return 0u;
+    nd = 2u + (gflags & 1u) + ((gflags >> 1u) & 1u);
+    srid = ((ldb_s(s, b) & 0x1fu) << 16) | (ldb_s(s, b + 1u) << 8) | ldb_s(s, b + 2u);
+    o = 4u;
+    if ((gflags & 0x40u) != 0u && (gflags & 0x10u) != 0u)
+        o += 8u;
+    if ((gflags & 0x04u) != 0u)
+        o += 8u * nd;
+    if (o + 8u > l)
+        return 0u;
+    return ldw_s(s, b + o);
+}
+
+// ST_Distance of the point (px, py) and the geometry in register g (any type but a point); the result in best, found = false: nothing to
+// measure. One loop over the members, with exactly one copy of each heavy step (the containment test of a polygon's rings, the segment
+// projection, the distance): the Slang compiler inlines every call, so a step written once but called from several places multiplies the
+// kernel (the first version of this was 22 MB of SPIR-V per kernel).
+uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool found)
+{
+    uint s = str_src(g);
+    uint b = str_off(g);
+    uint end = b + str_len(g);
+    uint srid = 0u;
+    uint nd = 2u;
+    uint o = 0u;
+    uint gtype = gd_hdr(g, srid, nd, o);
+    if (gtype == 0u || gtype > 7u)
+        return 1u;
+    uint stride = 8u * nd;
+    uint p = b + o;
+    uint rem0 = 1u;                                     // members still to read at the top level
+    uint rem1 = 0u;                                     // members left in a multi-geometry inside a collection
+    if (gtype >= 4u)
+    {
+        rem0 = ldw_s(s, p + 4u);
+        p += 8u;
+        if (rem0 > (end - p) / 8u)
+            return 1u;
+    }
+    for (uint guard = 0u; guard < 65536u; guard++)
+    {
+        if (rem1 > 0u)
+            rem1--;
+        else
+        {
+            if (rem0 == 0u)
+                break;
+            rem0--;
+            if (gtype == 7u)
+            {
+                if (p + 8u > end)
+                    return 1u;
+                uint st = ldw_s(s, p);
+                if (st >= 4u && st <= 6u)
+                {
+                    rem1 = ldw_s(s, p + 4u);
+                    p += 8u;
+                    if (rem1 > (end - p) / 8u)
+                        return 1u;
+                    continue;
+                }
+            }
+        }
+        // the member at p: a point, a line or a polygon; (aoff, an) is the array of points to measure, if any
+        if (p + 8u > end)
+            return 1u;
+        uint t = ldw_s(s, p);
+        uint n = ldw_s(s, p + 4u);
+        uint base = p + 8u;
+        uint aoff = 0u;
+        uint an = 0u;
+        bool measure = false;
+        if (t == 1u)
+        {
+            if (n > 1u || (n == 1u && base + stride > end))
+                return 1u;
+            aoff = base;
+            an = n;
+            measure = (n == 1u);
+            p = base + n * stride;
+        }
+        else if (t == 2u)
+        {
+            if (n > (end - base) / stride)
+                return 1u;
+            aoff = base;
+            an = n;
+            measure = (n > 0u);
+            p = base + n * stride;
+        }
+        else if (t == 3u)
+        {
+            uint data = base + 4u * n + ((n & 1u) != 0u ? 4u : 0u);
+            if (n > (end - base) / 4u || data > end)
+                return 1u;
+            uint q = data;
+            bool decided = false;
+            for (uint r = 0u; r < n; r++)
+            {
+                uint np = ldw_s(s, base + 4u * r);
+                if (np > (end - q) / stride)
+                    return 1u;
+                if (!decided)
+                {
+                    uint rr = pip_ring(s, q, np, px, py, stride);
+                    if (rr == PIP_UNSURE)
+                        return 1u;
+                    // outside the exterior ring: the distance to it; inside a hole: the distance to that hole's ring
+                    if (r == 0u ? (rr == PIP_OUT) : (rr == PIP_IN))
+                    {
+                        aoff = q;
+                        an = np;
+                        measure = true;
+                        decided = true;
+                    }
+                }
+                q += np * stride;
+            }
+            if (n > 0u)
+            {
+                found = true;
+                if (!decided)
+                    best = 0ull;                        // inside the polygon (and in no hole)
+            }
+            p = q;
+        }
+        else
+            return 1u;
+        if (measure)
+        {
+            found = true;
+            uint64_t ax = ld64s(s, aoff);
+            uint64_t ay = ld64s(s, aoff + 8u);
+            for (uint i = 0u; i < an; i++)
+            {
+                uint64_t bx = ax;
+                uint64_t by = ay;
+                if (i > 0u)
+                {
+                    bx = ld64s(s, aoff + i * stride);
+                    by = ld64s(s, aoff + i * stride + 8u);
+                }
+                if (f64_nonfinite(bx) || f64_nonfinite(by))
+                    return 1u;
+                // the distance of this step is scl * sqrt(rad): to a vertex (the first step; a segment's end A or B when the point projects
+                // before or after it): rad = h^2 + v^2, scl = 1; to the inside of a segment A -> B: PostGIS' distance2d_pt_seg,
+                // |s| * sqrt(L2) with s = ((Ay - py) (Bx - Ax) - (Ax - px) (By - Ay)) / L2 and L2 = |B - A|^2 (the fused operations, found
+                // by postgis/seg_probe.c: 0 differences in 89,523 inside rows; the foot-of-the-perpendicular model was wrong in the last bits)
+                uint64_t qx = bx;
+                uint64_t qy = by;
+                uint64_t rad = 0ull;
+                uint64_t scl = 0x3FF0000000000000ull;
+                bool inside = false;
+                if (i > 0u)
+                {
+                    qx = ax;
+                    qy = ay;
+                    if (!(f64_eq(ax, bx) && f64_eq(ay, by)))
+                    {
+                        uint64_t bxa = f64_sub(bx, ax);
+                        uint64_t bya = f64_sub(by, ay);
+                        uint64_t pxa = f64_sub(px, ax);
+                        uint64_t pya = f64_sub(py, ay);
+                        uint64_t num = f64_fma(pxa, bxa, f64_mul(pya, bya));
+                        uint64_t den = f64_fma(bxa, bxa, f64_mul(bya, bya));
+                        if (f64_nonfinite(bxa) || f64_nonfinite(bya) || f64_nonfinite(pxa) || f64_nonfinite(pya) ||
+                            f64_nonfinite(num) || f64_nonfinite(den) || (den & F64_MAG) == 0ull)
+                            return 1u;
+                        // which side of A and B the point projects to is decided by r = num / den; how PostGIS' build fuses num and den is not
+                        // known to the last bit, so a point whose r is within 2^-40 (of the terms' size) of 0 or 1 is the backend's
+                        uint64_t mag = f64_add(f64_mul(pxa, bxa) & F64_MAG, f64_mul(pya, bya) & F64_MAG);
+                        if (f64_le(num & F64_MAG, f64_mul(mag, 0x3D70000000000000ull)) ||
+                            f64_le(f64_sub(num, den) & F64_MAG, f64_mul(f64_add(mag, den), 0x3D70000000000000ull)))
+                            return 1u;
+                        if (f64_gt(num, den))
+                        {
+                            qx = bx;
+                            qy = by;
+                        }
+                        else if (!f64_lt(num, 0ull))
+                        {
+                            uint64_t cross = f64_fma(f64_sub(ay, py), bxa, f64_mul(f64_sub(ax, px), bya) ^ F64_SIGN);
+                            uint64_t sv = f64_div(cross, den);
+                            if (f64_nonfinite(sv))
+                                return 1u;
+                            scl = sv & F64_MAG;
+                            rad = den;
+                            inside = true;
+                        }
+                    }
+                }
+                if (!inside)
+                {
+                    uint64_t h = f64_sub(qx, px);
+                    uint64_t v = f64_sub(qy, py);
+                    rad = f64_sqr_add(h, f64_mul(v, v));
+                    if (f64_nonfinite(h) || f64_nonfinite(v))
+                        return 1u;
+                }
+                if (f64_nonfinite(rad))
+                    return 1u;
+                uint64_t dd = f64_mul(scl, f64_sqrt(rad));
+                if (f64_nonfinite(dd))
+                    return 1u;
+                if (f64_lt(dd, best))
+                    best = dd;
+                ax = bx;
+                ay = by;
+            }
+        }
+    }
+    return (rem0 > 0u || rem1 > 0u) ? 1u : 0u;
+}
+
 // ST_Distance / ST_3DDistance / ST_3DMaxDistance of two points (GEOMDIST), the same as geom_dist() of cpu_vm.c. PostGIS evaluates
 // sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (3D) / sqrt(fma(dx, dx, dy * dy)) (2D); f64_sqr_add is the fused step, so the value is
 // PostGIS' own, bit for bit (postgis/dist_probe.c), not an approximation to be rechecked at a boundary.
@@ -1925,6 +2163,57 @@ uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[V
     bool eb = false;
     bool hza = true;
     bool hzb = true;
+    // a point and something else (a line, a polygon, a multi-geometry, a collection): the 2D distance only
+    {
+        uint hsa = 0u;
+        uint hsb = 0u;
+        uint hna = 0u;
+        uint hnb = 0u;
+        uint hoa = 0u;
+        uint hob = 0u;
+        uint ta = fa ? 1u : gd_hdr(a, hsa, hna, hoa);
+        uint tb = fb ? 1u : gd_hdr(b, hsb, hnb, hob);
+        if (ta == 0u || tb == 0u)
+            return SOP_RECHECK_CODE;
+        if (ta != 1u || tb != 1u)
+        {
+            if (d3 || (ta != 1u && tb != 1u))
+                return SOP_RECHECK_CODE;                // 3D distance of a non-point; two non-points
+            bool pa = (ta == 1u);                       // the point is operand a
+            uint64_t px = pa ? ax : bx;
+            uint64_t py = pa ? ay : by;
+            uint psrid = k1 & 0xfffffu;
+            bool pe = false;
+            uint64_t pz = 0ull;
+            bool phz = true;
+            if (pa ? !fa : !fb)
+            {
+                if (gdw3_load(pa ? a : b, psrid, px, py, pz, phz, pe) != 0u)
+                    return SOP_RECHECK_CODE;
+            }
+            if ((pa ? hsb : hsa) != psrid)
+                return SOP_RECHECK_CODE;                // PostGIS raises "mixed SRID"
+            if (pe)
+            {
+                regs[dst].isnull = 1u;
+                return 0u;
+            }
+            if (f64_nonfinite(px) || f64_nonfinite(py))
+                return SOP_RECHECK_CODE;
+            uint64_t best = 0x7FEFFFFFFFFFFFFFull;
+            bool found = false;
+            if (gd_geom(pa ? b : a, px, py, best, found) != 0u)
+                return SOP_RECHECK_CODE;
+            if (!found)
+            {
+                regs[dst].isnull = 1u;                  // the other geometry is empty
+                return 0u;
+            }
+            regs[dst].isnull = 0u;
+            regs[dst].v = int64_t(best);
+            return 0u;
+        }
+    }
     if (!fa && gdw3_load(a, sa, ax, ay, az, hza, ea) != 0u)
         return SOP_RECHECK_CODE;
     if (!fb && gdw3_load(b, sb, bx, by, bz, hzb, eb) != 0u)
@@ -1958,9 +2247,16 @@ uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[V
     return 0u;
 }
 
-// ST_Length / ST_Length2D / ST_3DLength of a geometry (GEOMLEN), the same as geom_len() of cpu_vm.c. A LINESTRING's length is PostGIS' own
-// double: the segment lengths sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (the Z term for ST_3DLength of a line with Z) added left to right.
-// The header is parsed here (a cached box of any dimension is skipped); a point and a polygon have the length 0.
+// ST_Length / ST_Length2D / ST_3DLength (k0 0 / 1) and ST_Perimeter / ST_Perimeter2D / ST_3DPerimeter (k0 2 / 3) of a geometry (GEOMLEN),
+// the same as geom_len() of cpu_vm.c. PostGIS adds up per geometry: a line's length is the sum of its segment lengths
+// sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (the Z term for the 3D forms of a geometry with Z) added left to right from 0; a polygon's
+// perimeter is the sum of its rings' lengths; a multi-geometry or collection adds up what its members return (each member's own total
+// first, then added to the container's running total), and a member that does not count (a point for both, a line for the perimeter, a
+// polygon for the length) adds nothing. Points, lines, polygons, their multi-geometries and a collection of those are read here; a
+// collection inside a collection, curves and the like go back to the backend. A cached box of any dimension is skipped.
+// One loop over the members (a point, a line or a polygon; the members of a multi-geometry, or of a collection, which may itself hold a
+// multi-geometry), one loop over a member's arrays (a line; a polygon's rings), one segment computation: each heavy step is written, and
+// so inlined, once (the Slang compiler copies a function at every call site).
 uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
@@ -1987,33 +2283,146 @@ uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
         o += 8u * nd;                                   // the cached float box: two floats per dimension
     if (o + 8u > l)
         return SOP_RECHECK_CODE;
-    uint gtype = ldw_s(s, b + o);
-    uint64_t tot = 0ull;
-    if (gtype == 2u)
+    bool per = (k0 >= 2u);
+    bool d3 = ((k0 & 1u) != 0u) && (hz != 0u);
+    uint end = b + l;
+    uint p = b + o;
+    uint gtype = ldw_s(s, p);
+    if (gtype == 0u || gtype > 7u)
+        return SOP_RECHECK_CODE;
+    uint stride = 8u * nd;
+    uint rem0 = 1u;                                     // members still to read at the top level
+    uint rem1 = 0u;                                     // members left in a multi-geometry inside a collection
+    bool inner = false;
+    if (gtype >= 4u)
     {
-        uint npts = ldw_s(s, b + o + 4u);
-        uint base = b + o + 8u;
-        if (npts > (l - o - 8u) / (8u * nd))
-            return SOP_RECHECK_CODE;                    // the points do not fit: malformed
-        bool d3 = (k0 == 1u) && (hz != 0u);
-        for (uint i = 0u; i + 1u < npts; i++)
-        {
-            uint p0 = base + i * 8u * nd;
-            uint p1 = p0 + 8u * nd;
-            uint64_t dx = f64_sub(ld64s(s, p1), ld64s(s, p0));
-            uint64_t dy = f64_sub(ld64s(s, p1 + 8u), ld64s(s, p0 + 8u));
-            uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
-            if (d3)
-                q = f64_sqr_add(f64_sub(ld64s(s, p1 + 16u), ld64s(s, p0 + 16u)), q);
-            if (f64_nonfinite(dx) || f64_nonfinite(dy) || f64_nonfinite(q))
-                return SOP_RECHECK_CODE;                // NaN, Infinity or an overflow: PostGIS' answer is the backend's
-            tot = f64_add(tot, f64_sqrt(q));
-            if (f64_nonfinite(tot))
-                return SOP_RECHECK_CODE;
-        }
+        rem0 = ldw_s(s, p + 4u);
+        p += 8u;
+        if (rem0 > (end - p) / 8u)
+            return SOP_RECHECK_CODE;
     }
-    else if (gtype != 1u && gtype != 3u)
-        return SOP_RECHECK_CODE;                        // multi-lines, collections, curves: the backend
+    uint64_t tot = 0ull;                                // the container's running total
+    uint64_t sub = 0ull;                                // a multi-geometry inside a collection
+    for (uint guard = 0u; guard < 65536u; guard++)
+    {
+        if (inner)
+        {
+            if (rem1 == 0u)
+            {
+                tot = f64_add(tot, sub);                // the inner multi-geometry is done
+                inner = false;
+                if (f64_nonfinite(tot))
+                    return SOP_RECHECK_CODE;
+            }
+            else
+                rem1--;
+        }
+        if (!inner)
+        {
+            if (rem0 == 0u)
+                break;
+            rem0--;
+            if (gtype == 7u)
+            {
+                if (p + 8u > end)
+                    return SOP_RECHECK_CODE;
+                uint st = ldw_s(s, p);
+                if (st >= 4u && st <= 6u)
+                {
+                    rem1 = ldw_s(s, p + 4u);
+                    p += 8u;
+                    if (rem1 > (end - p) / 8u)
+                        return SOP_RECHECK_CODE;
+                    sub = 0ull;
+                    inner = true;
+                    continue;
+                }
+            }
+        }
+        // the member at p; c is what it adds to its container, (aoff, an) the arrays it measures
+        if (p + 8u > end)
+            return SOP_RECHECK_CODE;
+        uint t = ldw_s(s, p);
+        uint n = ldw_s(s, p + 4u);
+        uint base = p + 8u;
+        uint64_t c = 0ull;
+        uint narr = 0u;                                 // arrays to measure: a line has one, a polygon n rings, a point none
+        uint rbase = 0u;                                // where a polygon's ring counts are
+        uint data = 0u;
+        if (t == 1u)
+        {
+            if (n > 1u || (n == 1u && base + stride > end))
+                return SOP_RECHECK_CODE;
+            p = base + n * stride;
+        }
+        else if (t == 2u)
+        {
+            if (n > (end - base) / stride)
+                return SOP_RECHECK_CODE;
+            narr = per ? 0u : 1u;
+            data = base;
+        }
+        else if (t == 3u)
+        {
+            data = base + 4u * n + ((n & 1u) != 0u ? 4u : 0u);
+            if (n > (end - base) / 4u || data > end)
+                return SOP_RECHECK_CODE;
+            narr = per ? n : 0u;
+            rbase = base;
+        }
+        else
+            return SOP_RECHECK_CODE;
+        uint q = data;                                  // the next array (the points of a line are one array of n points)
+        for (uint ar = 0u; ar < narr; ar++)
+        {
+            uint np = (t == 2u) ? n : ldw_s(s, rbase + 4u * ar);
+            if (np > (end - q) / stride)
+                return SOP_RECHECK_CODE;
+            uint64_t asum = 0ull;
+            for (uint i = 0u; i + 1u < np; i++)
+            {
+                uint p0 = q + i * stride;
+                uint p1 = p0 + stride;
+                uint64_t dx = f64_sub(ld64s(s, p1), ld64s(s, p0));
+                uint64_t dy = f64_sub(ld64s(s, p1 + 8u), ld64s(s, p0 + 8u));
+                uint64_t qq = f64_sqr_add(dx, f64_mul(dy, dy));
+                if (d3)
+                    qq = f64_sqr_add(f64_sub(ld64s(s, p1 + 16u), ld64s(s, p0 + 16u)), qq);
+                if (f64_nonfinite(dx) || f64_nonfinite(dy) || f64_nonfinite(qq))
+                    return SOP_RECHECK_CODE;
+                asum = f64_add(asum, f64_sqrt(qq));
+                if (f64_nonfinite(asum))
+                    return SOP_RECHECK_CODE;
+            }
+            c = f64_add(c, asum);                       // a line: 0 + its length; a polygon: its rings added in order
+            q += np * stride;
+        }
+        if (t == 2u)
+            p = base + n * stride;
+        else if (t == 3u)
+        {
+            // past all the rings (also when the perimeter is not measured)
+            uint qe = data;
+            for (uint ar = 0u; ar < n; ar++)
+            {
+                uint np = ldw_s(s, rbase + 4u * ar);
+                if (np > (end - qe) / stride)
+                    return SOP_RECHECK_CODE;
+                qe += np * stride;
+            }
+            p = qe;
+        }
+        if (inner)
+            sub = f64_add(sub, c);
+        else
+            tot = f64_add(tot, c);
+        if (f64_nonfinite(sub) || f64_nonfinite(tot))
+            return SOP_RECHECK_CODE;
+    }
+    if (inner)
+        tot = f64_add(tot, sub);                        // the last member was in an inner multi-geometry
+    if (rem0 > 0u || rem1 > 0u || f64_nonfinite(tot))
+        return SOP_RECHECK_CODE;
     regs[dst].isnull = 0u;
     regs[dst].v = int64_t(tot);
     return 0u;
@@ -2096,6 +2505,13 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
     bool res = false;
     if (((dx | dy | dz) & F64_MAG) == 0ull)
         res = true;                                     // the same point: distance 0 <= tolerance
+    else if ((k1 & SOP_GDW_EXACT) != 0u)
+    {
+        uint64_t q = f64_sqr_add(dz, f64_sqr_add(dx, f64_mul(dy, dy)));
+        if (f64_nonfinite(q))
+            return SOP_RECHECK_CODE;
+        res = f64_le(f64_sqrt(q), tol);                 // PostGIS' own double against the tolerance (calibrated by the planner)
+    }
     else
     {
         uint64_t d2 = f64_add(f64_add(f64_mul(dx, dx), f64_mul(dy, dy)), f64_mul(dz, dz));
@@ -2451,10 +2867,14 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMFLAG)
             return vm_geom_flag(dst, ra, k0, regs);
+#ifndef VM_NO_GEOMDIST
         if (op == SOP_GEOMDIST)
             return vm_geom_dist(dst, ra, rb, k0, k1, regs);
+#endif
+#ifndef VM_NO_GEOMLEN
         if (op == SOP_GEOMLEN)
             return vm_geom_len(dst, ra, k0, regs);
+#endif
 #endif
         if (op == SOP_NULLMRG)
         {
