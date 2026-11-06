@@ -377,6 +377,10 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 	if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU && ctx->timeout_ms < 300000 &&
 		!getenv("PGSTROM_GPUSERV_TIMEOUT_MS"))
 		ctx->timeout_ms = 300000;
+	/* ... and a cold one (no Mesa shader cache) took 11 minutes for a float8 aggregate kernel on a hosted arm64 runner */
+	if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU && ctx->first_timeout_ms < 1800000 &&
+		!getenv("PGSTROM_GPUSERV_TIMEOUT_MS"))
+		ctx->first_timeout_ms = 1800000;
 	if (ctx->first_timeout_ms < ctx->timeout_ms)
 		ctx->first_timeout_ms = ctx->timeout_ms;
 	api = min_u32(props.apiVersion, in.api);
