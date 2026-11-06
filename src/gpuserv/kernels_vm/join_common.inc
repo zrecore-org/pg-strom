@@ -39,13 +39,37 @@ static const uint GIST_CUR_SHIFT = 11u;
 
 bool gf_isnan(uint f) { return (f & 0x7fffffffu) > 0x7f800000u; }
 
+// The float4 one step toward -infinity / +infinity (a finite float4 or an infinity; the caller clamps)
+uint gf_step_down(uint f)
+{
+    if ((f & 0x7fffffffu) >= 0x7f800000u)
+        return f;
+    if ((f & 0x7fffffffu) == 0u)
+        return 0x80000001u;
+    return ((f & 0x80000000u) != 0u) ? f + 1u : f - 1u;
+}
+
+uint gf_step_up(uint f)
+{
+    if ((f & 0x7fffffffu) >= 0x7f800000u)
+        return f;
+    if ((f & 0x7fffffffu) == 0u)
+        return 1u;
+    return ((f & 0x80000000u) != 0u) ? f - 1u : f + 1u;
+}
+
 // The query box of the point (x, y) as geom_box2d() makes it: rounded outward to float4 (clamped to +-FLT_MAX).
+// With a tolerance (slice 3, ST_DWithin / ST_3DDWithin: hasr, rr) the box of the point grown by the tolerance: a superset of
+// every geometry whose distance to the point is <= the tolerance, however PostGIS rounds the distance. The tolerance is
+// widened by 2^-30 of itself (the slack of PostGIS' double arithmetic), the bounds are computed in binary64, rounded
+// outward to float4 and moved one more float4 step. A NULL tolerance matches nothing; a negative, NaN or infinite one
+// (PostGIS raises or gives its own answer: the distance function hands every candidate to the backend) opens the whole plane.
 // Returns 0, or the error code of a non-finite coordinate; nxt[d] is the first cursor, or NO_ITEM for a NULL point.
-uint gist_open(uint dt, uint d, Reg rx, Reg ry, inout uint gq[(JOIN_MAXD + 1) * 4], inout uint nxt[JOIN_MAXD + 1],
+uint gist_open(uint dt, uint d, Reg rx, Reg ry, Reg rr, bool hasr, inout uint gq[(JOIN_MAXD + 1) * 4], inout uint nxt[JOIN_MAXD + 1],
                inout uint gst[JOIN_MAXD + 1])
 {
     gst[d] = 0u;
-    if ((rx.isnull | ry.isnull) != 0u)
+    if ((rx.isnull | ry.isnull) != 0u || (hasr && rr.isnull != 0u))
     {
         nxt[d] = NO_ITEM;
         return 0u;
@@ -54,11 +78,29 @@ uint gist_open(uint dt, uint d, Reg rx, Reg ry, inout uint gq[(JOIN_MAXD + 1) * 
     uint64_t yb = uint64_t(ry.v);
     if ((xb & F64_MAG) >= F64_INF || (yb & F64_MAG) >= F64_INF)
         return SOP_GIST_NONFINITE_CODE;
+    nxt[d] = 1u;                                        // block 0, line pointer 1
+    if (hasr)
+    {
+        uint64_t tb = uint64_t(rr.v);
+        if ((tb & F64_MAG) >= F64_INF || (tb >> 63) != 0ull)
+        {
+            gq[4 * d + 0] = 0xff7fffffu;                // -FLT_MAX
+            gq[4 * d + 1] = 0x7f7fffffu;                // +FLT_MAX
+            gq[4 * d + 2] = 0xff7fffffu;
+            gq[4 * d + 3] = 0x7f7fffffu;
+            return 0u;
+        }
+        tb = f64_mul(tb, 0x3FF0000000400000ull);        // * (1 + 2^-30)
+        gq[4 * d + 0] = gf_clamp(gf_step_down(f64_to_f32(f64_sub(xb, tb), 1u)));
+        gq[4 * d + 1] = gf_clamp(gf_step_up(f64_to_f32(f64_add(xb, tb), 2u)));
+        gq[4 * d + 2] = gf_clamp(gf_step_down(f64_to_f32(f64_sub(yb, tb), 1u)));
+        gq[4 * d + 3] = gf_clamp(gf_step_up(f64_to_f32(f64_add(yb, tb), 2u)));
+        return 0u;
+    }
     gq[4 * d + 0] = gf_clamp(f64_to_f32(xb, 1u));       // xmin
     gq[4 * d + 1] = gf_clamp(f64_to_f32(xb, 2u));       // xmax
     gq[4 * d + 2] = gf_clamp(f64_to_f32(yb, 1u));       // ymin
     gq[4 * d + 3] = gf_clamp(f64_to_f32(yb, 2u));       // ymax
-    nxt[d] = 1u;                                        // block 0, line pointer 1
     return 0u;
 }
 

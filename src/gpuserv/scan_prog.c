@@ -528,8 +528,6 @@ emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
 	int			ra, rb, rya = 0, ryb = 0, rt, dst;
 	uint32_t	flags = 0;
 
-	if (b->no_strings)
-		return fail(b, "a geometry is not supported in a join");
 	if (kexp->nr_args != 3)
 		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 	kmk[0] = geom_fused_point(ka, &srid[0]);
@@ -736,8 +734,6 @@ emit_geom3ddw(builder *b, const kern_expression *kexp, int *next)
 	int			ra, rb, rya = 0, ryb = 0, rza = 0, rzb = 0, rt, dst;
 	uint32_t	flags = 0;
 
-	if (b->no_strings)
-		return fail(b, "a geometry is not supported in a join");
 	if (kexp->nr_args != 3 && kexp->nr_args != 2)		/* 2: st_3dintersects, the tolerance is 0 */
 		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 	kmk[0] = geom_fused_point(ka, &srid[0]);
@@ -1845,20 +1841,24 @@ error:
  */
 
 /*
- * A13: the "keys" of a GiST join depth are the x and y of the outer point (two float8 expressions): no hash value,
- * the two registers; returns the register of x and sets *yreg
+ * A13: the "keys" of a GiST join depth are the x and y of the outer point (two float8 expressions) and, for a
+ * distance qual (slice 3), the tolerance (a third one): no hash value, the registers; returns the register of x and sets
+ * *yreg to the register of y (bits 0..7), the register of the tolerance (bits 8..15) and bit 16 when there is one
  */
 static int
 emit_gist_keys(builder *b, const kern_expression *khash, int *next, int *yreg)
 {
 	const kern_expression *kx = KEXP_FIRST_ARG(khash);
-	const kern_expression *ky;
-	int			rx, ry;
+	const kern_expression *ky, *kr = NULL;
+	int			rx, ry, rr = -1;
 
-	if (khash->nr_args != 2)
+	if (khash->nr_args != 2 && khash->nr_args != 3)
 		return fail(b, "a GiST join needs the x and y of the outer point");
 	ky = KEXP_NEXT_ARG(kx);
-	if (kx->exptype != TypeOpCode__float8 || ky->exptype != TypeOpCode__float8)
+	if (khash->nr_args == 3)
+		kr = KEXP_NEXT_ARG(ky);
+	if (kx->exptype != TypeOpCode__float8 || ky->exptype != TypeOpCode__float8 ||
+		(kr && kr->exptype != TypeOpCode__float8))
 		return fail(b, "the outer point of a GiST join must be two float8 values");
 	rx = expr_to_reg(b, kx, next);
 	if (rx < 0)
@@ -1866,7 +1866,13 @@ emit_gist_keys(builder *b, const kern_expression *khash, int *next, int *yreg)
 	ry = expr_to_reg(b, ky, next);
 	if (ry < 0)
 		return -1;
-	*yreg = ry;
+	if (kr)
+	{
+		rr = expr_to_reg(b, kr, next);
+		if (rr < 0)
+			return -1;
+	}
+	*yreg = ry | (rr >= 0 ? (((uint32_t) rr << 8) | 0x10000U) : 0);
 	return rx;
 }
 

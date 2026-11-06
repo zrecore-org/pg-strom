@@ -196,4 +196,78 @@ gistjoin "after delete and updates (intersects)" "$J2 st_intersects(i.geom, st_m
 sql "vacuum pg_g2z"
 gistjoin "after vacuum" "$J2 st_intersects(i.geom, st_makepoint(o.x, o.y))"
 
+# ---- slice 3: ST_DWithin / ST_3DDWithin through the index ----
+# The index answers "geom && box(point, tolerance)": the walk grows the point's box by the tolerance (a superset: widened for the
+# rounding of PostGIS' distance and by one float4 step), and the join program decides the pair with the exact ST_DWithin. Inner
+# values it cannot decide (a line, a polygon, a point with other SRID/dimensions rules, an empty geometry, a bad tolerance)
+# go back to the backend as poison records.
+echo "GiST spatial join, ST_DWithin (A13 slice 3)"
+sql "drop table if exists pg_g3z; drop table if exists pg_g3p; drop table if exists pg_g3n"
+sql "create table pg_g3z (id int4, geom geometry, a int4)"
+sql "insert into pg_g3z select i,
+	case i % 16
+		when 0 then null
+		when 1 then ST_GeomFromText('POINT EMPTY')
+		when 8 then ST_MakePoint(i % 50, i % 47, (i % 7)::float8)
+		when 9 then ST_MakePointM(i % 50, i % 47, (i % 5)::float8)
+		when 10 then ST_MakePoint(i % 50, i % 47, (i % 7)::float8, (i % 5)::float8)
+		when 11 then ST_MakeLine(ST_MakePoint(i % 50, i % 47), ST_MakePoint(i % 50 + 4, i % 47 + 3))
+		when 12 then ST_MakeEnvelope(i % 50, i % 47, i % 50 + 3, i % 47 + 2)
+		when 13 then ST_MakePoint(i % 50 + 0.1, i % 47 + 0.2)
+		when 14 then ST_MakePoint(i % 50 + 0.30000000000000004, i % 47)
+		else ST_MakePoint(i % 50, i % 47)
+	end, i
+	from generate_series(1, 3200) i"
+sql "insert into pg_g3z values (90001, ST_MakePoint(1e39, 0), 1), (90002, ST_MakePoint(-1e39, 1e39), 2), (90003, ST_MakePoint(1e-300, 1e-300), 3)"
+sql "create index pg_g3z_gist on pg_g3z using gist (geom)"
+sql "create table pg_g3p (id int4, x float8, y float8, r float8)"
+# half-integer points: distances of 0.5, 1, 1.5, 5 (3-4-5) from the grid points; tolerances 0 and exact distances
+sql "insert into pg_g3p select i, (i % 100) / 2.0, (i / 100) / 2.0, (i % 11) / 2.0 from generate_series(0, 4999) i"
+sql "insert into pg_g3p values (-1, null, 1, 1), (-2, 1, null, 1), (-3, 1, 1, null), (-4, 1e39, 0, 1), (-5, 3, 4, 5), (-6, 0.1, 0.1, 0.1), (-7, 0.5, 0.5, 0.70710678118654757)"
+sql "analyze pg_g3z; analyze pg_g3p"
+J3="select o.id, i.id from pg_g3p o join pg_g3z i on"
+gistjoin "ST_DWithin(inner, point, constant)" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+gistjoin "ST_DWithin(point, inner, constant)" "$J3 st_dwithin(st_makepoint(o.x, o.y), i.geom, 1.5)"
+gistjoin "tolerance 0" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 0)"
+gistjoin "tolerance of the outer row" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r)"
+gistjoin "tolerance an expression" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r * 2 + 0.25)"
+gistjoin "boundary: distance equals the tolerance" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 5)"
+gistjoin "with an inner qual" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 2) and i.a % 3 = 0"
+gistjoin "with an outer qual" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 2) and o.id % 5 = 0"
+gistjoin "fused 3-argument point (2D distance)" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y, 2), 1.5)"
+gistjoin "ST_3DDWithin (fused point with Z)" "$J3 st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), 2.5)"
+gistjoin "ST_3DDWithin, the point first" "$J3 st_3ddwithin(st_makepoint(o.x, o.y, (o.id % 5)::float8), i.geom, o.r)"
+gistjoin "ST_3DDWithin, four-argument point" "$J3 st_3ddwithin(i.geom, st_makepoint(o.x, o.y, 1, 2), 2.5)"
+gistjoin "left join" "select o.id, i.id from pg_g3p o left join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)"
+gistjoin "right join" "select o.id, i.id from pg_g3p o right join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)"
+gistjoin "semi join" "select o.id from pg_g3p o where exists (select 1 from pg_g3z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistjoin "anti join" "select o.id from pg_g3p o where not exists (select 1 from pg_g3z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistjoin "count per outer row" "select o.id, count(i.id) from pg_g3p o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) group by o.id"
+fj=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_g3p o full join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)" 2>&1 | tail -1)
+lj=$($PSQL -d scantest -c "$CPU select count(*) from pg_g3p o left join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)" | tail -1)
+rj=$($PSQL -d scantest -c "$CPU select count(*) from pg_g3p o right join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)" | tail -1)
+ij=$($PSQL -d scantest -c "$CPU select count(*) from pg_g3p o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)" | tail -1)
+[ "$fj" = "$((lj + rj - ij))" ]; check "full join: left + right - inner rows ($fj = $lj + $rj - $ij)" $?
+# tolerance that is not an outer expression (the inner row's column) keeps the clause off the index
+plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON explain select o.id, i.id from pg_g3p o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), i.a / 100.0)" 2>&1)
+check "a tolerance of the inner side stays off the GiST join" "$(echo "$plan" | grep -q 'GPU GiST Join'; [ $? -ne 0 ]; echo $?)"
+# one outer row with a tolerance the walk cannot use: NULL, NaN, infinity (PostGIS' own answer through the backend), negative (its error)
+sql "create table pg_g3n (id int4, x float8, y float8, r float8)"
+sql "insert into pg_g3n values (1, 10, 10, null), (2, 10, 10, 'NaN'), (3, 10, 10, 'Infinity')"
+sql "analyze pg_g3n"
+for id in 1 2 3; do
+	gistjoin "tolerance case $id" "select o.id, i.id from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r) where o.id = $id"
+done
+sql "insert into pg_g3n values (4, 10, 10, -1)"
+sql "analyze pg_g3n"
+eg=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select o.id, i.id from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r) where o.id = 4" 2>&1 | grep -i 'tolerance' | head -1)
+ec=$($PSQL -d scantest -c "$CPU select o.id, i.id from pg_g3n o join pg_g3z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r) where o.id = 4" 2>&1 | grep -i 'tolerance' | head -1)
+check "negative tolerance: the same error on both ($eg)" "$([ -n "$eg" ] && [ "$eg" = "$ec" ]; echo $?)"
+# the pairs the kernel hands back: lines, polygons, empty geometries, NULL tolerance rows exist in the data
+nb=$($PSQL -d scantest -c "$CPU select count(*) from pg_g3z where geom is not null and (GeometryType(geom) <> 'POINT' or ST_IsEmpty(geom))" | tail -1)
+check "the data has rows for the CPU path ($nb)" "$([ "${nb:-0}" -gt 0 ]; echo $?)"
+sql "delete from pg_g3z where id % 9 = 0"
+sql "update pg_g3z set geom = ST_Translate(geom, 1, 1) where id % 13 = 3 and geom is not null"
+gistjoin "after delete and updates" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+
 fi

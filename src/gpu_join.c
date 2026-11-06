@@ -2107,9 +2107,17 @@ again:
 			/* GiST-Join */
 			Relation	i_rel = istate->gist_irel;
 			TupleDesc	i_tupdesc = RelationGetDescr(i_rel);
-			BlockNumber	nblocks = RelationGetNumberOfBlocks(i_rel);
+			BlockNumber	nblocks;
 			uint32_t	block_offset;
 			uint32_t	nslots = Max(320, nrooms);
+
+			/*
+			 * The index may grow between the sizing pass and the copy pass (concurrent inserts): the buffer is sized for the
+			 * block count of the first pass, and the copy below notices a longer index and asks for a retry
+			 */
+			if (!h_kmrels)
+				istate->gist_nblocks = RelationGetNumberOfBlocks(i_rel);
+			nblocks = istate->gist_nblocks;
 
 			/* 1st part - inner tuples indexed by ctid */
 			nbytes = (estimate_kern_data_store(tupdesc) +

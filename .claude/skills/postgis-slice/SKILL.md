@@ -36,7 +36,8 @@ ST_3DDistance/ST_3DMaxDistance of two points and ST_Length/ST_Length2D/ST_3DLeng
 `dx*dx + dy*dy + dz*dz` with fma, reproduced by the software `f64_sqr_add`; `postgis/dist_probe*`, `len_probe*`), GiST join on `&&`.
 Also on the GPU: exact multi-part lengths/perimeters, point-to-line/polygon distance, exact ST_DWithin, and the GiST join with ST_Contains/ST_Within/
 ST_Intersects (A13 slice 2: inner geometry string registers in join programs, undecidable rows go back through poison records).
-Still on the CPU: distances of two non-points, ST_DWithin of non-points, GiST join with ST_DWithin (A13 slice 3), GpuPreAgg over a geometry GiST join.
+Also the GiST join with ST_DWithin / ST_3DDWithin (A13 slice 3: the walk grows the point's box by the tolerance; inner non-points go back through poison records).
+Still on the CPU: distances of two non-points, ST_DWithin of non-points, GpuPreAgg over a geometry GiST join, Arrow / GPU-Cache outer sources.
 
 **The guard:** a function whose value must equal PostGIS' bit for bit is only pushed down after `vulkan_geom_*_calibrated` (codegen.c) called the
 installed PostGIS on fixed inputs and got the host formula's bits; a build that computes differently (no floating-point contraction) keeps the
@@ -44,4 +45,8 @@ function on the CPU. Add a calibration like it for every new value-returning fun
 
 Pitfalls: a new geometry opcode must be in `emit()`'s feature classification in `scan_prog.c` (explicit list, not a range: NULLMRG sits
 at 136) and inside the `VM_NO_GEOM` guard of `scan_common.slang`, or the program runs on a lite kernel and fails with "malformed
-program". PostGIS' n-D box code (`&&&`) treats coordinates beyond the float4 range differently from the 2D box: send them to the CPU.
+program". Join programs: a geometry function is only allowed in a join qual when `pgstrom_codegen_join_geom(true)` is set around the check
+(`vulkan_text_func_allowed`, `gpu_join.c`), and the fused `st_makepoint` needs its own exemption there. Code only the join kernel
+has (e.g. the `pz` poison flag in `join_walk.inc`) must be guarded `!defined(SPEC_PROG)`, or `spec_compile_check.sh` fails for the
+specialized join kernels. A row the kernel cannot decide in a join goes out as a poison record (see `hw-acceleration.md`, A13 slice 2).
+PostGIS' n-D box code (`&&&`) treats coordinates beyond the float4 range differently from the 2D box: send them to the CPU.

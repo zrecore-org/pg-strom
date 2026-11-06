@@ -2624,6 +2624,27 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return (IsA(poly, Var) && ((Var *) poly)->varno != context->base_relid &&
 				((Var *) poly)->varlevelsup == 0 && ((Var *) poly)->varattno > 0);
 	}
+	/*
+	 * A13 slice 3: st_dwithin / st_3ddwithin(inner point column, fused point, tolerance) of a GiST-index join: the same rules as the
+	 * point-in-polygon qual; the tolerance is an outer expression (the walk grows the point's box by it)
+	 */
+	if ((fc.cls == SOP_GEOMDWITHIN || (fc.cls == SOP_GEOM3DDW && fc.kind != SOP_G3DDW_INTERSECTS)) &&
+		(context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	{
+		Node	   *col;
+		int			s0, s1;
+
+		if (!codegen_join_geom_ok || list_length(func_args) != 3 || !vulkan_geom_source_ok(context) ||
+			!(fc.cls == SOP_GEOMDWITHIN ? vulkan_geom_dwithin_args_ok(func_args) : vulkan_geom_3ddwithin_args_ok(func_args)))
+			return false;
+		s0 = vulkan_geom_operand_shape(linitial(func_args));
+		s1 = vulkan_geom_operand_shape(lsecond(func_args));
+		if (!((s0 == 1 && s1 == 0) || (s0 == 0 && s1 == 1)))
+			return false;
+		col = (s0 == 1 ? (Node *) lsecond(func_args) : (Node *) linitial(func_args));
+		return (IsA(col, Var) && ((Var *) col)->varno != context->base_relid &&
+				((Var *) col)->varlevelsup == 0 && ((Var *) col)->varattno > 0);
+	}
 	/* the fused st_makepoint(x, y) of such a qual (codegen_geom_mk_ok: its parent allowed it) */
 	if (fc.cls == SOP_GEOMMK && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
 		return (codegen_join_geom_ok && codegen_geom_mk_ok && vulkan_geom_source_ok(context));

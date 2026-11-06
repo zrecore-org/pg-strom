@@ -2859,12 +2859,13 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_geom_pip(dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMDWITHIN)
             return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
+        // A13 slice 3: ST_3DDWithin(inner point, fused point, tolerance) of a GiST join (the only 3D function a join program runs)
+        if (op == SOP_GEOM3DDW)
+            return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
 #endif
 #if !defined(WITH_INNER) && !defined(VM_NO_GEOM)    // the planner keeps these out of join programs; their soft-float code made Metal take minutes
         if (op == SOP_GEOMZM)
             return vm_geom_zm(dst, ra, k0, regs);
-        if (op == SOP_GEOM3DDW)
-            return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMFLAG)
             return vm_geom_flag(dst, ra, k0, regs);
 #ifndef VM_NO_GEOMDIST

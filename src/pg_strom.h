@@ -458,6 +458,7 @@ typedef struct
 	Relation		gist_irel;
 	ExprState	   *gist_clause;
 	AttrNumber		gist_ctid_resno;
+	BlockNumber		gist_nblocks;	/* blocks of the index the buffer was sized for */
 	/*
 	 * CPU fallback (inner-loading)
 	 */

@@ -220,6 +220,80 @@ __gist_match_pip(PlannerInfo *root,
 }
 
 /*
+ * __gist_match_dwithin
+ *
+ * Slice 3: st_dwithin(geom, st_makepoint(x, y), d) or st_3ddwithin of the two in either order, geom being the key of the
+ * index column and d an expression of the outer relation. A geometry within the distance d of the point has a box that
+ * overlaps the point's box grown by d, so the index answers "geom && box(point, d)": the walk grows the box (gist_open)
+ * and the join program runs the original function on the candidates. *p_clause is the plain "geom && point" clause (the
+ * marker of the plan; the box is made by the walk), *p_dist the tolerance.
+ */
+static bool
+__gist_match_dwithin(PlannerInfo *root,
+					 RelOptInfo *outer_rel,
+					 RelOptInfo *inner_rel,
+					 IndexOptInfo *index,
+					 int indexcol,
+					 RestrictInfo *rinfo,
+					 Expr **p_x, Expr **p_y, Expr **p_dist, Expr **p_clause, Oid *p_funcid)
+{
+	FuncExpr   *func;
+	char	   *fname, *extname;
+	Node	   *a0, *a1, *keyarg, *ptarg, *dist;
+	Relids		relids;
+	Oid			opno;
+	Oid			keytype;
+
+	if (rinfo->pseudoconstant || !rinfo->clause || !IsA(rinfo->clause, FuncExpr))
+		return false;
+	func = (FuncExpr *) rinfo->clause;
+	if (list_length(func->args) != 3)
+		return false;
+	extname = get_func_extension_name(func->funcid);
+	if (!extname || strcmp(extname, "postgis") != 0)
+		return false;
+	fname = get_func_name(func->funcid);
+	if (!fname || (strcmp(fname, "st_dwithin") != 0 && strcmp(fname, "st_3ddwithin") != 0))
+		return false;
+	a0 = linitial(func->args);
+	a1 = lsecond(func->args);
+	dist = lthird(func->args);
+	if (match_index_to_operand(a0, indexcol, index))
+	{
+		keyarg = a0;
+		ptarg = a1;
+	}
+	else
+	{
+		keyarg = a1;
+		ptarg = a0;
+	}
+	if (!match_index_to_operand(keyarg, indexcol, index))
+		return false;
+	if (!IsA(keyarg, Var) || ((Var *) keyarg)->varno != inner_rel->relid)
+		return false;
+	if (exprType(dist) != FLOAT8OID)
+		return false;
+	if (!__gist_makepoint_args(ptarg, p_x, p_y, true))
+		return false;
+	relids = pull_varnos(root, (Node *) list_make2(ptarg, dist));
+	if (!bms_is_subset(relids, outer_rel->relids))
+		return false;
+	if (contain_volatile_functions(ptarg) || contain_volatile_functions(dist))
+		return false;
+	keytype = exprType(keyarg);
+	opno = get_opfamily_member(index->opfamily[indexcol], keytype, keytype, RTOverlapStrategyNumber);
+	if (!OidIsValid(opno))
+		return false;
+	*p_clause = make_opclause(opno, BOOLOID, false, (Expr *) keyarg, (Expr *) ptarg,
+							  InvalidOid, exprInputCollation((Node *) func));
+	set_opfuncid((OpExpr *) *p_clause);
+	*p_dist = (Expr *) dist;
+	*p_funcid = func->funcid;
+	return true;
+}
+
+/*
  * pgstromTryFindGistIndex
  *
  * Looks for a GiST index of the inner relation that one of the join clauses can use. On success it sets
@@ -277,10 +351,12 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = lfirst(cell);
 			Expr	   *x, *y, *clause;
+			Expr	   *dist = NULL;
 			Oid			pip_func = InvalidOid;
 
 			if (!__gist_match_clause(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &clause) &&
-				!__gist_match_pip(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &clause, &pip_func))
+				!__gist_match_pip(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &clause, &pip_func) &&
+				!__gist_match_dwithin(root, outer_rel, inner_rel, index, 0, rinfo, &x, &y, &dist, &clause, &pip_func))
 				continue;
 			/*
 			 * slice 2: the function itself runs in the join program (inner geometry, string registers, a row it cannot
@@ -297,7 +373,11 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 				if (!ok)
 					continue;
 			}
-			/* x and y run on the device (in the join program) */
+			/* x, y (and the tolerance) run on the device (in the join program) */
+			if (dist &&
+				!pgstrom_xpu_expression(dist, (xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
+										base_scan_relid, inner_target_list, NULL))
+				continue;
 			if (!pgstrom_xpu_expression(x, (xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
 										base_scan_relid, inner_target_list, NULL) ||
 				!pgstrom_xpu_expression(y, (xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
@@ -332,7 +412,7 @@ pgstromTryFindGistIndex(PlannerInfo *root,
 				gist_ctid_resno = list_length(path_target->exprs);
 				inner_path = (Path *) create_projection_path(root, inner_rel, inner_path, path_target);
 			}
-			pp_inner->hash_outer_keys = list_make2(x, y);
+			pp_inner->hash_outer_keys = dist ? list_make3(x, y, dist) : list_make2(x, y);
 			pp_inner->gist_index_oid = index->indexoid;
 			pp_inner->gist_index_col = 1;
 			pp_inner->gist_ctid_resno = gist_ctid_resno;

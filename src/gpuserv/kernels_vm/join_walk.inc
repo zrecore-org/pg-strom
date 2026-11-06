@@ -84,7 +84,7 @@
 #ifndef SPEC_PROG
                 if (prog[dt + 14] != 0u)
                 {
-                    uint ge = gist_open(dt, 1, regs[prog[dt + 3]], regs[prog[dt + 15]], gq, nxt, gst);
+                    uint ge = gist_open(dt, 1, regs[prog[dt + 3]], regs[prog[dt + 15] & 0xffu], regs[(prog[dt + 15] >> 8) & 0xffu], ((prog[dt + 15] >> 16) & 1u) != 0u, gq, nxt, gst);
                     if (ge != 0u)
                     {
                         report_error(page, lp, ge);
@@ -291,7 +291,7 @@
 #ifndef SPEC_PROG
                             if (prog[dt2 + 14] != 0u)
                             {
-                                uint ge = gist_open(dt2, d, regs[prog[dt2 + 3]], regs[prog[dt2 + 15]], gq, nxt, gst);
+                                uint ge = gist_open(dt2, d, regs[prog[dt2 + 3]], regs[prog[dt2 + 15] & 0xffu], regs[(prog[dt2 + 15] >> 8) & 0xffu], ((prog[dt2 + 15] >> 16) & 1u) != 0u, gq, nxt, gst);
                                 if (ge != 0u)
                                 {
                                     report_error(page, lp, ge);
