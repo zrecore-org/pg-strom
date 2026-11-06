@@ -21,7 +21,7 @@ fail=0
 # exactly one shard, whatever the weights say. SHARD=1/1 (the default) runs everything.
 SHARD=${SHARD:-1/1}
 shard_i=${SHARD%/*}; shard_n=${SHARD#*/}
-SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fuzz:40 gist:30 gpusort:20 recheck:300"
+SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fuzz:40 gist:30 gpusort:20 recheck:650"
 SHARD_MINE=$(echo $SHARD_UNITS | tr ' ' '\n' | sort -t: -k2 -nr | awk -F: -v n="$shard_n" -v me="$shard_i" \
 	'{ b = 1; for (k = 2; k <= n; k++) if (load[k] < load[b]) b = k; load[b] += $2; if (b == me) printf "%s ", $1 }')
 mine() { # does this shard run the unit? (a unit that is not in the list runs on shard 1)
