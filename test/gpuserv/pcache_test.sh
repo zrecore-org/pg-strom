@@ -3,13 +3,13 @@
 # cold (empty directory) and warm (second service start), and the handling of a corrupt, truncated or foreign cache
 # file. Needs the GPU but no cluster; run it through locked_test.sh (one service on the GPU at a time):
 #
-#   sh test/gpuserv/locked_test.sh "$PWD" pcache_test.sh        [KERNELS="gpujoin16 gpujoin16_lite"] [DEV=0]
+#   sh test/gpuserv/locked_test.sh "$PWD" pcache_test.sh        [KERNELS="gpujoin16 gpujoin16_lite gpujoin16_nogeom ..."] [DEV=0]
 #
 # The numbers are printed ("pcache <kernel> create_ms=.."); the OS's own shader cache (Metal) is not cleared, so
 # "cold" is cold for the Vulkan cache only. The checks are about the files, not the speed (a warm run must not be
 # slower than half again the cold run).
 D=$(cd "$(dirname "$0")/../.." && pwd)
-KERNELS=${KERNELS:-gpujoin16 gpujoin16_lite}
+KERNELS=${KERNELS:-gpujoin16 gpujoin16_lite gpujoin16_nogeom}
 DEV=${DEV:-0}
 TESTDATA=${PGSTROM_TEST_DATA:-/Volumes/CrucialX9/Projects/pg-strom/test-data}
 W=${ROOT:-$TESTDATA/pcache_test}
