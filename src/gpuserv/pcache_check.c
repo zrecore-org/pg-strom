@@ -48,7 +48,6 @@ static const struct
 	{"ajagg16_12", kspv_ajagg16_12, &kspv_ajagg16_12_len, 6, 20},
 	{"ajgagg16_4", kspv_ajgagg16_4, &kspv_ajgagg16_4_len, 6, 20},
 	{"ajgagg16_12", kspv_ajgagg16_12, &kspv_ajgagg16_12_len, 6, 20},
-	{"ajgagg16_8", kspv_ajgagg16_8, &kspv_ajgagg16_8_len, 6, 20},
 	{"ajgagg32_12", kspv_ajgagg32_12, &kspv_ajgagg32_12_len, 6, 20},
 };
 

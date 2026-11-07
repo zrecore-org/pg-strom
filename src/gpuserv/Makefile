@@ -31,12 +31,12 @@ CFLAGS  += -std=gnu11
 endif
 
 SLANG_SRCS := $(sort $(wildcard kernels/*.slang))
-AGG_SPV    := $(foreach r,8 16 32,$(foreach a,4 8 12,build/gpuagg$(r)_$(a).spv))
-GAGG_SPV   := $(foreach r,16 32,$(foreach a,4 8 12,build/gagg$(r)_$(a).spv))
+AGG_SPV    := $(foreach r,8 16 32,$(foreach a,4 12,build/gpuagg$(r)_$(a).spv))
+GAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/gagg$(r)_$(a).spv))
 JOIN_SPV   := $(foreach r,8 16 32,build/gpujoin$(r).spv)
 # aggregation over a join: <regs>_<aggregates>
-JAGG_SPV   := $(foreach r,16 32,$(foreach a,4 8 12,build/jagg$(r)_$(a).spv))
-JGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 8 12,build/jgagg$(r)_$(a).spv))
+JAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/jagg$(r)_$(a).spv))
+JGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/jgagg$(r)_$(a).spv))
 SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV)
 # per-kernel extra slangc flags (the memory model kernel must declare the Vulkan memory model)
 SLANGFLAGS_memmodel := -capability vk_mem_model
@@ -46,11 +46,11 @@ LIB_OBJS := gpu_vk.o devcaps.o kernels_spv.o gpuserv_proto.o vm_selftest.o wire.
 ARROW_SPV  := $(foreach r,8 16 32,build/gpuarrow$(r).spv)
 SPV_FILES  += $(ARROW_SPV)
 # Arrow record batches as the outer relation of aggregations and joins (-DARROW_SRC; 16 and 32 registers)
-AAGG_SPV   := $(foreach r,16 32,$(foreach a,4 8 12,build/aagg$(r)_$(a).spv))
-AGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 8 12,build/agagg$(r)_$(a).spv))
+AAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/aagg$(r)_$(a).spv))
+AGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/agagg$(r)_$(a).spv))
 AJOIN_SPV  := $(foreach r,16 32,build/ajoin$(r).spv)
-AJAGG_SPV  := $(foreach r,16 32,$(foreach a,4 8 12,build/ajagg$(r)_$(a).spv))
-AJGAGG_SPV := $(foreach r,16 32,$(foreach a,4 8 12,build/ajgagg$(r)_$(a).spv))
+AJAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/ajagg$(r)_$(a).spv))
+AJGAGG_SPV := $(foreach r,16 32,$(foreach a,4 12,build/ajgagg$(r)_$(a).spv))
 SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 LIB_OBJS   += arrow_exec.o
 # GPU-Cache (A7 part 2)

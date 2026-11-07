@@ -67,6 +67,17 @@ typedef struct scan_engine
 	struct spec_mgr *spec;			/* A6: specialized kernels (specialize.h) */
 } scan_engine;
 
+/*
+ * The aggregation kernels exist for 4 and for 12 aggregate slots: a Metal first-compile of a full kernel costs about
+ * 5 minutes whatever the slot count (measured 2026-11-07), so a third, 8-slot, set only doubled the kernels to warm.
+ * Index 1 of the variant tables is kept (it points to the 12-slot kernel) and is never selected.
+ */
+static inline int
+scan_agg_variant(int nagg)
+{
+	return nagg <= 4 ? 0 : 2;
+}
+
 void	describe_kernel_error(uint32_t err, uint32_t page, uint32_t lp, char *buf, size_t buflen);
 
 /* Arrow_Fdw scans (arrow_exec.c) */

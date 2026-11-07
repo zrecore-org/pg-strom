@@ -1209,23 +1209,23 @@ ensure_agg_pipeline(scan_engine *eng, int variant, int avariant, char *err, size
 {
 	gpu_vk_ctx *vk = eng->vk;
 	static const struct { const unsigned char *spv; const unsigned int *len; } tab[][3] = {
-		{{kspv_gpuagg8_4, &kspv_gpuagg8_4_len}, {kspv_gpuagg8_8, &kspv_gpuagg8_8_len},
+		{{kspv_gpuagg8_4, &kspv_gpuagg8_4_len}, {kspv_gpuagg8_12, &kspv_gpuagg8_12_len},
 		 {kspv_gpuagg8_12, &kspv_gpuagg8_12_len}},
-		{{kspv_gpuagg16_4, &kspv_gpuagg16_4_len}, {kspv_gpuagg16_8, &kspv_gpuagg16_8_len},
+		{{kspv_gpuagg16_4, &kspv_gpuagg16_4_len}, {kspv_gpuagg16_12, &kspv_gpuagg16_12_len},
 		 {kspv_gpuagg16_12, &kspv_gpuagg16_12_len}},
-		{{kspv_gpuagg32_4, &kspv_gpuagg32_4_len}, {kspv_gpuagg32_8, &kspv_gpuagg32_8_len},
+		{{kspv_gpuagg32_4, &kspv_gpuagg32_4_len}, {kspv_gpuagg32_12, &kspv_gpuagg32_12_len},
 		 {kspv_gpuagg32_12, &kspv_gpuagg32_12_len}},
-		{{kspv_gpuagg8_4_lite, &kspv_gpuagg8_4_lite_len}, {kspv_gpuagg8_8_lite, &kspv_gpuagg8_8_lite_len},
+		{{kspv_gpuagg8_4_lite, &kspv_gpuagg8_4_lite_len}, {kspv_gpuagg8_12_lite, &kspv_gpuagg8_12_lite_len},
 		 {kspv_gpuagg8_12_lite, &kspv_gpuagg8_12_lite_len}},
-		{{kspv_gpuagg16_4_lite, &kspv_gpuagg16_4_lite_len}, {kspv_gpuagg16_8_lite, &kspv_gpuagg16_8_lite_len},
+		{{kspv_gpuagg16_4_lite, &kspv_gpuagg16_4_lite_len}, {kspv_gpuagg16_12_lite, &kspv_gpuagg16_12_lite_len},
 		 {kspv_gpuagg16_12_lite, &kspv_gpuagg16_12_lite_len}},
-		{{kspv_gpuagg32_4_lite, &kspv_gpuagg32_4_lite_len}, {kspv_gpuagg32_8_lite, &kspv_gpuagg32_8_lite_len},
+		{{kspv_gpuagg32_4_lite, &kspv_gpuagg32_4_lite_len}, {kspv_gpuagg32_12_lite, &kspv_gpuagg32_12_lite_len},
 		 {kspv_gpuagg32_12_lite, &kspv_gpuagg32_12_lite_len}},
-		{{kspv_gpuagg8_4_nogeom, &kspv_gpuagg8_4_nogeom_len}, {kspv_gpuagg8_8_nogeom, &kspv_gpuagg8_8_nogeom_len},
+		{{kspv_gpuagg8_4_nogeom, &kspv_gpuagg8_4_nogeom_len}, {kspv_gpuagg8_12_nogeom, &kspv_gpuagg8_12_nogeom_len},
 		 {kspv_gpuagg8_12_nogeom, &kspv_gpuagg8_12_nogeom_len}},
-		{{kspv_gpuagg16_4_nogeom, &kspv_gpuagg16_4_nogeom_len}, {kspv_gpuagg16_8_nogeom, &kspv_gpuagg16_8_nogeom_len},
+		{{kspv_gpuagg16_4_nogeom, &kspv_gpuagg16_4_nogeom_len}, {kspv_gpuagg16_12_nogeom, &kspv_gpuagg16_12_nogeom_len},
 		 {kspv_gpuagg16_12_nogeom, &kspv_gpuagg16_12_nogeom_len}},
-		{{kspv_gpuagg32_4_nogeom, &kspv_gpuagg32_4_nogeom_len}, {kspv_gpuagg32_8_nogeom, &kspv_gpuagg32_8_nogeom_len},
+		{{kspv_gpuagg32_4_nogeom, &kspv_gpuagg32_4_nogeom_len}, {kspv_gpuagg32_12_nogeom, &kspv_gpuagg32_12_nogeom_len},
 		 {kspv_gpuagg32_12_nogeom, &kspv_gpuagg32_12_nogeom_len}},
 	};
 	_Static_assert(sizeof(tab) / sizeof(tab[0]) == SCAN_NV3, "tab: one entry per register variant and tier");
@@ -1386,7 +1386,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 		memset(st->fovf, 0, sizeof(st->fovf));
 	}
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2) + 3 * scan_feat_tier(prog->feat);
-	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
+	avariant = scan_agg_variant(nagg);
 	sp = spec_pipe(eng, prog, SPEC_AGG, 4 * (avariant + 1), 0, NULL, NULL, &eng->agg_pipe[variant][avariant]);
 	if ((sp == &eng->agg_pipe[variant][avariant] || spec_check_enabled(eng)) &&
 		ensure_agg_pipeline(eng, variant, avariant, err, errlen) != 0)
@@ -1972,7 +1972,7 @@ agg_state_free(agg_state *st)
 }
 
 /* the capacity of a workgroup's table and the aggregate variant, as compiled into gagg.slang */
-static const int ga_variant_na[3] = {4, 8, 12};
+static const int ga_variant_na[3] = {4, 12, 12};
 static const int ga_variant_cap[3] = {128, 64, 64};
 
 static int
@@ -1980,17 +1980,17 @@ ensure_group_pipeline(scan_engine *eng, int variant, int avariant, char *err, si
 {
 	gpu_vk_ctx *vk = eng->vk;
 	static const struct { const unsigned char *spv; const unsigned int *len; } tab[][3] = {
-		{{kspv_gagg16_4, &kspv_gagg16_4_len}, {kspv_gagg16_8, &kspv_gagg16_8_len},
+		{{kspv_gagg16_4, &kspv_gagg16_4_len}, {kspv_gagg16_12, &kspv_gagg16_12_len},
 		 {kspv_gagg16_12, &kspv_gagg16_12_len}},
-		{{kspv_gagg32_4, &kspv_gagg32_4_len}, {kspv_gagg32_8, &kspv_gagg32_8_len},
+		{{kspv_gagg32_4, &kspv_gagg32_4_len}, {kspv_gagg32_12, &kspv_gagg32_12_len},
 		 {kspv_gagg32_12, &kspv_gagg32_12_len}},
-		{{kspv_gagg16_4_lite, &kspv_gagg16_4_lite_len}, {kspv_gagg16_8_lite, &kspv_gagg16_8_lite_len},
+		{{kspv_gagg16_4_lite, &kspv_gagg16_4_lite_len}, {kspv_gagg16_12_lite, &kspv_gagg16_12_lite_len},
 		 {kspv_gagg16_12_lite, &kspv_gagg16_12_lite_len}},
-		{{kspv_gagg32_4_lite, &kspv_gagg32_4_lite_len}, {kspv_gagg32_8_lite, &kspv_gagg32_8_lite_len},
+		{{kspv_gagg32_4_lite, &kspv_gagg32_4_lite_len}, {kspv_gagg32_12_lite, &kspv_gagg32_12_lite_len},
 		 {kspv_gagg32_12_lite, &kspv_gagg32_12_lite_len}},
-		{{kspv_gagg16_4_nogeom, &kspv_gagg16_4_nogeom_len}, {kspv_gagg16_8_nogeom, &kspv_gagg16_8_nogeom_len},
+		{{kspv_gagg16_4_nogeom, &kspv_gagg16_4_nogeom_len}, {kspv_gagg16_12_nogeom, &kspv_gagg16_12_nogeom_len},
 		 {kspv_gagg16_12_nogeom, &kspv_gagg16_12_nogeom_len}},
-		{{kspv_gagg32_4_nogeom, &kspv_gagg32_4_nogeom_len}, {kspv_gagg32_8_nogeom, &kspv_gagg32_8_nogeom_len},
+		{{kspv_gagg32_4_nogeom, &kspv_gagg32_4_nogeom_len}, {kspv_gagg32_12_nogeom, &kspv_gagg32_12_nogeom_len},
 		 {kspv_gagg32_12_nogeom, &kspv_gagg32_12_nogeom_len}},
 	};
 	_Static_assert(sizeof(tab) / sizeof(tab[0]) == SCAN_NV2, "tab: one entry per register variant and tier");
@@ -2114,7 +2114,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	nagg = prog->nagg;
 	w = prog->words;
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
-	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
+	avariant = scan_agg_variant(nagg);
 	/* the kernel of this task: the specialized one has its own table capacity and aggregate count (spec_shape) */
 	sh.agg_max = ga_variant_na[avariant];
 	sh.ga_c = ga_variant_cap[avariant];
@@ -3292,32 +3292,32 @@ ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int avariant
 {
 	gpu_vk_ctx *vk = eng->vk;
 	static const struct { const unsigned char *spv; const unsigned int *len; } jtab[][3] = {
-		{{kspv_jagg16_4, &kspv_jagg16_4_len}, {kspv_jagg16_8, &kspv_jagg16_8_len},
+		{{kspv_jagg16_4, &kspv_jagg16_4_len}, {kspv_jagg16_12, &kspv_jagg16_12_len},
 		 {kspv_jagg16_12, &kspv_jagg16_12_len}},
-		{{kspv_jagg32_4, &kspv_jagg32_4_len}, {kspv_jagg32_8, &kspv_jagg32_8_len},
+		{{kspv_jagg32_4, &kspv_jagg32_4_len}, {kspv_jagg32_12, &kspv_jagg32_12_len},
 		 {kspv_jagg32_12, &kspv_jagg32_12_len}},
-		{{kspv_jagg16_4_lite, &kspv_jagg16_4_lite_len}, {kspv_jagg16_8_lite, &kspv_jagg16_8_lite_len},
+		{{kspv_jagg16_4_lite, &kspv_jagg16_4_lite_len}, {kspv_jagg16_12_lite, &kspv_jagg16_12_lite_len},
 		 {kspv_jagg16_12_lite, &kspv_jagg16_12_lite_len}},
-		{{kspv_jagg32_4_lite, &kspv_jagg32_4_lite_len}, {kspv_jagg32_8_lite, &kspv_jagg32_8_lite_len},
+		{{kspv_jagg32_4_lite, &kspv_jagg32_4_lite_len}, {kspv_jagg32_12_lite, &kspv_jagg32_12_lite_len},
 		 {kspv_jagg32_12_lite, &kspv_jagg32_12_lite_len}},
-		{{kspv_jagg16_4_nogeom, &kspv_jagg16_4_nogeom_len}, {kspv_jagg16_8_nogeom, &kspv_jagg16_8_nogeom_len},
+		{{kspv_jagg16_4_nogeom, &kspv_jagg16_4_nogeom_len}, {kspv_jagg16_12_nogeom, &kspv_jagg16_12_nogeom_len},
 		 {kspv_jagg16_12_nogeom, &kspv_jagg16_12_nogeom_len}},
-		{{kspv_jagg32_4_nogeom, &kspv_jagg32_4_nogeom_len}, {kspv_jagg32_8_nogeom, &kspv_jagg32_8_nogeom_len},
+		{{kspv_jagg32_4_nogeom, &kspv_jagg32_4_nogeom_len}, {kspv_jagg32_12_nogeom, &kspv_jagg32_12_nogeom_len},
 		 {kspv_jagg32_12_nogeom, &kspv_jagg32_12_nogeom_len}},
 	};
 	_Static_assert(sizeof(jtab) / sizeof(jtab[0]) == SCAN_NV2, "jtab: one entry per register variant and tier");
 	static const struct { const unsigned char *spv; const unsigned int *len; } gtab[][3] = {
-		{{kspv_jgagg16_4, &kspv_jgagg16_4_len}, {kspv_jgagg16_8, &kspv_jgagg16_8_len},
+		{{kspv_jgagg16_4, &kspv_jgagg16_4_len}, {kspv_jgagg16_12, &kspv_jgagg16_12_len},
 		 {kspv_jgagg16_12, &kspv_jgagg16_12_len}},
-		{{kspv_jgagg32_4, &kspv_jgagg32_4_len}, {kspv_jgagg32_8, &kspv_jgagg32_8_len},
+		{{kspv_jgagg32_4, &kspv_jgagg32_4_len}, {kspv_jgagg32_12, &kspv_jgagg32_12_len},
 		 {kspv_jgagg32_12, &kspv_jgagg32_12_len}},
-		{{kspv_jgagg16_4_lite, &kspv_jgagg16_4_lite_len}, {kspv_jgagg16_8_lite, &kspv_jgagg16_8_lite_len},
+		{{kspv_jgagg16_4_lite, &kspv_jgagg16_4_lite_len}, {kspv_jgagg16_12_lite, &kspv_jgagg16_12_lite_len},
 		 {kspv_jgagg16_12_lite, &kspv_jgagg16_12_lite_len}},
-		{{kspv_jgagg32_4_lite, &kspv_jgagg32_4_lite_len}, {kspv_jgagg32_8_lite, &kspv_jgagg32_8_lite_len},
+		{{kspv_jgagg32_4_lite, &kspv_jgagg32_4_lite_len}, {kspv_jgagg32_12_lite, &kspv_jgagg32_12_lite_len},
 		 {kspv_jgagg32_12_lite, &kspv_jgagg32_12_lite_len}},
-		{{kspv_jgagg16_4_nogeom, &kspv_jgagg16_4_nogeom_len}, {kspv_jgagg16_8_nogeom, &kspv_jgagg16_8_nogeom_len},
+		{{kspv_jgagg16_4_nogeom, &kspv_jgagg16_4_nogeom_len}, {kspv_jgagg16_12_nogeom, &kspv_jgagg16_12_nogeom_len},
 		 {kspv_jgagg16_12_nogeom, &kspv_jgagg16_12_nogeom_len}},
-		{{kspv_jgagg32_4_nogeom, &kspv_jgagg32_4_nogeom_len}, {kspv_jgagg32_8_nogeom, &kspv_jgagg32_8_nogeom_len},
+		{{kspv_jgagg32_4_nogeom, &kspv_jgagg32_4_nogeom_len}, {kspv_jgagg32_12_nogeom, &kspv_jgagg32_12_nogeom_len},
 		 {kspv_jgagg32_12_nogeom, &kspv_jgagg32_12_nogeom_len}},
 	};
 	_Static_assert(sizeof(gtab) / sizeof(gtab[0]) == SCAN_NV2, "gtab: one entry per register variant and tier");
@@ -3460,7 +3460,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		memset(st->fovf, 0, sizeof(st->fovf));
 	}
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
-	avariant = (nagg <= 4 ? 0 : nagg <= 8 ? 1 : 2);
+	avariant = scan_agg_variant(nagg);
 	vmpipe = (grouped ? &eng->jgagg_pipe[variant][avariant] : &eng->jagg_pipe[variant][avariant]);
 	sh.agg_max = ga_variant_na[avariant];
 	sh.ga_c = ga_variant_cap[avariant];
