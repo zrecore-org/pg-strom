@@ -87,10 +87,40 @@ main(int argc, char **argv)
 		gpu_vk_pipeline p;
 		double		t0, t1, t2 = 0;
 
-		for (i = 0; i < sizeof(ktab) / sizeof(ktab[0]); i++)
-			if (!strcmp(ktab[i].name, name))
-				break;
-		if (i == sizeof(ktab) / sizeof(ktab[0]))
+		const unsigned char *fspv = NULL;
+		unsigned int flen = 0;
+
+		if (name[0] == '@')
+		{
+			/* a SPIR-V file (built by hand with slangc, six bindings and 20 bytes of constants like the join kernels) */
+			FILE	   *f = fopen(name + 1, "rb");
+			long		sz;
+
+			if (!f || fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) <= 0 || fseek(f, 0, SEEK_SET) != 0)
+			{
+				printf("pcache: cannot read %s\n", name + 1);
+				rc = 1;
+				continue;
+			}
+			fspv = malloc(sz);
+			if (!fspv || fread((void *) fspv, 1, sz, f) != (size_t) sz)
+			{
+				printf("pcache: cannot read %s\n", name + 1);
+				rc = 1;
+				fclose(f);
+				continue;
+			}
+			fclose(f);
+			flen = (unsigned int) sz;
+			i = 0;
+		}
+		else
+		{
+			for (i = 0; i < sizeof(ktab) / sizeof(ktab[0]); i++)
+				if (!strcmp(ktab[i].name, name))
+					break;
+		}
+		if (!fspv && i == sizeof(ktab) / sizeof(ktab[0]))
 		{
 			printf("pcache: unknown kernel %s\n", name);
 			rc = 1;
@@ -98,7 +128,8 @@ main(int argc, char **argv)
 		}
 		memset(&p, 0, sizeof(p));
 		t0 = now_ms();
-		if (gpu_vk_pipeline_create(&vk, &p, ktab[i].spv, *ktab[i].len, ktab[i].nbind, ktab[i].pc) != 0)
+		if (gpu_vk_pipeline_create(&vk, &p, fspv ? fspv : ktab[i].spv, fspv ? flen : *ktab[i].len,
+								   fspv ? 6 : ktab[i].nbind, fspv ? 20 : ktab[i].pc) != 0)
 		{
 			printf("pcache: %s rejected: %s\n", name, vk.err);
 			rc = 1;
