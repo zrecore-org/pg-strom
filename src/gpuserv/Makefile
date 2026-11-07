@@ -56,9 +56,11 @@ LIB_OBJS   += arrow_exec.o
 # GPU-Cache (A7 part 2)
 LIB_OBJS   += gcache.o
 # GPU-Sort (A7): the bitonic sort kernel and the host side
-# the lite variant of every VM kernel
-SPV_LITE   := $(patsubst build/%.spv,build/%_lite.spv,build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV))
-SPV_FILES  += $(SPV_LITE)
+# the lite and nogeom variants of every VM kernel (see LITE_FLAGS / NOGEOM_FLAGS)
+SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
+SPV_LITE   := $(patsubst build/%.spv,build/%_lite.spv,$(SPV_VMBASE))
+SPV_NOGEOM := $(patsubst build/%.spv,build/%_nogeom.spv,$(SPV_VMBASE))
+SPV_FILES  += $(SPV_LITE) $(SPV_NOGEOM)
 SPV_FILES  += build/gsort.spv
 LIB_OBJS   += gpusort.o gpu_vk_seq.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
@@ -100,12 +102,15 @@ build/vm_main.spv: kernels_vm/vm.slang kernels_vm/common.slang kernels_vm/common
 	$(SLANGC) kernels_vm/vm.slang -I gen -I kernels_vm -I .. -target spirv -entry vm_main -stage compute -o $@
 
 SCAN_SLANGFLAGS ?=
-# Every kernel also exists as <name>_lite: the same source without the optional instruction groups (numeric, jsonb, float8,
-# geometry; kernels_vm/scan_common.slang, -DVM_NO_*). A program that uses none of them (scan_prog.feat == 0) runs on those.
-# They are a fourth to a tenth of the size, and Metal needs minutes to compile the full ones (the join kernel is 6.5 MB of
-# SPIR-V), once after every change of the sources. The stem of the rules carries the suffix: $(LITE_OF) adds the flags.
+# Every kernel exists in three tiers (scan_caps.h: SCAN_TIER_*, picked by scan_prog.feat): the full one, <name>_lite without the
+# optional instruction groups (numeric, jsonb, float8, geometry; kernels_vm/scan_common.slang, -DVM_NO_*) for a program that uses
+# none of them (feat == 0), and <name>_nogeom (-DVM_NO_GEOM only) for a program that uses numeric, jsonb or float8 but no
+# geometry. The lite ones are a fourth to a tenth of the size and Metal needs minutes to compile the full ones (the join kernel is
+# 9.6 MB of SPIR-V, 2.98 MB without geometry, whose soft-float code is most of it), once after every change of the sources.
+# The stem of the rules carries the suffix: $(LITE_OF) adds the flags.
 LITE_FLAGS := -DVM_NO_NUM -DVM_NO_JSON -DVM_NO_F8 -DVM_NO_GEOM
-LITE_OF = $(if $(findstring _lite,$*),$(LITE_FLAGS))
+NOGEOM_FLAGS := -DVM_NO_GEOM
+LITE_OF = $(if $(findstring _lite,$*),$(LITE_FLAGS),$(if $(findstring _nogeom,$*),$(NOGEOM_FLAGS)))
 # the GpuScan kernel (heap pages -> VM -> matches); its instruction numbers are shared with scan_prog.c
 # one variant per register-file size: the register count dominates the kernel's speed
 build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
@@ -165,6 +170,13 @@ spec_check.o: spec_check.c specialize.h scan_prog.h scan_caps.h ../xpu_common.h
 
 spec_check: spec_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ spec_check.o libgpuserv.a $(VK_LIBS) -lpthread
+
+# offline check of the kernel tier selection (every GEOM* opcode sets SCAN_FEAT_GEOM; no kernels needed)
+feat_check.o: feat_check.c scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h
+	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -MMD -MP -c -o $@ $<
+
+feat_check: feat_check.o scan_caps.o
+	$(CC) $(CFLAGS) -o $@ feat_check.o scan_caps.o
 
 # self-check of GPU-Sort against the CPU sort and naive window-rank (not part of "all")
 gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
@@ -275,6 +287,6 @@ check: gpuserv-probe proto_check
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check f64soft_check pcache_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check feat_check f64soft_check pcache_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
 
 .PHONY: all check clean

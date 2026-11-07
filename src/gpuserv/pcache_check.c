@@ -4,7 +4,8 @@
  * Time to create the interpreter pipelines of the service (the Metal first-compile cost) with the persisted
  * pipeline cache (gpu_vk.c, pcache_open): make -C src/gpuserv pcache_check &&
  * src/gpuserv/pcache_check [device index [kernel ...]]; test/gpuserv/pcache_test.sh runs it cold and warm.
- * Kernels: gpujoin16, gpujoin16_lite, gpujoin32, gpujoin32_lite, gpuscan16, gpuscan16_lite, ajoin16[_lite], ajagg16_{4,12}, ajgagg16_{4,12} (default: the first two).
+ * Kernels: gpujoin16, gpujoin16_lite, gpujoin16_nogeom, gpujoin32 (and _lite, _nogeom), gpuscan16, gpuscan16_lite
+ * Arrow kernels: ajoin16[_lite], ajagg16_{4,12}, ajgagg16_{4,12} (default: gpujoin16, gpujoin16_lite).
  * Each pipeline is created and given an empty dispatch (0 workgroups, which makes the driver finish its lazy
  * compile); one line "pcache <kernel> create_ms=<n> dispatch_ms=<n>" per kernel.
  */
@@ -35,8 +36,11 @@ static const struct
 	{"gpujoin16_lite", kspv_gpujoin16_lite, &kspv_gpujoin16_lite_len, 6, 20},
 	{"gpujoin32", kspv_gpujoin32, &kspv_gpujoin32_len, 6, 20},
 	{"gpujoin32_lite", kspv_gpujoin32_lite, &kspv_gpujoin32_lite_len, 6, 20},
+	{"gpujoin16_nogeom", kspv_gpujoin16_nogeom, &kspv_gpujoin16_nogeom_len, 6, 20},
+	{"gpujoin32_nogeom", kspv_gpujoin32_nogeom, &kspv_gpujoin32_nogeom_len, 6, 20},
 	{"gpuscan16", kspv_gpuscan16, &kspv_gpuscan16_len, 5, 16},
 	{"gpuscan16_lite", kspv_gpuscan16_lite, &kspv_gpuscan16_lite_len, 5, 16},
+	{"gpuscan16_nogeom", kspv_gpuscan16_nogeom, &kspv_gpuscan16_nogeom_len, 5, 16},
 	/* the Arrow record-batch kernels (arrow_exec.c): join, aggregation over a join, GROUP BY over a join */
 	{"ajoin16", kspv_ajoin16, &kspv_ajoin16_len, 6, 20},
 	{"ajoin16_lite", kspv_ajoin16_lite, &kspv_ajoin16_lite_len, 6, 20},

@@ -26,33 +26,42 @@ typedef struct scan_map_entry
 	uint64_t		last_used;
 } scan_map_entry;
 
+/*
+ * The VM kernel pipelines, created on first use. Every kernel family exists in SCAN_NTIERS tiers (scan_caps.h: full, lite,
+ * nogeom), and the first index of an array is (register variant) + (register variants) * tier, with tier = scan_feat_tier(
+ * prog->feat); NV3 is the count of the families with register files of 8/16/32, NV2 that of 16/32. Each pipeline array has a
+ * "ready" twin of the same shape: scan_pipes_destroy() checks that at compile time.
+ */
+#define SCAN_NV3	(3 * SCAN_NTIERS)
+#define SCAN_NV2	(2 * SCAN_NTIERS)
+
 typedef struct scan_engine
 {
 	scan_map_entry	maps[SCAN_MAP_CACHE];
 	uint64_t		map_clock;
 	gpu_vk_ctx	   *vk;
-	gpu_vk_pipeline	pipe[6];			/* kernel variants with 8, 16 and 32 registers, then the lite kernels (no numeric, jsonb, float8, geometry) */
-	int				pipe_ready[6];
-	gpu_vk_pipeline	agg_pipe[6][3];		/* the aggregation kernel: [registers 8/16/32, then lite][aggregates 4/8/12] */
-	int				agg_pipe_ready[6][3];
-	gpu_vk_pipeline	join_pipe[6];			/* the join kernel: registers 8/16/32, then the lite kernels (no optional instruction groups) */
-	int				join_pipe_ready[6];
-	gpu_vk_pipeline	gagg_pipe[4][3];		/* GROUP BY: [registers 16/32, then lite][aggregates 4/8/12] */
-	int				gagg_pipe_ready[4][3];
-	gpu_vk_pipeline	jagg_pipe[4][3];		/* aggregation over a join: [registers 16/32, then lite][aggregates 4/8/12] */
-	int				jagg_pipe_ready[4][3];
-	gpu_vk_pipeline	jgagg_pipe[4][3];		/* GROUP BY over a join: the same */
-	int				jgagg_pipe_ready[4][3];
-	gpu_vk_pipeline	arrow_pipe[6];			/* the Arrow scan kernel: registers 8/16/32, then lite */
-	int				arrow_pipe_ready[6];
+	gpu_vk_pipeline	pipe[SCAN_NV3];			/* the scan kernel: [registers 8/16/32 + 3 * tier] */
+	int				pipe_ready[SCAN_NV3];
+	gpu_vk_pipeline	agg_pipe[SCAN_NV3][3];	/* the aggregation kernel: [registers 8/16/32 + 3 * tier][aggregates 4/8/12] */
+	int				agg_pipe_ready[SCAN_NV3][3];
+	gpu_vk_pipeline	join_pipe[SCAN_NV3];	/* the join kernel: [registers 8/16/32 + 3 * tier] */
+	int				join_pipe_ready[SCAN_NV3];
+	gpu_vk_pipeline	gagg_pipe[SCAN_NV2][3];	/* GROUP BY: [registers 16/32 + 2 * tier][aggregates 4/8/12] */
+	int				gagg_pipe_ready[SCAN_NV2][3];
+	gpu_vk_pipeline	jagg_pipe[SCAN_NV2][3];	/* aggregation over a join: the same */
+	int				jagg_pipe_ready[SCAN_NV2][3];
+	gpu_vk_pipeline	jgagg_pipe[SCAN_NV2][3];	/* GROUP BY over a join: the same */
+	int				jgagg_pipe_ready[SCAN_NV2][3];
+	gpu_vk_pipeline	arrow_pipe[SCAN_NV3];	/* the Arrow scan kernel: [registers 8/16/32 + 3 * tier] */
+	int				arrow_pipe_ready[SCAN_NV3];
 	gpu_vk_pipeline	sort_pipe;				/* GPU-Sort (gpusort.c) */
 	int				sort_pipe_ready;
 
-	/* Arrow record batches as the outer relation (registers 16/32; aggregates 4/8/12) */
-	gpu_vk_pipeline	aagg_pipe[4][3], agagg_pipe[4][3], ajagg_pipe[4][3], ajgagg_pipe[4][3];
-	int				aagg_ready[4][3], agagg_ready[4][3], ajagg_ready[4][3], ajgagg_ready[4][3];
-	gpu_vk_pipeline	ajoin_pipe[4];			/* registers 16/32, then the lite kernels */
-	int				ajoin_ready[4];
+	/* Arrow record batches as the outer relation (registers 16/32 + 2 * tier; aggregates 4/8/12) */
+	gpu_vk_pipeline	aagg_pipe[SCAN_NV2][3], agagg_pipe[SCAN_NV2][3], ajagg_pipe[SCAN_NV2][3], ajgagg_pipe[SCAN_NV2][3];
+	int				aagg_ready[SCAN_NV2][3], agagg_ready[SCAN_NV2][3], ajagg_ready[SCAN_NV2][3], ajgagg_ready[SCAN_NV2][3];
+	gpu_vk_pipeline	ajoin_pipe[SCAN_NV2];	/* registers 16/32 + 2 * tier */
+	int				ajoin_ready[SCAN_NV2];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 	struct spec_mgr *spec;			/* A6: specialized kernels (specialize.h) */
@@ -185,5 +194,15 @@ XpuCommand *scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *sessio
 int		scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 									 join_inner *ji, agg_state *st, const XpuCommand *task,
 									 char *err, size_t errlen);
+
+/* destroy the created pipelines of an array and its "ready" twin (any shape); both must have the same number of elements */
+void	scan_pipes_destroy(gpu_vk_ctx *vk, gpu_vk_pipeline *pipes, int *ready, size_t npipes);
+#define SCAN_PIPES_DESTROY(eng, pipes, ready) \
+	do { \
+		_Static_assert(sizeof((eng)->pipes) / sizeof(gpu_vk_pipeline) == sizeof((eng)->ready) / sizeof(int), \
+					   #pipes " and " #ready " differ in size"); \
+		scan_pipes_destroy((eng)->vk, (gpu_vk_pipeline *)(eng)->pipes, (int *)(eng)->ready, \
+						   sizeof((eng)->ready) / sizeof(int)); \
+	} while (0)
 
 #endif	/* GPUSERV_SCAN_EXEC_H */

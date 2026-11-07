@@ -6,8 +6,8 @@
 # minutes; the result lands in the pipeline cache file of the service, src/gpuserv/gpu_vk.c, which every later service
 # start reuses).
 #
-# The kernels checked are the ones the tests use most (the smallest register file of each family, 4 aggregates, full
-# and lite). Their checksums are kept in <cache dir>/prewarm.sums; the first run only records them. A kernel whose
+# The kernels checked are the ones the tests use most (the smallest register file of each family, 4 aggregates, full,
+# lite and nogeom). Their checksums are kept in <cache dir>/prewarm.sums; the first run only records them. A kernel whose
 # checksum is unchanged is not touched, so an edit of one .slang file costs the compile of the kernels it changed.
 #   PREWARM=off        skip this step
 #   PREWARM=all        also the other register/aggregate variants (can take an hour after an edit of scan_common.slang)
@@ -34,7 +34,7 @@ if [ "${PREWARM:-default}" = all ]; then
 else
 	LIST=
 	for k in gpuscan8 gpuagg8_4 gagg16_4 gpujoin8 jagg16_4 jgagg16_4 gpuarrow8 aagg16_4 agagg16_4 ajoin16 ajagg16_4 ajgagg16_4; do
-		LIST="$LIST $k ${k}_lite"
+		LIST="$LIST $k ${k}_lite ${k}_nogeom"
 	done
 fi
 geom() {	# nbind and push constant bytes by kernel family (scan_exec.c, arrow_exec.c)
