@@ -127,8 +127,10 @@ main(int argc, char **argv)
 		}
 		memset(&p, 0, sizeof(p));
 		t0 = now_ms();
-		if (gpu_vk_pipeline_create(&vk, &p, fspv ? fspv : ktab[i].spv, fspv ? flen : *ktab[i].len,
-								   fspv ? 6 : ktab[i].nbind, fspv ? 20 : ktab[i].pc) != 0)
+		if ((getenv("PCACHE_SPEC") ? gpu_vk_pipeline_create_spec(&vk, &p, fspv ? fspv : ktab[i].spv, fspv ? flen : *ktab[i].len,
+									  fspv ? 6 : ktab[i].nbind, fspv ? 20 : ktab[i].pc, vk.err, sizeof(vk.err))
+			 : gpu_vk_pipeline_create(&vk, &p, fspv ? fspv : ktab[i].spv, fspv ? flen : *ktab[i].len,
+									  fspv ? 6 : ktab[i].nbind, fspv ? 20 : ktab[i].pc)) != 0)
 		{
 			printf("pcache: %s rejected: %s\n", name, vk.err);
 			rc = 1;

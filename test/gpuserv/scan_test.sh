@@ -65,6 +65,7 @@ sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 # directory of its own keeps the test from using (or filling) the user's; the log shows what the specializer did
 export PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check}
 export PGSTROM_GPUSERV_CACHE_DIR=${PGSTROM_GPUSERV_CACHE_DIR:-$ROOT/speccache}
+export PGSTROM_GPUSERV_PIPELINE_CACHE_DIR=${PGSTROM_GPUSERV_PIPELINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pgstrom}   # the persisted pipeline cache is shared with prewarm_kernels.sh, not per test
 export PGSTROM_GPUSERV_SPEC_LOG=1
 export PGSTROM_GPUSERV_SORT=gpu		# GPU-Sort tests: the service sorts on the device whatever the row count
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
