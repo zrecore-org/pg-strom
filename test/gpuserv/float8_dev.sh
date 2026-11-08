@@ -21,6 +21,10 @@ check() { # name rc
 sql() { $PSQL -d scantest -c "$1"; }
 
 stop() { $PGBIN/pg_ctl -D "$ROOT/data" -m fast -w stop >/dev/null 2>&1; }
+# the installed module is shared and others have overwritten it during a long prewarm: put this tree's back if it differs
+SRCDIR=$(cd "${0%/*}/../../src" && pwd)
+PKGLIB=$($PGBIN/pg_config --pkglibdir)
+cmp -s "$SRCDIR/pg_strom.dylib" "$PKGLIB/pg_strom.dylib" || { echo "float8_dev: re-installing this tree's module"; cp "$SRCDIR/pg_strom.dylib" "$PKGLIB/pg_strom.dylib"; }
 stop
 rm -rf "$ROOT"; mkdir -p "$ROOT"
 $PGBIN/initdb -D "$ROOT/data" -U postgres >/dev/null 2>&1 || { echo "initdb failed"; exit 1; }
