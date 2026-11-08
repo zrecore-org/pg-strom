@@ -1460,6 +1460,32 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 			compatible = false;
 			fallback_proj = lappend(fallback_proj, state);
 		}
+		else if (tle->resorigtbl == (Oid)UINT_MAX)
+		{
+			/*
+			 * A computed value that is not returned (resjunk): the planner replaced the expression by a
+			 * reference to this entry wherever it appears in the quals and in the aggregate arguments, so the
+			 * CPU has to compute it as well, or the replay evaluates those quals against NULL (A14:
+			 * count(ST_Area(g)) where ST_Area(g) < x lost the rows the GPU had handed back).  An expression
+			 * that cannot be mapped to the loaded columns stays NULL.
+			 */
+			MemoryContext oldcxt = CurrentMemoryContext;
+
+			PG_TRY();
+			{
+				state = __execInitCpuFallbackExpr(tle->expr, pts);
+			}
+			PG_CATCH();
+			{
+				MemoryContextSwitchTo(oldcxt);
+				FlushErrorState();
+				state = NULL;
+			}
+			PG_END_TRY();
+			fallback_proj = lappend(fallback_proj, state);
+			if (state)
+				compatible = false;
+		}
 		else
 		{
 			fallback_proj = lappend(fallback_proj, NULL);
