@@ -19,29 +19,32 @@
 // A row is flagged 2 if the backend must evaluate it (a string or numeric the kernel cannot read, as in gagg.slang).
 //
 // Table buffer (gtab): header { 0: slots claimed, 1: rows that qualified, 2: slot mask, 3: words per slot }, from word 8
-// the slots, each { tag, null mask, k0 lo, k0 hi, k1 lo, k1 hi, accumulators of the aggregates in order }.
+// the slots, each { tag, null mask, (lo, hi) of each of the GA_NK = 4 keys (unused keys 0), accumulators of the aggregates in order }.
 //   count:   { n }
 //   sum:     { n, Lpos, Cpos, Lneg, Cneg, nbig, Lxl, Cxl, Lxh, Cxh }   v in [0, 2^32): Lpos += v;  v in (-2^32, 0): Lneg += -v;
 //            other v: x = v + 2^63 (unsigned), Lxl += low word of x, Lxh += high word, nbig++. L is a 32-bit sum and C counts
 //            its wraps (a wrap is seen by the add that causes it: the add returns the old value), so the total of a pair is
 //            L + C * 2^32. sum = (Pos) - (Neg) + (Lxl + 2^32 Lxh - nbig * 2^63).
 //   min/max: { flag, ~b (min) or b (max) } with b = value + 2^31 as unsigned (values outside 32 bits overflow to the CPU)
-// Flags (as gagg.slang): outb[4 + total_lps ...] one word per line pointer, 0 done, 1 CPU, 2 backend, 4 insert.
+// Flags (as gagg.slang): outb[flags_base + ...] one word per line pointer (ARROW_SRC: one per row of the pass, at page * AR_VP + lp),
+// 0 done, 1 CPU, 2 backend, 4 insert. ARROW_SRC has no heap tuple to aggregate on the CPU, so a mode 3 dispatch writes
+// the rows flagged 1 (staged key and argument values) to an overflow list { count, records of OV_REC words } at kparam.total_lps - ...:
+// its position is outb[ovf_base] with ovf_base = kparam.extra (mode 3 only; the flags start at 4).
 // Program header as gagg.slang: [10] aggregates, [11] aggregate table, [12] keys, [13] key registers.
 #define GTAB 1
 #include "scan_common.slang"
-
 #ifdef ARROW_SRC
-#error "gtab.slang: the heap source only"
+#include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
 #endif
 
 #ifndef GA_NA
 #define GA_NA 12
 #endif
-#define GA_NK 2
+#define GA_NK 4
 #define GT_MAXPROBE 64
 #define GT_HDR 8
-#define GT_KEYW 6
+#define GT_KEYW (2 + 2 * GA_NK)
+#define OV_REC (1 + 2 * GA_NK + 3 * GA_NA)
 
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint> gtab;
 
@@ -60,11 +63,16 @@ groupshared int64_t st_key[SCAN_WG * GA_NK];
 groupshared uint    st_ok[SCAN_WG * GA_NA];
 groupshared int64_t st_val[SCAN_WG * GA_NA];
 
-uint hash_keys(int64_t k0, int64_t k1, uint kn)
+uint hash_key_words(int64_t k, uint bit, uint kn, uint h)
+{
+    return (h ^ (uint(k) ^ (uint(k >> 32) * 0x9e3779b1u) ^ (((kn >> bit) & 1u) * 0x85ebca6bu))) * 0x01000193u;
+}
+
+uint hash_keys(int64_t k[GA_NK], uint kn)
 {
     uint h = 0x811c9dc5u;
-    h = (h ^ (uint(k0) ^ (uint(k0 >> 32) * 0x9e3779b1u) ^ ((kn & 1u) * 0x85ebca6bu))) * 0x01000193u;
-    h = (h ^ (uint(k1) ^ (uint(k1 >> 32) * 0x9e3779b1u) ^ ((kn & 2u) * 0x85ebca6bu))) * 0x01000193u;
+    for (uint i = 0; i < GA_NK; i++)
+        h = hash_key_words(k[i], i, kn, h);
     h ^= h >> 15;
     h *= 0x2c1b3c6du;
     h ^= h >> 12;
@@ -99,25 +107,33 @@ void add_wrap(uint i, uint c, uint x)
 }
 
 // the first word of the slot of a key, NO_SLOT if the table has no such slot (yet)
-uint gt_find(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride)
+uint gt_find(uint tag, uint kn, uint tid, uint mask, uint stride, uint nkeys)
 {
     uint s = tag & mask;
-    uint k0l = uint(k0), k0h = uint(uint64_t(k0) >> 32), k1l = uint(k1), k1h = uint(uint64_t(k1) >> 32);
     for (uint p = 0; p < GT_MAXPROBE; p++)
     {
         uint base = GT_HDR + s * stride;
         uint t = gtab[base];
         if (t == 0)
             return NO_SLOT;
-        if (t == tag && gtab[base + 1] == kn && gtab[base + 2] == k0l && gtab[base + 3] == k0h &&
-            gtab[base + 4] == k1l && gtab[base + 5] == k1h)
-            return base;
+        if (t == tag && gtab[base + 1] == kn)
+        {
+            bool same = true;
+            for (uint i = 0; i < nkeys; i++)          // (the words of the unused keys are 0 on both sides)
+            {
+                uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                if (gtab[base + 2 + 2 * i] != uint(kv & 0xffffffffu) || gtab[base + 3 + 2 * i] != uint(kv >> 32))
+                    same = false;
+            }
+            if (same)
+                return base;
+        }
         s = (s + 1) & mask;
     }
     return NO_SLOT;
 }
 
-void gt_insert(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride)
+void gt_insert(uint tag, uint kn, uint tid, uint mask, uint stride)
 {
     uint s = tag & mask;
     for (uint p = 0; p < GT_MAXPROBE; p++)
@@ -133,10 +149,12 @@ void gt_insert(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride
             if (prev == 0)
             {
                 gtab[base + 1] = kn;
-                gtab[base + 2] = uint(k0);
-                gtab[base + 3] = uint(uint64_t(k0) >> 32);
-                gtab[base + 4] = uint(k1);
-                gtab[base + 5] = uint(uint64_t(k1) >> 32);
+                for (uint i = 0; i < GA_NK; i++)
+                {
+                    uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                    gtab[base + 2 + 2 * i] = uint(kv & 0xffffffffu);
+                    gtab[base + 3 + 2 * i] = uint(kv >> 32);
+                }
                 uint d;
                 InterlockedAdd(gtab[0], 1, d);
                 return;
@@ -177,12 +195,15 @@ void gt_accumulate(uint base, uint tid, uint naggs, uint aggoff)
             }
             else
             {
+                // a plain read first: the flag only goes 0 -> 1 and the extreme only improves, so a stale read costs at most
+                // one atomic that changes nothing, and the common case (nothing to change) needs none
                 uint b = uint(int(v)) ^ 0x80000000u;
-                InterlockedOr(gtab[off], 1, prev);
-                if (cls == AC_MIN)
-                    InterlockedMax(gtab[off + 1], ~b, prev);
-                else
-                    InterlockedMax(gtab[off + 1], b, prev);
+                if (gtab[off] == 0)
+                    InterlockedOr(gtab[off], 1, prev);
+                uint cur = gtab[off + 1];
+                uint nb = (cls == AC_MIN) ? ~b : b;
+                if (nb > cur)
+                    InterlockedMax(gtab[off + 1], nb, prev);
             }
         }
         off += acc_width(cls);
@@ -225,22 +246,33 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
     for (uint page = first_page; page < last_page; page++)
     {
+#ifdef ARROW_SRC
+        uint nlp      = arrow_page_rows(page, ncols);
+        uint row0     = arrow_page_row0(page, ncols);
+#else
         uint pte      = ptab[2 * page];
         uint lp_base  = ptab[2 * page + 1];
         g_src         = (pte & 0x80000000u) != 0 ? 1u : 0u;
         uint pbase    = pte & 0x7fffffffu;
         uint pd_lower = ld16(pbase + 12);
         uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);
+#endif
 
         for (uint lp = tid; lp < nlp; lp += SCAN_WG)
         {
+#ifdef ARROW_SRC
+            uint fidx = flags_base + page * AR_VP + lp;
+#else
             uint fidx = flags_base + lp_base + lp;
-            if (mode != 0 && outb[fidx] != 4u)
-                continue;                           // only the rows that found no slot
+#endif
+            if (mode != 0 && outb[fidx] != (mode == 3 ? 1u : 4u))
+                continue;                           // only the rows that found no slot (mode 3: the ones the CPU takes)
 
             Reg  regs[VM_MAX_REGS];
             bool hit = false;
-#ifdef SPEC_PROG
+#if defined(ARROW_SRC)
+            hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#elif defined(SPEC_PROG)
             hit = spec_eval_row(pbase, page, lp, false, regs);
 #else
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
@@ -264,21 +296,19 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             spec_stage(regs, tid);
 #else
             {
-                int64_t k0 = 0, k1 = 0;
+                int64_t kk[GA_NK];
                 uint kn = 0;
-                if (nkeys > 0)
+                for (uint i = 0; i < GA_NK; i++)
                 {
-                    Reg r = regs[prog[keyoff]];
-                    if (r.isnull != 0) kn |= 1u; else k0 = r.v;
+                    kk[i] = 0;
+                    if (i < nkeys)
+                    {
+                        Reg r = regs[prog[keyoff + i]];
+                        if (r.isnull != 0) kn |= (1u << i); else kk[i] = r.v;
+                    }
+                    st_key[tid * GA_NK + i] = kk[i];
                 }
-                if (nkeys > 1)
-                {
-                    Reg r = regs[prog[keyoff + 1]];
-                    if (r.isnull != 0) kn |= 2u; else k1 = r.v;
-                }
-                st_key[tid * GA_NK + 0] = k0;
-                st_key[tid * GA_NK + 1] = k1;
-                st_hash[tid] = hash_keys(k0, k1, kn);
+                st_hash[tid] = hash_keys(kk, kn);
                 st_kn[tid] = kn | 0x80000000u;
                 for (uint k = 0; k < naggs; k++)
                 {
@@ -300,6 +330,30 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint prev;
                 InterlockedAdd(sh_hits, 1, prev);
             }
+#ifdef ARROW_SRC
+            if (mode == 3)
+            {
+                // this row goes to the CPU: its staged key and values to the overflow list
+                uint idx;
+                InterlockedAdd(outb[kparam.extra], 1, idx);
+                uint rb = kparam.extra + 1 + idx * OV_REC;
+                outb[rb + 0] = st_kn[tid] & 15u;
+                for (uint i = 0; i < GA_NK; i++)
+                {
+                    uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                    outb[rb + 1 + 2 * i] = uint(kv & 0xffffffffu);
+                    outb[rb + 2 + 2 * i] = uint(kv >> 32);
+                }
+                for (uint k = 0; k < naggs; k++)
+                {
+                    uint64_t vv = uint64_t(st_val[tid * GA_NA + k]);
+                    outb[rb + 1 + 2 * GA_NK + 3 * k + 0] = st_ok[tid * GA_NA + k];
+                    outb[rb + 1 + 2 * GA_NK + 3 * k + 1] = uint(vv & 0xffffffffu);
+                    outb[rb + 1 + 2 * GA_NK + 3 * k + 2] = uint(vv >> 32);
+                }
+                continue;
+            }
+#endif
             // min/max arguments must fit 32 bits
             bool fits = true;
             for (uint k = 0; k < naggs; k++)
@@ -314,18 +368,16 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 outb[fidx] = 1u;
                 continue;
             }
-            uint kn = st_kn[tid] & 3u;
-            int64_t k0 = st_key[tid * GA_NK + 0];
-            int64_t k1 = st_key[tid * GA_NK + 1];
+            uint kn = st_kn[tid] & 15u;
             uint tag = st_hash[tid];
             if (tag == 0)
                 tag = 1;
             if (mode == 1)
             {
-                gt_insert(tag, kn, k0, k1, mask, stride);
+                gt_insert(tag, kn, tid, mask, stride);
                 continue;
             }
-            uint base = gt_find(tag, kn, k0, k1, mask, stride);
+            uint base = gt_find(tag, kn, tid, mask, stride, nkeys);
             if (base == NO_SLOT)
             {
                 outb[fidx] = (mode == 0) ? 4u : 1u;

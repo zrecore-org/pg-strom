@@ -50,6 +50,8 @@ typedef struct scan_engine
 	int				gagg_pipe_ready[SCAN_NV2][3];
 	gpu_vk_pipeline	gtab_pipe[SCAN_NV2];	/* GROUP BY over many groups: [registers 16/32 + 2 * tier] */
 	int				gtab_pipe_ready[SCAN_NV2];
+	gpu_vk_pipeline	agtab_pipe[SCAN_NV2];	/* the same on an Arrow record batch */
+	int				agtab_pipe_ready[SCAN_NV2];
 	gpu_vk_pipeline	jagg_pipe[SCAN_NV2][3];	/* aggregation over a join: the same */
 	int				jagg_pipe_ready[SCAN_NV2][3];
 	gpu_vk_pipeline	jgagg_pipe[SCAN_NV2][3];	/* GROUP BY over a join: the same */
@@ -154,6 +156,14 @@ XpuCommand *scan_exec_agg_final(const XpuCommand *session_cmd, const scan_prog *
 XpuCommand *scan_exec_agg_final_sorted(scan_engine *eng, const XpuCommand *session_cmd, const scan_prog *prog,
 									   const agg_state *st, size_t *p_len, char *err, size_t errlen);
 void	agg_state_free(agg_state *st);
+/* GROUP BY over many groups: the session-wide hash table (scan_exec.c, kernels_vm/gtab.slang) used by the Arrow task too */
+int		scan_gtab_pipeline(scan_engine *eng, int arrow, int variant, gpu_vk_pipeline **p_pipe, char *err, size_t errlen);
+int		scan_gtab_open(gpu_vk_ctx *vk, const kern_session_info *session, const scan_prog *prog, agg_state *st, char *err, size_t errlen);
+gpu_vk_buffer *scan_gtab_buffer(agg_state *st);
+int		scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, char *err, size_t errlen);
+int		scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count);
+int		scan_gtab_forced(const agg_state *st, const scan_prog *prog);
+int		scan_gtab_switch_allowed(void);
 int		scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen);
 
 /*

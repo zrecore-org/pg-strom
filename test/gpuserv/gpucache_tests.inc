@@ -147,6 +147,8 @@ for t in gc1 gc2; do
 	gcagg $t "int2 and int8 columns, quals" "select sum(a), min(a), max(a), sum(c), max(c) from %T where a > 0 and b is not null"
 	gcagg $t "GROUP BY an integer expression" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1"
 	gcagg $t "GROUP BY date and timestamp aggregates" "select b % 5 as k, count(*), min(g), max(h) from %T group by 1 order by 1"
+	gcagg $t "GROUP BY many groups (session-wide table)" "select id % 7000 as k, count(*), sum(b), max(c) from %T group by 1 order by 1"
+	gcagg $t "GROUP BY three keys" "select a % 5 as k1, b % 3 as k2, id % 4 as k3, count(*), sum(c) from %T group by 1, 2, 3 order by 1, 2, 3"
 	gcagg $t "empty input" "select count(*), sum(b) from %T where a > 100000"
 	gcjoin $t "join with a heap table" "select t.id, t.a, d.grp, d.pay from %T t join %D d on t.b = d.k where t.a > 9000"
 	gcjoin $t "LEFT JOIN, text of both sides" "select t.id, d.txt, t.f from %T t left join %D d on t.b = d.k where t.id < 5000"

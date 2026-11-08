@@ -574,6 +574,7 @@ scan_engine_fini(scan_engine *eng)
 	SCAN_PIPES_DESTROY(eng, agg_pipe, agg_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, gagg_pipe, gagg_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, gtab_pipe, gtab_pipe_ready);
+	SCAN_PIPES_DESTROY(eng, agtab_pipe, agtab_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, jagg_pipe, jagg_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, jgagg_pipe, jgagg_pipe_ready);
 }
@@ -1871,12 +1872,13 @@ typedef struct
 {
 	int64_t		key[SCAN_GROUP_KEYS];
 	uint32_t	knull;
-	agg_acc		acc[SCAN_AGG_MAX];
+	agg_acc		acc[];				/* nagg of them (group_table.esize) */
 } group_entry;
 
 struct group_table
 {
-	group_entry	   *ents;
+	group_entry	   *ents;			/* nents entries of esize bytes */
+	size_t			esize;
 	uint32_t		nents, cap;
 	uint32_t	   *htab;			/* index + 1, 0 = empty */
 	uint32_t		hcap;
@@ -1896,8 +1898,27 @@ group_hash(const int64_t *key, uint32_t knull)
 	return (uint32_t)(h ^ (h >> 32));
 }
 
+#define GENT(gt, i)	((group_entry *)((char *)(gt)->ents + (size_t)(i) * (gt)->esize))
+
+/* PGSTROM_GPUSERV_GROUP_MEM_MB (pg_strom.gpuserv_group_memory): the memory one session may use for its groups */
+static size_t
+group_mem_limit(void)
+{
+	static size_t v = 0;
+
+	if (!v)
+	{
+		const char *s = getenv("PGSTROM_GPUSERV_GROUP_MEM_MB");
+		long		mb = s ? atol(s) : 1024;
+
+		v = (size_t)(mb > 0 ? mb : 1024) << 20;
+	}
+	return v;
+}
+
+/* NULL on out of memory, or when the session's groups would exceed the limit (the caller reports "out of memory") */
 static group_entry *
-group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
+group_lookup(struct group_table **p_gt, uint32_t nagg, const int64_t *key, uint32_t knull)
 {
 	struct group_table *gt = *p_gt;
 	uint32_t	h, i;
@@ -1907,6 +1928,7 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 		gt = calloc(1, sizeof(*gt));
 		if (!gt)
 			return NULL;
+		gt->esize = sizeof(group_entry) + (size_t) nagg * sizeof(agg_acc);
 		*p_gt = gt;
 	}
 	if (gt->nents * 2 >= gt->hcap)
@@ -1918,7 +1940,7 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 			return NULL;
 		for (uint32_t e = 0; e < gt->nents; e++)
 		{
-			uint32_t	x = group_hash(gt->ents[e].key, gt->ents[e].knull) & (ncap - 1);
+			uint32_t	x = group_hash(GENT(gt, e)->key, GENT(gt, e)->knull) & (ncap - 1);
 
 			while (nh[x])
 				x = (x + 1) & (ncap - 1);
@@ -1931,7 +1953,7 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 	h = group_hash(key, knull) & (gt->hcap - 1);
 	for (i = h; gt->htab[i]; i = (i + 1) & (gt->hcap - 1))
 	{
-		group_entry *e = &gt->ents[gt->htab[i] - 1];
+		group_entry *e = GENT(gt, gt->htab[i] - 1);
 
 		if (e->knull == knull && !memcmp(e->key, key, sizeof(e->key)))
 			return e;
@@ -1939,7 +1961,11 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 	if (gt->nents == gt->cap)
 	{
 		uint32_t	ncap = gt->cap ? gt->cap * 2 : 256;
-		group_entry *ne = realloc(gt->ents, sizeof(group_entry) * ncap);
+		group_entry *ne;
+
+		if ((size_t) ncap * gt->esize > group_mem_limit())
+			return NULL;
+		ne = realloc(gt->ents, gt->esize * ncap);
 
 		if (!ne)
 			return NULL;
@@ -1947,9 +1973,9 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 		gt->cap = ncap;
 	}
 	{
-		group_entry *e = &gt->ents[gt->nents];
+		group_entry *e = GENT(gt, gt->nents);
 
-		memset(e, 0, sizeof(*e));
+		memset(e, 0, gt->esize);
 		memcpy(e->key, key, sizeof(e->key));
 		e->knull = knull;
 		gt->htab[i] = ++gt->nents;
@@ -2040,19 +2066,19 @@ group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, ui
 		for (uint32_t s = 0; s < cap; s++)
 		{
 			const uint32_t *rec = blk + 1 + (size_t) s * rec_words;
-			int64_t		key[SCAN_GROUP_KEYS];
+			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *e;
 
 			if (!rec[0])
 				continue;
-			for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+			for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
 				key[i] = (int64_t)((uint64_t) rec[2 + 2 * i] | ((uint64_t) rec[3 + 2 * i] << 32));
-			e = group_lookup(&st->groups, key, rec[1]);
+			e = group_lookup(&st->groups, nagg, key, rec[1]);
 			if (!e)
 				return -1;
 			for (uint32_t a = 0; a < nagg; a++)
 				acc_merge_group_record(&e->acc[a], prog->agg_action[agg_col[a]],
-									   rec + 2 + 2 * SCAN_GROUP_KEYS + 6 * a);
+									   rec + 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * a);
 		}
 	}
 	return 0;
@@ -2083,7 +2109,7 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 		{
 			vm_reg		regs[SCAN_MAX_REGS];
 			uint32_t	lpd, e = 0, knull = 0;
-			int64_t		key[SCAN_GROUP_KEYS] = {0, 0};
+			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
 
 			if (!flags[lp_base[i] + lp])
@@ -2139,10 +2165,10 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 				else
 					key[k] = r->v;
 			}
-			g = group_lookup(&st->groups, key, knull);
+			g = group_lookup(&st->groups, nagg, key, knull);
 			if (!g)
 			{
-				snprintf(err, errlen, "out of memory");
+				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 				return -1;
 			}
 			for (uint32_t a = 0; a < nagg; a++)
@@ -2168,9 +2194,17 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
  * and merged into the session's groups, where the rows aggregated on the CPU are too.
  */
 #define GT_HDR			8
-#define GT_KEYW			6
+#define GT_KEYW			(2 + 2 * SCAN_GROUP_KEYS)
 #define GT_MAX_BYTES	(512U << 20)	/* the table of a session */
 #define GT_INIT_SLOTS	(1U << 20)		/* the largest table created from the planner's estimate (it grows if needed) */
+
+static uint64_t
+gt_max_bytes(void)
+{
+	uint64_t	lim = group_mem_limit() / 2;		/* the other half is for the session's groups on the host */
+
+	return lim < GT_MAX_BYTES ? lim : GT_MAX_BYTES;
+}
 
 typedef struct gtab_state
 {
@@ -2202,8 +2236,8 @@ gt_stride(const scan_prog *prog)
  * its rows overflow (scan_exec_group_task), the session uses the table. The planner's estimate is no guide (PostgreSQL
  * estimates an expression such as a % 10 by the distinct values of a), it only sizes the table.
  */
-static int
-gtab_wanted(const agg_state *st)
+int
+scan_gtab_forced(const agg_state *st, const scan_prog *prog)
 {
 	static int	mode = -1;
 
@@ -2213,6 +2247,8 @@ gtab_wanted(const agg_state *st)
 
 		mode = s ? atoi(s) : 2;
 	}
+	if (prog->nkeys > SCAN_GROUP_KEYS_SHARED)
+		return 1;				/* the shared-memory kernels hold two keys */
 	if (mode == 0)
 		return 0;
 	return mode == 1 || st->gt != NULL;
@@ -2239,7 +2275,7 @@ gtab_create(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, uint64_t want,
 	size_t		bytes;
 	uint32_t   *hdr;
 
-	while ((uint64_t)(maxcap * 2) * stride * 4 <= GT_MAX_BYTES)
+	while ((uint64_t)(maxcap * 2) * stride * 4 <= gt_max_bytes())
 		maxcap *= 2;
 	while (cap < want && cap < maxcap)
 		cap *= 2;
@@ -2354,10 +2390,10 @@ gtab_flush(const scan_prog *prog, agg_state *st, int clear, char *err, size_t er
 			continue;
 		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
 			key[i] = (int64_t)((uint64_t) w[2 + 2 * i] | ((uint64_t) w[3 + 2 * i] << 32));
-		e = group_lookup(&st->groups, key, w[1]);
+		e = group_lookup(&st->groups, nagg, key, w[1]);
 		if (!e)
 		{
-			snprintf(err, errlen, "out of memory");
+			snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 			return -1;
 		}
 		for (uint32_t a = 0; a < nagg; a++)
@@ -2383,16 +2419,17 @@ scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen)
 	return 0;
 }
 
-static int
-gtab_wanted_switch(void)
+int
+scan_gtab_switch_allowed(void)
 {
 	const char *s = getenv("PGSTROM_GPUSERV_GTAB");
 
 	return !s || atoi(s) == 2;
 }
 
-static int
-ensure_gtab_pipeline(scan_engine *eng, int variant, char *err, size_t errlen)
+/* the kernel of the session-wide table: arrow = 0 heap pages (gtab.slang), 1 an Arrow record batch (-DARROW_SRC) */
+int
+scan_gtab_pipeline(scan_engine *eng, int arrow, int variant, gpu_vk_pipeline **p_pipe, char *err, size_t errlen)
 {
 	gpu_vk_ctx *vk = eng->vk;
 	static const struct { const unsigned char *spv; const unsigned int *len; } tab[] = {
@@ -2400,16 +2437,109 @@ ensure_gtab_pipeline(scan_engine *eng, int variant, char *err, size_t errlen)
 		{kspv_gtab16_lite, &kspv_gtab16_lite_len}, {kspv_gtab32_lite, &kspv_gtab32_lite_len},
 		{kspv_gtab16_nogeom, &kspv_gtab16_nogeom_len}, {kspv_gtab32_nogeom, &kspv_gtab32_nogeom_len},
 	};
+	static const struct { const unsigned char *spv; const unsigned int *len; } atab[] = {
+		{kspv_agtab16, &kspv_agtab16_len}, {kspv_agtab32, &kspv_agtab32_len},
+		{kspv_agtab16_lite, &kspv_agtab16_lite_len}, {kspv_agtab32_lite, &kspv_agtab32_lite_len},
+		{kspv_agtab16_nogeom, &kspv_agtab16_nogeom_len}, {kspv_agtab32_nogeom, &kspv_agtab32_nogeom_len},
+	};
 	_Static_assert(sizeof(tab) / sizeof(tab[0]) == SCAN_NV2, "tab: one entry per register variant and tier");
+	_Static_assert(sizeof(atab) / sizeof(atab[0]) == SCAN_NV2, "atab: one entry per register variant and tier");
+	gpu_vk_pipeline *pipe = arrow ? &eng->agtab_pipe[variant] : &eng->gtab_pipe[variant];
+	int		   *ready = arrow ? &eng->agtab_pipe_ready[variant] : &eng->gtab_pipe_ready[variant];
 
-	if (!eng->gtab_pipe_ready[variant])
+	if (!*ready)
 	{
-		if (gpu_vk_pipeline_create(vk, &eng->gtab_pipe[variant], tab[variant].spv, *tab[variant].len, 6, 16) != 0)
+		if (gpu_vk_pipeline_create(vk, pipe, arrow ? atab[variant].spv : tab[variant].spv,
+								   arrow ? *atab[variant].len : *tab[variant].len, 6, arrow ? 20 : 16) != 0)
 		{
 			snprintf(err, errlen, "cannot create the group table pipeline: %s", vk->err);
 			return -1;
 		}
-		eng->gtab_pipe_ready[variant] = 1;
+		*ready = 1;
+	}
+	*p_pipe = pipe;
+	return 0;
+}
+
+/* the table of the session, created at its first task (twice the planner's estimate, a table that exists is kept) */
+int
+scan_gtab_open(gpu_vk_ctx *vk, const kern_session_info *session, const scan_prog *prog, agg_state *st,
+			   char *err, size_t errlen)
+{
+	double		est = session->groupby_ngroups_estimation;
+
+	if (st->gt && st->gt->cap)
+		return 0;
+	if (!(est >= 0))
+		est = 0;
+	if (est * 2 > GT_INIT_SLOTS)
+		est = GT_INIT_SLOTS / 2;
+	/* the planner's estimate, and at least what the session has seen (twice: the table is kept below half full) */
+	if (gtab_create(vk, prog, st, (uint64_t)(est * 2) > 4096 ? (uint64_t)(est * 2) : 4096, err, errlen) != 0)
+		return -1;
+	if (st->groups && (uint64_t) st->groups->nents * 2 > st->gt->cap)
+	{
+		gtab_destroy(st);
+		if (gtab_create(vk, prog, st, (uint64_t) st->groups->nents * 4, err, errlen) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+gpu_vk_buffer *
+scan_gtab_buffer(agg_state *st)
+{
+	return &st->gt->buf;
+}
+
+/* after a task: a table more than half full grows (its groups move to the session's groups, the next task starts a bigger one) */
+int
+scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, char *err, size_t errlen)
+{
+	uint32_t   *hdr = (uint32_t *) st->gt->buf.map;
+
+	if (st->gt->cap < st->gt->maxcap && (uint64_t) hdr[0] * 2 > st->gt->cap)
+	{
+		uint32_t	ncap = st->gt->cap * 4;
+
+		if (gtab_flush(prog, st, 0, err, errlen) != 0)
+			return -1;
+		gtab_destroy(st);
+		if (gtab_create(vk, prog, st, ncap, err, errlen) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+/* rows an Arrow task could not aggregate on the table (mode 3 of agtab: key words, null mask and values staged by the kernel) */
+int
+scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count)
+{
+	uint32_t	nagg = prog->nagg;
+	const uint32_t *w = prog->words;
+	uint32_t	aggoff = w[11];
+	uint32_t	ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * 12;
+
+	for (uint32_t r = 0; r < count; r++)
+	{
+		const uint32_t *rec = recs + (size_t) r * ov_rec;
+		int64_t		key[SCAN_GROUP_KEYS];
+		group_entry *g;
+
+		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+			key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
+		g = group_lookup(&st->groups, nagg, key, rec[0]);
+		if (!g)
+			return -1;
+		for (uint32_t a = 0; a < nagg; a++)
+		{
+			const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS + 3 * a;
+
+			if (!av[0])
+				continue;
+			acc_add_value(&g->acc[a], w[aggoff + 4 * a],
+						  (int64_t)((uint64_t) av[1] | ((uint64_t) av[2] << 32)));
+		}
 	}
 	return 0;
 }
@@ -2435,6 +2565,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	double		t0 = now_ms(), t1, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
 	uint32_t	hits0;
+	gpu_vk_pipeline *gpipe;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -2443,26 +2574,10 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	if (task->u.task.kds_src_iovec)
 		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
-	if (ensure_gtab_pipeline(eng, variant, err, errlen) != 0)
+	if (scan_gtab_pipeline(eng, 0, variant, &gpipe, err, errlen) != 0)
 		return -1;
-	if (!st->gt || !st->gt->cap)
-	{
-		double		est = session->groupby_ngroups_estimation;
-
-		if (!(est >= 0))
-			est = 0;
-		if (est * 2 > GT_INIT_SLOTS)
-			est = GT_INIT_SLOTS / 2;
-		/* the planner's estimate, and at least what the session has seen (twice: the table is kept below half full) */
-		if (gtab_create(vk, prog, st, (uint64_t)(est * 2) > 4096 ? (uint64_t)(est * 2) : 4096, err, errlen) != 0)
-			return -1;
-		if (st->groups && (uint64_t) st->groups->nents * 2 > st->gt->cap)
-		{
-			gtab_destroy(st);
-			if (gtab_create(vk, prog, st, (uint64_t) st->groups->nents * 4, err, errlen) != 0)
-				return -1;
-		}
-	}
+	if (scan_gtab_open(vk, session, prog, st, err, errlen) != 0)
+		return -1;
 	if (npages == 0)
 		return 0;
 	if (task_pages_open(eng, &ps, kds_src, pathname, iovec, &mapped, err, errlen) != 0)
@@ -2532,7 +2647,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 				pc[1] = base | (mode << 28);
 				pc[2] = group_ppw(AGG_PAGES_PER_WG);
 				pc[3] = 4;
-				if (gpu_vk_dispatch(vk, &eng->gtab_pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+				if (gpu_vk_dispatch(vk, gpipe, bufs, pc, groups, 1, 1, NULL) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto done;
@@ -2560,17 +2675,8 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: group task: %u pages, gpu %.1f ms (lookup %.1f), new-key rows %u, table %u/%u slots, overflow rows %llu (%.1f ms)\n",
 				npages, t3 - t1, t2 - t1, nmiss, hdr[0], st->gt->cap, (unsigned long long) n_overflow, now_ms() - t3);
-	/* a table more than half full grows: its groups move to the session's groups and the next task starts a bigger one */
-	if (st->gt->cap < st->gt->maxcap && (uint64_t) hdr[0] * 2 > st->gt->cap)
-	{
-		uint32_t	ncap = st->gt->cap * 4;
-
-		if (gtab_flush(prog, st, 0, err, errlen) != 0)
-			goto done;
-		gtab_destroy(st);
-		if (gtab_create(vk, prog, st, ncap, err, errlen) != 0)
-			goto done;
-	}
+	if (scan_gtab_task_done(vk, prog, st, err, errlen) != 0)
+		goto done;
 	(void) t0;
 	rv = 0;
 done:
@@ -2645,7 +2751,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		snprintf(err, errlen, "not a GROUP BY program");
 		return -1;
 	}
-	if (gtab_wanted(st))
+	if (scan_gtab_forced(st, prog))
 		return group_task_gtab(eng, session, prog, st, task, kds_src, err, errlen);
 	nagg = prog->nagg;
 	w = prog->words;
@@ -2657,7 +2763,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	scan_group_keystats(st, prog->nkeys, &ks);
 	sp = spec_pipe(eng, prog, SPEC_GAGG, sh.agg_max, sh.ga_c, &ks, &sh, &eng->gagg_pipe[variant][avariant]);
 	cap = sh.ga_c;
-	rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
+	rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
 	blk_words = 1 + cap * rec_words;
 	if ((sp == &eng->gagg_pipe[variant][avariant] || spec_check_enabled(eng)) &&
 		ensure_group_pipeline(eng, variant, avariant, err, errlen) != 0)
@@ -2741,7 +2847,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	 * Most rows found no slot in the workgroups' tables (many groups): the CPU would aggregate them one by one. Run the task
 	 * again on the session-wide table (gtab.slang) and keep using it. (The groups so far, if any, stay in the session's groups.)
 	 */
-	if (gtab_wanted_switch())
+	if (scan_gtab_switch_allowed())
 	{
 		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
 		uint64_t	nov = 0, nhits = 0;
@@ -2839,7 +2945,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 	{
 		int			sz;
 		size_t		idx_sz = MAXALIGN(sizeof(uint64_t) * nrows);
-		const group_entry *g = (grouped ? &st->groups->ents[order ? order[r] : r] : NULL);
+		const group_entry *g = (grouped ? GENT(st->groups, order ? order[r] : r) : NULL);
 
 		for (uint32_t j = 0; j < ncols; j++)
 		{
@@ -3026,7 +3132,7 @@ group_sort_order(scan_engine *eng, const kern_session_info *session, const scan_
 	}
 	for (uint32_t r = 0; r < n; r++)
 	{
-		const group_entry *g = &gt->ents[r];
+		const group_entry *g = GENT(gt, r);
 		uint32_t   *row = keys + (size_t) r * spec.nwords;
 
 		for (int s = 0; s < spec.nkeys; s++)
@@ -3949,9 +4055,9 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&
 		ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
@@ -4222,20 +4328,20 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		for (uint32_t r = 0; r < ovf_count; r++)
 		{
 			const uint32_t *rec = out + ovf_base + 1 + (size_t) r * ov_rec;
-			int64_t		key[SCAN_GROUP_KEYS];
+			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
 
-			for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+			for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
 				key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
-			g = group_lookup(&st->groups, key, rec[0]);
+			g = group_lookup(&st->groups, nagg, key, rec[0]);
 			if (!g)
 			{
-				snprintf(err, errlen, "out of memory");
+				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 				goto done;
 			}
 			for (uint32_t a = 0; a < nagg; a++)
 			{
-				const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS + 3 * a;
+				const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * a;
 
 				if (!av[0])
 					continue;
@@ -4297,7 +4403,7 @@ scan_group_keystats(const agg_state *st, int nkeys, spec_keystats *ks)
 	ks->ngroups = st->groups->nents;
 	for (uint32_t i = 0; i < st->groups->nents; i++)
 	{
-		const group_entry *e = &st->groups->ents[i];
+		const group_entry *e = GENT(st->groups, i);
 
 		for (int k = 0; k < nkeys && k < 2; k++)
 		{
@@ -4316,8 +4422,8 @@ void
 scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *ov_rec)
 {
 	*cap = ga_variant_cap[avariant];
-	*rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * ga_variant_na[avariant];
-	*ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * ga_variant_na[avariant];
+	*rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * ga_variant_na[avariant];
+	*ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * ga_variant_na[avariant];
 }
 
 int
@@ -4339,17 +4445,17 @@ scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *
 	for (uint32_t r = 0; r < count; r++)
 	{
 		const uint32_t *rec = recs + (size_t) r * ov_rec;
-		int64_t		key[SCAN_GROUP_KEYS];
+		int64_t		key[SCAN_GROUP_KEYS] = {0};
 		group_entry *g;
 
-		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+		for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
 			key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
-		g = group_lookup(&st->groups, key, rec[0]);
+		g = group_lookup(&st->groups, nagg, key, rec[0]);
 		if (!g)
 			return -1;
 		for (uint32_t a = 0; a < nagg; a++)
 		{
-			const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS + 3 * a;
+			const uint32_t *av = rec + 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * a;
 
 			if (!av[0])
 				continue;

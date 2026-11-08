@@ -628,12 +628,32 @@ devtype_numeric_hash(bool isnull, Datum value)
 	return hash;
 }
 
+/*
+ * The payload of a text-like datum for hashing: a compressed or out-of-line value is expanded first
+ * (the inner rows of a join keep the values as the table stores them; the kernel hashes the plain bytes).
+ */
+static uint32_t
+__devtype_varlena_hash(Datum value, bool bpchar)
+{
+	struct varlena *vl = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
+	char	   *s = VARDATA_ANY(vl);
+	int			sz = VARSIZE_ANY_EXHDR(vl);
+	uint32_t	hash;
+
+	if (bpchar)
+		sz = bpchartruelen(s, sz);
+	hash = hash_any((unsigned char *)s, sz);
+	if ((Pointer) vl != DatumGetPointer(value))
+		pfree(vl);
+	return hash;
+}
+
 static uint32_t
 devtype_bytea_hash(bool isnull, Datum value)
 {
 	if (isnull)
 		return 0;
-	return hash_any((unsigned char *)VARDATA_ANY(DatumGetPointer(value)), VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
+	return __devtype_varlena_hash(value, false);
 }
 
 static uint32_t
@@ -641,21 +661,15 @@ devtype_text_hash(bool isnull, Datum value)
 {
 	if (isnull)
 		return 0;
-	return hash_any((unsigned char *)VARDATA_ANY(DatumGetPointer(value)), VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
+	return __devtype_varlena_hash(value, false);
 }
 
 static uint32_t
 devtype_bpchar_hash(bool isnull, Datum value)
 {
-	if (!isnull)
-	{
-		char   *s = VARDATA_ANY(DatumGetPointer(value));
-		int		sz = VARSIZE_ANY_EXHDR(DatumGetPointer(value));
-
-		sz = bpchartruelen(s, sz);
-		return hash_any((unsigned char *)s, sz);
-	}
-	return 0;
+	if (isnull)
+		return 0;
+	return __devtype_varlena_hash(value, true);
 }
 
 static uint32_t
@@ -2820,7 +2834,7 @@ vulkan_geom_3dintersects_args_ok(List *func_args)
  * the database does for every deterministic collation; the ordering operators are LOCALE_AWARE and
  * need the C collation (checked by the function lookup). LIKE is limited to a constant pattern that is
  * a literal with % around it (bytewise search is exact for UTF-8 and single-byte encodings), and
- * length() to UTF-8. Join programs read no strings. A value that is compressed or stored out of
+ * length() to UTF-8. Join programs compare strings for equality only. A value that is compressed or stored out of
  * line is handed back to the backend at run time (KDS_FORMAT_RECHECK).
  */
 static bool
@@ -2950,7 +2964,12 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 	}
 	if (fc.cls != SOP_STRCMP && fc.cls != SOP_STRLIKE && fc.cls != SOP_STRLEN)
 		return true;
-	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	/*
+	 * A join program (quals and hash keys) compares strings for equality only: bytewise, as the
+	 * hash of the key is (scan_vm_joinkey_type_supported); LIKE, length and ordering stay out.
+	 */
+	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN &&
+		!(fc.cls == SOP_STRCMP && (fc.kind == SOP_CMP_EQ || fc.kind == SOP_CMP_NE)))
 		return false;
 	if (!OidIsValid(func_collid) || !get_collation_isdeterministic(func_collid))
 		return false;
