@@ -15,17 +15,6 @@ aggjoin.key.float4 | hash-join key float4/float8: gpu_join.c offers a GpuJoin on
 aggjoin.key.float8 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
 srcfull.*.join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
 srcfull.*.join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-join.key.text.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-join.key.varchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-join.key.bpchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-join.key.multi2.text_int.inner | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-aggjoin.key.text | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-aggjoin.key.varchar | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-aggjoin.key.bpchar | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-src.*.join.key_text | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-srcfull.*.join.key.text.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-srcfull.*.join.key.varchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
-srcfull.*.join.key.bpchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
 join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 aggjoin.key.numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 src.*.join.key_numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6

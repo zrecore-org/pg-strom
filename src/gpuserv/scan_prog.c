@@ -240,8 +240,6 @@ emit_conststr(builder *b, const unsigned char *datum, int isnull, int *next)
 	uint32_t	len = 0;
 	int64_t		off = 0;
 
-	if (b->no_strings)
-		return fail(b, "strings are not supported in a join");
 	if (!isnull)
 	{
 		if (!varlena_payload(datum, &data, &len))
@@ -984,8 +982,12 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 			if (reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR || reg_vtype(kexp->exptype, &bytes) == SOP_VT_NUM ||
 				reg_vtype(kexp->exptype, &bytes) == SOP_VT_JSON)
 			{
-				/* a join program reads the strings of an inner relation only (a geometry qual of a GiST join, A13) */
-				if (b->no_strings && !(reg_vtype(kexp->exptype, &bytes) == SOP_VT_STR && b->slot_iresno[slot] > 0))
+				/*
+				 * A join program reads strings (equality of a join key and its hash, A6; the planner lets no other
+				 * string function into a join, a geometry qual of a GiST join reads the inner one, A13), not
+				 * numerics or jsonb
+				 */
+				if (b->no_strings && reg_vtype(kexp->exptype, &bytes) != SOP_VT_STR)
 					return fail(b, "strings and numerics are not supported in a join");
 				b->slot_strval[slot] = 1;
 			}
@@ -1911,13 +1913,16 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 	{
 		int		bytes, r;
 
+		int		is_str = (reg_vtype(karg->exptype, &bytes) == SOP_VT_STR);
+
 		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4 || karg->exptype == TypeOpCode__float8 ||
-			reg_vtype(karg->exptype, &bytes) == SOP_VT_STR || reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM ||
-			reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
+			reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM || reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
 		*next = acc + 1;
 		r = expr_to_reg(b, karg, next);
-		if (r < 0 || emit(b, SOP_HASHMERGE, acc, r, 0, bytes, 0) < 0)
+		/* a string key: k0 = 0, k1 = 1 (text) or 2 (bpchar: trailing blanks do not count) */
+		if (r < 0 || emit(b, SOP_HASHMERGE, acc, r, 0, is_str ? 0 : bytes,
+						  is_str ? (karg->exptype == TypeOpCode__bpchar ? 2 : 1) : 0) < 0)
 			return -1;
 	}
 	if (emit(b, SOP_HASHFIN, acc, 0, 0, 0, 0) < 0)
@@ -2392,7 +2397,18 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		if (b.slot_used[s])
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)		/* join programs read the NULL-ness of strings only */
+			if (b.slot_vtype[s] == SOP_VT_STR && b.slot_strval[s])
+			{
+				/* the value of an outer string column is read (a join key, A6) */
+				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
+				{
+					fail(&b, "outer column %d does not have the type the expression expects", b.slot_resno[s]);
+					goto error;
+				}
+				if (kds_src->format != KDS_FORMAT_ARROW)
+					prog->rck_outer = 1;	/* a compressed or out-of-line value: the backend joins the row */
+			}
+			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)		/* the NULL-ness only */
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
 			else if (b.slot_vtype[s] == SOP_VT_INT && b.slot_nullonly[s] && !b.slot_valread[s])
 				b.slot_vtype[s] = SOP_VT_NULLONLY;
@@ -2414,12 +2430,13 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
 			if (b.slot_ivtype[s] == SOP_VT_STR && b.slot_strval[s])
 			{
-				/* the value of a string column of an inner relation is read (a geometry qual of a GiST join) */
+				/* the value of a string column of an inner relation is read (a join key, a geometry qual of a GiST join) */
 				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1)
 				{
 					fail(&b, "inner column %d does not have the type the expression expects", b.slot_iresno[s]);
 					goto error;
 				}
+				prog->rck_walk = 1;		/* a compressed or out-of-line value: the backend joins the outer row */
 			}
 			else if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM || b.slot_ivtype[s] == SOP_VT_JSON)
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;
@@ -2437,7 +2454,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	}
 	for (int depth = 1; depth <= nrels; depth++)
 		inc_total += incols[depth];
-	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;
+	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp + 4 * nagg + nkeys + b.pool_len / 4;
 	if (nwords > 16384)
 	{
 		fail(&b, "the join program is too large");
@@ -2529,6 +2546,10 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			}
 		}
 		w[17] = prog->oj_words;
+		/* the constant pool (string literals) follows the aggregate table and the key registers */
+		w[20] = insnoff + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;
+		if (b.pool_len > 0)
+			memcpy(w + w[20], b.pool, b.pool_len);
 		/* which parts of the program can recheck (A14): see scan_prog.h */
 		for (uint32_t i = 0; i < b.ninsn; i++)
 			if (op_may_recheck(b.insn[6 * i]))
@@ -2567,11 +2588,13 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	prog->ndepth = nrels;
 	prog->join_mode = 1;
 	free(b.insn);
+	free(b.pool);
 	free(comp_regs);
 	return 0;
 
 error:
 	free(b.insn);
+	free(b.pool);
 	free(comp_regs);
 	scan_prog_free(prog);
 	if (err[0] == '\0')
