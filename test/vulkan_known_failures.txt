@@ -167,3 +167,11 @@ gpu_cache (A7 part 2)
 #    computed arguments; "the expression needs more than 32 registers") was rewritten (gpu_preagg.c counts the columns the partial
 #    aggregates read) and EXPLAIN shows the aggregate staying on the CPU; the last fuzz run that still listed it was started
 #    before this was confirmed in the same run, so re-run `FUZZ_SEED=9 FUZZ_COUNT=3000` to confirm.
+
+# ---------------------------------------------------------------------------------------------------------------
+# R3 (ST_Area): count(ST_Area(g)) with a qual through GpuPreAgg (test/gpuserv/postgis_measure_tests.inc "min, max and count of ST_Area")
+# ---------------------------------------------------------------------------------------------------------------
+# The rows the area instruction hands back (curves, TIN, triangles, a collection inside a collection) are flagged correctly by the
+# service, but the backend's CPU replay (fallback.c execCpuFallbackBaseTuple) does not produce the aggregate ARGUMENT's value for them:
+# count(*) with the same qual is right (28000), count(ST_Area(g)) is 18000 of 28000. Owned by the fallback work (a14-fallback);
+# reproduction: test/gpuserv/postgis/area_agg_repro.sql. The test stays as written and fails until that fix lands.
