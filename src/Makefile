@@ -14,7 +14,7 @@ STROM_OBJS = main.o githash.o codegen.o \
              arrow_fdw.o arrow_meta.o \
              parquet_read.o parquet_cache.o \
              misc.o float2.o tinyint.o aggfuncs.o \
-             pg_portable.o gpu_launcher.o svc_proto.o svc_caps.o svc_prog.o
+             pg_portable.o gpu_launcher.o svc_proto.o svc_caps.o svc_prog.o svc_area.o
 GENERATED-HEADERS = githash.c
 STROM_HEADERS = arrow_defs.h float2.h
 
