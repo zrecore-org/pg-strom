@@ -36,6 +36,7 @@ struct wire_client
 	agg_state		agg;				/* GpuPreAgg: the running partial aggregates */
 	join_inner		join;				/* GpuJoin: the inner relation */
 	int				closing;
+	int				fault_ntasks;		/* tasks seen (fault injection) */
 	scan_engine	   *eng;				/* for releasing the join inner buffer */
 };
 
@@ -226,6 +227,96 @@ write_all(int fd, const void *buf, size_t len)
 	return 0;
 }
 
+
+/* ----------------------------------------------------------------
+ * fault injection (tests of the backend's CPU fallback)
+ *
+ * The backend sends the superuser GUC pg_strom.gpuserv_fault in the session.  Syntax:
+ *   KIND[=N][,node=scan|join|preagg][,src=heap|arrow|gcache]
+ * KIND is one of
+ *   open     the OpenSession command is answered with an error
+ *   refuse   the N-th task (default 1) is answered with a translation error
+ *   lost     the N-th task is answered with the error of a lost device
+ *   drop     the connection is closed when the N-th task arrives (a service that disappeared)
+ *   exit     the whole service exits when the N-th task arrives (a killed service)
+ *   final    the XpuTaskFinal command is answered with an error
+ * node= / src= restrict it to sessions of that kind / tasks reading that source.
+ * ----------------------------------------------------------------
+ */
+typedef struct
+{
+	char		kind[16];
+	int			nth;
+	int			node;			/* DEVTASK__* or 0 */
+	int			src;			/* 1 heap, 2 arrow, 3 gcache, 0 any */
+} fault_spec_t;
+
+static int
+fault_parse(const XpuCommand *session, fault_spec_t *fs)
+{
+	const kern_session_info *s = &session->u.session;
+	const char *p;
+	char		buf[128];
+	char	   *tok, *save = NULL;
+
+	memset(fs, 0, sizeof(*fs));
+	if (s->fault_spec == 0 ||
+		s->fault_spec >= session->length - offsetof(XpuCommand, u.session))
+		return 0;
+	p = (const char *) s + s->fault_spec;
+	snprintf(buf, sizeof(buf), "%s", p);
+	fs->nth = 1;
+	for (tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save))
+	{
+		char	   *eq = strchr(tok, '=');
+
+		if (eq)
+			*eq++ = '\0';
+		if (strcmp(tok, "node") == 0 && eq)
+			fs->node = (strcmp(eq, "scan") == 0 ? DEVTASK__SCAN :
+						strcmp(eq, "join") == 0 ? DEVTASK__JOIN :
+						strcmp(eq, "preagg") == 0 ? DEVTASK__PREAGG : 0);
+		else if (strcmp(tok, "src") == 0 && eq)
+			fs->src = (strcmp(eq, "heap") == 0 ? 1 :
+					   strcmp(eq, "arrow") == 0 ? 2 :
+					   strcmp(eq, "gcache") == 0 ? 3 : 0);
+		else
+		{
+			snprintf(fs->kind, sizeof(fs->kind), "%s", tok);
+			if (eq)
+				fs->nth = atoi(eq);
+		}
+	}
+	return fs->kind[0] != '\0';
+}
+
+static int
+fault_match(const XpuCommand *session, const fault_spec_t *fs, const XpuCommand *task)
+{
+	if (fs->node != 0 &&
+		(session->u.session.xpu_task_flags & DEVTASK__MASK) != (uint32_t) fs->node)
+		return 0;
+	if (task && fs->src != 0)
+	{
+		int		src = 1;
+
+		if (task->tag == XpuCommandTag__XpuTaskExecGpuCache)
+			src = 3;
+		else if (task->u.task.kds_src_offset != 0 &&
+				 task->u.task.kds_src_offset + sizeof(kern_data_store) <= task->length)
+		{
+			const kern_data_store *kds = (const kern_data_store *)
+				((const char *) task + task->u.task.kds_src_offset);
+
+			if (kds->format == KDS_FORMAT_ARROW || kds->format == KDS_FORMAT_PARQUET)
+				src = 2;
+		}
+		if (src != fs->src)
+			return 0;
+	}
+	return 1;
+}
+
 static void
 reply_error(wire_client *wc, const char *func, const char *fmt, ...)
 {
@@ -327,6 +418,16 @@ handle_open_session(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 	}
 	memcpy(wc->session, xcmd, xcmd->length);
 	dump_session(ws, s);
+	{
+		fault_spec_t fs;
+
+		if (fault_parse(wc->session, &fs) && strcmp(fs.kind, "open") == 0 &&
+			fault_match(wc->session, &fs, NULL))
+		{
+			reply_error(wc, "OpenSession", "injected fault: the session is refused");
+			return;
+		}
+	}
 	reply_success(wc, 0);
 }
 
@@ -362,6 +463,36 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 		 xcmd->u.task.kds_src_pathname, xcmd->u.task.kds_src_iovec,
 		 (unsigned long long) xcmd->length);
 	gcache_cur_session = &wc->session->u.session;
+	wc->fault_ntasks++;
+	{
+		fault_spec_t fs;
+
+		if (fault_parse(wc->session, &fs) && fs.nth == wc->fault_ntasks &&
+			fault_match(wc->session, &fs, xcmd))
+		{
+			if (strcmp(fs.kind, "refuse") == 0)
+			{
+				reply_error(wc, "XpuTaskExec", "injected fault: the expression needs more than 32 registers");
+				return;
+			}
+			if (strcmp(fs.kind, "lost") == 0)
+			{
+				reply_error(wc, "XpuTaskExec", "GPU dispatch failed: kernel did not finish within 10000 ms (device marked lost)");
+				return;
+			}
+			if (strcmp(fs.kind, "drop") == 0)
+			{
+				wlog(ws, 1, "injected fault: dropping the connection at task %d", wc->fault_ntasks);
+				wc->closing = 1;
+				return;
+			}
+			if (strcmp(fs.kind, "exit") == 0)
+			{
+				wlog(ws, 1, "injected fault: exiting at task %d", wc->fault_ntasks);
+				_exit(1);
+			}
+		}
+	}
 	if ((wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
 	{
 		uint64_t	raw0 = wc->agg.nitems_raw, in0 = wc->agg.nitems_in;
@@ -459,6 +590,17 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			}
 			break;
 		case XpuCommandTag__XpuTaskFinal:
+			if (wc->session)
+			{
+				fault_spec_t fs;
+
+				if (fault_parse(wc->session, &fs) && strcmp(fs.kind, "final") == 0 &&
+					fault_match(wc->session, &fs, NULL))
+				{
+					reply_error(wc, "XpuTaskFinal", "injected fault: the final step failed");
+					break;
+				}
+			}
 			if (wc->session &&
 				(wc->session->u.session.xpu_task_flags & DEVTASK__MASK) == DEVTASK__PREAGG)
 			{
