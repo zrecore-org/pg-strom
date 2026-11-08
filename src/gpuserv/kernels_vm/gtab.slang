@@ -104,7 +104,7 @@ void add_wrap(uint i, uint c, uint x)
 }
 
 // the first word of the slot of a key, NO_SLOT if the table has no such slot (yet)
-uint gt_find(uint tag, uint kn, uint tid, uint mask, uint stride)
+uint gt_find(uint tag, uint kn, uint tid, uint mask, uint stride, uint nkeys)
 {
     uint s = tag & mask;
     for (uint p = 0; p < GT_MAXPROBE; p++)
@@ -116,7 +116,7 @@ uint gt_find(uint tag, uint kn, uint tid, uint mask, uint stride)
         if (t == tag && gtab[base + 1] == kn)
         {
             bool same = true;
-            for (uint i = 0; i < GA_NK; i++)
+            for (uint i = 0; i < nkeys; i++)          // (the words of the unused keys are 0 on both sides)
             {
                 uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
                 if (gtab[base + 2 + 2 * i] != uint(kv & 0xffffffffu) || gtab[base + 3 + 2 * i] != uint(kv >> 32))
@@ -192,12 +192,15 @@ void gt_accumulate(uint base, uint tid, uint naggs, uint aggoff)
             }
             else
             {
+                // a plain read first: the flag only goes 0 -> 1 and the extreme only improves, so a stale read costs at most
+                // one atomic that changes nothing, and the common case (nothing to change) needs none
                 uint b = uint(int(v)) ^ 0x80000000u;
-                InterlockedOr(gtab[off], 1, prev);
-                if (cls == AC_MIN)
-                    InterlockedMax(gtab[off + 1], ~b, prev);
-                else
-                    InterlockedMax(gtab[off + 1], b, prev);
+                if (gtab[off] == 0)
+                    InterlockedOr(gtab[off], 1, prev);
+                uint cur = gtab[off + 1];
+                uint nb = (cls == AC_MIN) ? ~b : b;
+                if (nb > cur)
+                    InterlockedMax(gtab[off + 1], nb, prev);
             }
         }
         off += acc_width(cls);
@@ -336,7 +339,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 gt_insert(tag, kn, tid, mask, stride);
                 continue;
             }
-            uint base = gt_find(tag, kn, tid, mask, stride);
+            uint base = gt_find(tag, kn, tid, mask, stride, nkeys);
             if (base == NO_SLOT)
             {
                 outb[fidx] = (mode == 0) ? 4u : 1u;
