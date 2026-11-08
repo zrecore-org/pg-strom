@@ -68,7 +68,17 @@ if [ -n "$ADHOC" ]; then
 	[ -n "$NOTESTS" ] && exit 0
 fi
 . "${0%/*}/gtab_tests.inc"
+# the memory bound: pg_strom.gpuserv_group_memory is a postmaster setting, so restart the cluster with its minimum (64 MB)
+stop
+echo "pg_strom.gpuserv_group_memory = 64" >> "$ROOT/data/postgresql.conf"
+$PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log2" -w start >/dev/null 2>&1 || { echo "restart failed"; exit 1; }
+n=0; while [ $n -lt 40 ]; do
+	[ "$($PSQL -d postgres -c 'select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
+	n=$((n+1)); sleep 1
+done
+check "service is ready with pg_strom.gpuserv_group_memory = 64" "$([ $n -lt 40 ]; echo $?)"
+. "${0%/*}/gtab_mem_tests.inc"
 echo
-nused=$(grep -c "group task:.*table" "$ROOT/log")
+nused=$(cat "$ROOT/log" "$ROOT/log2" 2>/dev/null | grep -c "group task:.*table")
 check "the session-wide table served the tasks ($nused task lines)" "$([ "$nused" -gt 0 ]; echo $?)"
 if [ $fail -eq 0 ]; then echo "GTAB DEV: ALL PASSED ($(( $(date +%s) - T0 )) s)"; else echo "GTAB DEV: $fail FAILED ($(( $(date +%s) - T0 )) s)"; exit 1; fi

@@ -155,6 +155,7 @@ kind_name(int kind)
 		case SPEC_JOIN:		return "join";
 		case SPEC_JAGG:		return "join agg";
 		case SPEC_JGAGG:	return "join group";
+		case SPEC_GTAB:		return "group table";
 	}
 	return "?";
 }
@@ -170,6 +171,7 @@ kind_entry(int kind)
 		case SPEC_JOIN:		return "join_main";
 		case SPEC_JAGG:		return "jagg_main";
 		case SPEC_JGAGG:	return "jgagg_main";
+		case SPEC_GTAB:		return "gagg_main";
 	}
 	return "main";
 }
@@ -185,6 +187,7 @@ kind_file(int kind)
 		case SPEC_JOIN:		return "join.slang";
 		case SPEC_JAGG:		return "jagg.slang";
 		case SPEC_JGAGG:	return "jgagg.slang";
+		case SPEC_GTAB:		return "gtab.slang";
 	}
 	return "scan.slang";
 }
@@ -612,7 +615,8 @@ build_entry(spec_mgr *m, spec_entry *e)
 	/* the bindings and the push constants of the kernel: the join kernels have the inner buffer and a fifth word, so do
 	 * the aggregations of an Arrow record batch (arrow_exec.c) */
 	uint32_t	nbind = (e->kind >= SPEC_JOIN ? 6 : 5);
-	uint32_t	pcs = (e->kind >= SPEC_JOIN || (e->arrow && (e->kind == SPEC_AGG || e->kind == SPEC_GAGG))) ? 20 : 16;
+	uint32_t	pcs = (e->kind == SPEC_GTAB ? (e->arrow ? 20 : 16) :
+					   (e->kind >= SPEC_JOIN || (e->arrow && (e->kind == SPEC_AGG || e->kind == SPEC_GAGG))) ? 20 : 16);
 	char		perr[256];
 
 	spv = cache_load(m, e, &len);

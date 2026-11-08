@@ -25,7 +25,8 @@ enum
 	SPEC_GAGG,				/* gagg.slang */
 	SPEC_JOIN,				/* join.slang */
 	SPEC_JAGG,				/* jagg.slang */
-	SPEC_JGAGG				/* jgagg.slang */
+	SPEC_JGAGG,				/* jgagg.slang */
+	SPEC_GTAB				/* gtab.slang: GROUP BY into the session-wide table (up to four keys) */
 };
 
 /* a kind or'ed with SPEC_ARROW: the same kernel with an Arrow record batch as the outer relation (-DARROW_SRC) */
