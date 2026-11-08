@@ -131,6 +131,7 @@ typedef struct agg_state
 	recheck_buf	rck;				/* rows for the backend, sent with the final reply */
 	struct group_table *groups;		/* GROUP BY: the groups of the session (NULL otherwise) */
 	struct gtab_state *gt;			/* GROUP BY over many groups: the hash table in device memory (gtab.slang), NULL if not used */
+	struct str_dict *sdict;			/* GROUP BY a string key: the distinct values, a group's key is the id (A6) */
 	int			nagg;
 	uint64_t	n[SCAN_AGG_MAX];		/* count, number of values, or "has a value" (min/max) */
 	__int128	sum[SCAN_AGG_MAX];		/* sums, exact */
@@ -161,7 +162,13 @@ int		scan_gtab_pipeline(scan_engine *eng, int arrow, int variant, gpu_vk_pipelin
 int		scan_gtab_open(gpu_vk_ctx *vk, const kern_session_info *session, const scan_prog *prog, agg_state *st, char *err, size_t errlen);
 gpu_vk_buffer *scan_gtab_buffer(agg_state *st);
 int		scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, char *err, size_t errlen);
-int		scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count);
+/*
+ * A string-key table points into the task's pages: at the end of every task its groups are merged into the session's (the
+ * strings read through srcs[0..1]: the buffers that source 0 and 1 of a string register name) and it is cleared.
+ */
+int		scan_gtab_task_flush(const scan_prog *prog, agg_state *st, const unsigned char *const *srcs, char *err, size_t errlen);
+int		scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
+								 const unsigned char *const *srcs);
 int		scan_gtab_forced(const agg_state *st, const scan_prog *prog);
 int		scan_gtab_switch_allowed(void);
 int		scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen);

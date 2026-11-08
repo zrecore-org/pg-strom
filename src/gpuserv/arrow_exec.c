@@ -1855,6 +1855,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 	uint32_t   *hdr;
 	double		t0 = arrow_now_ms(), t1 = 0, tg = 0;
 	const uint32_t ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * 12;
+	const unsigned char *srcs[4] = { NULL, NULL, NULL, NULL };
 
 	err[0] = '\0';
 	if (arrow_task_parse(task, &at, err, errlen) != 0)
@@ -1875,6 +1876,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 	t1 = arrow_now_ms();
 	st->nitems_raw += nrows;
 	hdr = (uint32_t *) scan_gtab_buffer(st)->map;
+	srcs[0] = (const unsigned char *) at.bg.map;		/* the string registers of an Arrow row point into the data buffer */
 	for (uint32_t first = 0; first < nrows; first += ARROW_GTAB_PASS_ROWS)
 	{
 		uint32_t	n = nrows - first, pages, ngroups, nmiss = 0, ncpu = 0, hits0;
@@ -1970,7 +1972,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 			uint32_t	ovf_base = 4 + pages * ARROW_VP;
 
 			if (out[ovf_base] != ncpu ||
-				scan_gtab_merge_overflow(prog, st, out + ovf_base + 1, ncpu) != 0)
+				scan_gtab_merge_overflow(prog, st, out + ovf_base + 1, ncpu, srcs) != 0)
 			{
 				snprintf(err, errlen, out[ovf_base] != ncpu ? "the group table overflow list is inconsistent"
 						 : "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
@@ -1981,6 +1983,8 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		gpu_vk_buffer_destroy(vk, &bout);
 		have_out = 0;
 	}
+	if (prog->has_str_key && scan_gtab_task_flush(prog, st, srcs, err, errlen) != 0)
+		goto done;
 	st->npages_vfs_read += (uint32_t)((at.kds_src->length > (uint64_t) at.ad.as.head
 									   ? at.kds_src->length - at.ad.as.head : 0) / BLCKSZ);
 	if (scan_gtab_task_done(vk, prog, st, err, errlen) != 0)

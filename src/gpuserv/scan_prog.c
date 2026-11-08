@@ -1423,10 +1423,25 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					goto error;
 				}
 				vt = reg_vtype(kk->exptype, &bytes);
-				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_NUM)
+				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_NUM && vt != SOP_VT_STR)
 				{
 					fail(&b, "GROUP BY key of an unsupported type (opcode type %u)", kk->exptype);
 					goto error;
+				}
+				if (vt == SOP_VT_STR)
+				{
+					/* a string key is a column of the scanned relation (its bytes are compared in the group table) */
+					const kern_expression *k0 = KEXP_FIRST_ARG(kk);
+
+					if (k0->opcode != FuncOpCode__VarExpr || k0->u.v.var_slot_id >= b.nslots ||
+						b.slot_resno[k0->u.v.var_slot_id] <= 0 ||
+						(kk->exptype != TypeOpCode__text && kk->exptype != TypeOpCode__bpchar))
+					{
+						fail(&b, "a GROUP BY string key must be a column");
+						goto error;
+					}
+					prog->key_str[nkeys] = (kk->exptype == TypeOpCode__bpchar) ? 2 : 1;
+					prog->has_str_key = 1;
 				}
 				key_isnum[nkeys] = (vt == SOP_VT_NUM);
 				prog->key_scale[nkeys] = -1;
@@ -1817,6 +1832,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	w[12] = nkeys;
 	w[13] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;	/* keyoff */
 	w[20] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys;	/* constant pool (strings) */
+	for (int k = 0; k < nkeys && k < SCAN_GROUP_KEYS; k++)				/* gtab.slang: the string keys */
+		if (prog->key_str[k])
+			w[21] |= (1u << k) | (prog->key_str[k] == 2 ? (1u << (4 + k)) : 0);
 	for (int c = 0; c < ncols; c++)
 	{
 		const kern_colmeta *cm = &kds_src->colmeta[c];

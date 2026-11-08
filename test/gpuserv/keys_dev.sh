@@ -70,6 +70,13 @@ sql "alter table tki alter column ext set storage external"
 sql "update tki set ext = ext where i % 1 = 0"
 sql "insert into tki select i + 5000, k, kv, kb, n, big, ext, grp from tki where i % 10 = 0"
 sql "vacuum analyze tko"; sql "vacuum analyze tki"
+# GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
+# table is sized for the estimate and overflows); tkb is big enough for several tasks
+sql "create table tkm as select md5((i % 100)::text) as k, (i % 7)::int4 as n, i::int8 as v from generate_series(1, 20000) i"
+sql "analyze tkm"
+sql "insert into tkm select md5((100 + i)::text), (i % 7)::int4, i::int8 from generate_series(1, 100000) i"
+sql "create table tkb as select 'key' || (i % 3000) as k, (i % 11)::int4 as n, i::int8 as v, repeat('x', 40) as pad from generate_series(1, ${KEYS_BIG:-2000000}) i"
+sql "vacuum analyze tkb"
 
 # the same keys as an Arrow file, a Parquet file and a GPU-Cache (tkoa / tkop / tkog: the first 30000 rows of tko)
 KDIR=$ROOT/arrow; mkdir -p "$KDIR"
