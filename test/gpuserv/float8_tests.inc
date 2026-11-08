@@ -212,5 +212,6 @@ for t in $(f8part joinagg); do
 	rungrp $t "sum(float4) over a join per group" "select d.grp, sum((t.a % 8)::float4), sum((d.k % 5)::float4), count(*) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
 	GRPANY=1	# (the planner prices 40,000 groups above the CPU plan: the result must still be equal)
 	rungrp $t "many groups over a join (overflow rows)" "select d.k, sum(d.v), min(t.x), max(d.u) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
+	GRPANY=0
 done
 GRPANY=0
