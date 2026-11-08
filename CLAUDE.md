@@ -20,7 +20,7 @@ make -C src/gpuserv                                                          # t
 ```
 
 - `WITH_GPUSERV=auto|1|0` (default auto): build the service when `slangc` and the Vulkan headers are found; `1` makes a missing prerequisite an error.
-- The service Makefile writes `.d` dependency files, so a changed header rebuilds what includes it. Every VM kernel is built twice: the full one and `<name>_lite` (`-DVM_NO_NUM/JSON/F8/GEOM`, no numeric, jsonb, float8 or geometry instructions). `scan_prog.feat` says which groups a program uses and a program with none runs on the lite kernels, which compile in a fraction of the time (the full join kernel is 9.6 MB of SPIR-V and the lite one 0.9 MB; Metal needs minutes for the full one, once after every change of `kernels_vm/`).
+- The service Makefile writes `.d` dependency files, so a changed header rebuilds what includes it. Every VM kernel is built in three tiers: the full one, `<name>_nogeom` (`-DVM_NO_GEOM`: numeric, jsonb and float8 but no geometry) and `<name>_lite` (`-DVM_NO_NUM/JSON/F8/GEOM`: none of the optional groups). `scan_prog.feat` says which groups a program uses and `scan_feat_tier()` (`scan_caps.h`) picks the tier: no group -> lite, geometry -> full, anything else -> nogeom; the pipeline arrays of `scan_engine` are indexed by register variant + variants-per-tier * tier. The tiers compile in a fraction of the time (the join kernel is 9.6 MB of SPIR-V full, 2.98 MB nogeom, 0.9 MB lite; Metal needs minutes for the full one, once after every change of `kernels_vm/`). A new geometry opcode must be classified in `scan_vm_op_feat()` (`scan_caps.c`, the range 130-199 is the geometry group) or `src/gpuserv/feat_check` fails (`spec_compile_check.sh` runs it).
 - `PGSTROM_DEBUG=1`: `-g -O0 -DPGSTROM_DEBUG_BUILD`. `PGSTROM_FLAGS_CUSTOM`: extra host flags.
 - `libarrow` and `libparquet` are required (`brew install apache-arrow pkgconf` on macOS); `libnuma` is optional. Host C++ uses C++20. GNU make 3.81 and the macOS `sh` are supported (no `echo -n`, `\#` inside `$(shell)`).
 - The extension must be loaded at postmaster start: `shared_preload_libraries = 'pg_strom'`. The postmaster probes the Vulkan devices by running `pgstrom-gpuserv --probe`, and a launcher background worker runs and restarts the service (`pg_strom.gpuserv_path`, `pg_strom.gpu_allow_cpu_device`, `pg_strom.gpu_visible_devices`).
@@ -29,6 +29,8 @@ make -C src/gpuserv                                                          # t
 ## Tests
 
 GPU-Cache: `sh test/gpuserv/locked_test.sh "$PWD" gpucache_dev.sh` runs `test/gpuserv/gpucache_tests.inc` alone (the full `scan_test.sh` sources it); `make -C src/gpuserv gcache_check && src/gpuserv/gcache_check` checks the cache store without a GPU.
+
+`make -C src/gpuserv feat_check && src/gpuserv/feat_check` checks the kernel tier classification of every opcode without a GPU (also run by `spec_compile_check.sh`); `sh test/gpuserv/locked_test.sh "$PWD" tier_latency.sh` prints the first-query latency and the interpreter pipelines (SPIR-V size, creation time) per tier, next to the same queries with `PGSTROM_GPUSERV_TIERS=full`.
 
 ```
 GPUSERV_BIN=src/gpuserv/pgstrom-gpuserv sh test/gpuserv/service_test.sh     # service lifecycle (throwaway cluster)

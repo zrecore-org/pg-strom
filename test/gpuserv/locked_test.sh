@@ -41,6 +41,10 @@ if ! $LOWPRI make -C "$TREE/src" PG_CONFIG="$PG_CONFIG" -j"${TEST_JOBS:-3}" inst
 fi
 rm -f /tmp/locked_test_build.$$.log
 PKGLIB=$("$PG_CONFIG" --pkglibdir)
+# The first start of a freshly installed binary of 450 MB is slow (about 5 s on an idle machine, much more on a busy one:
+# the system checks the executable); the postmaster gives the start-up probe 60 s and a test waits 40 s for the service.
+# Start it once here, outside those limits.
+"${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv}" --probe >/dev/null 2>&1
 # Kernels whose SPIR-V changed with this build are compiled by the driver once, here, instead of at the first query
 # of the test (PREWARM=off skips it; the service keeps the result in its pipeline cache file).
 case "$TEST" in perf_bench.sh) ;; *) sh "$TREE/test/gpuserv/prewarm_kernels.sh" "$TREE" "${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv}" ;; esac

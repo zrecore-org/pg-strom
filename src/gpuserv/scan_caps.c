@@ -40,6 +40,28 @@ scan_vm_opcode_name(uint32_t opcode)
 }
 
 
+int		scan_tier_full_only = 0;
+
+/*
+ * The feature group an instruction needs (SCAN_FEAT_*; 0: compiled into every kernel). Mirrors the guards of
+ * scan_common.slang vm_step(). Instructions 130 up are the geometry group (feat_check.c verifies that every GEOM* opcode
+ * of scan_vm_ops.inc is in it); NULLMRG sits among them but is always compiled in. A geometry instruction that is not
+ * classified here would run on a kernel without geometry and fail as a malformed program.
+ */
+uint32_t
+scan_vm_op_feat(uint32_t op)
+{
+	if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
+		return SCAN_FEAT_NUM;
+	if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
+		return SCAN_FEAT_JSON;
+	if (op >= SOP_CMPD && op <= SOP_D2F)
+		return SCAN_FEAT_F8;
+	if (op >= SOP_GEOMBOX && op < 200 && op != SOP_NULLMRG)
+		return SCAN_FEAT_GEOM;
+	return 0;
+}
+
 static int
 int_width_of_digit(char c)
 {

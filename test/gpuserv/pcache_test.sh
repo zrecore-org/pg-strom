@@ -3,13 +3,13 @@
 # cold (empty directory) and warm (second service start), and the handling of a corrupt, truncated or foreign cache
 # file. Needs the GPU but no cluster; run it through locked_test.sh (one service on the GPU at a time):
 #
-#   sh test/gpuserv/locked_test.sh "$PWD" pcache_test.sh        [KERNELS="gpujoin16 gpujoin16_lite"] [DEV=0]
+#   sh test/gpuserv/locked_test.sh "$PWD" pcache_test.sh        [KERNELS="gpujoin16 gpujoin16_lite gpujoin16_nogeom ..."] [DEV=0]
 #
 # The numbers are printed ("pcache <kernel> create_ms=.."); the OS's own shader cache (Metal) is not cleared, so
 # "cold" is cold for the Vulkan cache only. The checks are about the files, not the speed (a warm run must not be
 # slower than half again the cold run).
 D=$(cd "$(dirname "$0")/../.." && pwd)
-KERNELS=${KERNELS:-gpujoin16 gpujoin16_lite}
+KERNELS=${KERNELS:-gpujoin16 gpujoin16_lite gpujoin16_nogeom}
 DEV=${DEV:-0}
 TESTDATA=${PGSTROM_TEST_DATA:-/Volumes/CrucialX9/Projects/pg-strom/test-data}
 W=${ROOT:-$TESTDATA/pcache_test}
@@ -22,7 +22,7 @@ rm -rf "$W"; mkdir -p "$W/cache"
 export PGSTROM_GPUSERV_CACHE_DIR=$W/cache PGSTROM_GPUSERV_PIPELINE_LOG=1
 run() { "$BIN" "$DEV" $KERNELS >"$W/$1.out" 2>"$W/$1.err"; _rc=$?; sed 's/^/        /' "$W/$1.out"; return $_rc; }
 total() { awk '{for(i=1;i<=NF;i++) if ($i ~ /^create_ms=/) {split($i,a,"="); s+=a[2]}} END{print s+0}' "$W/$1.out"; }
-nfiles() { ls "$W/cache"/pipeline-*.bin 2>/dev/null | wc -l | awk '{print $1+0}'; }
+nfiles() { ls "$W/cache"/pipeline-*.bin 2>/dev/null | grep -v "pipeline-spec-" | wc -l | awk '{print $1+0}'; }
 
 echo "cache off"
 (PGSTROM_GPUSERV_PIPELINE_CACHE=off; export PGSTROM_GPUSERV_PIPELINE_CACHE; run off); check "pipelines created with the cache off" $?
@@ -31,7 +31,7 @@ echo "cache off"
 echo "cold"
 run cold; check "pipelines created, cold cache" $?
 [ "$(nfiles)" -eq 1 ]; check "one cache file written" $?
-F=$(ls "$W/cache"/pipeline-*.bin | head -1)
+F=$(ls "$W/cache"/pipeline-*.bin | grep -v "pipeline-spec-" | head -1)
 SZ=$(wc -c < "$F" | awk '{print $1}')
 echo "        cache file: $SZ bytes"
 [ "$SZ" -gt 64 ]; check "the file holds more than a header" $?
@@ -77,6 +77,13 @@ run foreign; check "a file of another device is ignored" $?
 cp "$W/good.bin" "$F"
 printf '\377\377\377\377\377\377\377\377' | dd of="$F" bs=1 seek=$((SZ / 2)) conv=notrunc 2>/dev/null
 run body; check "a file with a damaged body does not break pipeline creation" $?
+
+echo "specialized kernels have their own file; the pipeline cache directory has its own variable"
+mkdir -p "$W/pcdir"
+(PGSTROM_GPUSERV_PIPELINE_CACHE_DIR=$W/pcdir; PCACHE_SPEC=1; export PGSTROM_GPUSERV_PIPELINE_CACHE_DIR PCACHE_SPEC; run spec); check "specialized pipelines created" $?
+ls "$W/pcdir"/pipeline-spec-*.bin >/dev/null 2>&1; check "the specialized kernels' cache file is written, in PGSTROM_GPUSERV_PIPELINE_CACHE_DIR" $?
+ls "$W/pcdir"/pipeline-[0-9a-f]*.bin >/dev/null 2>&1; [ $? -ne 0 ]; check "no interpreter cache file from specialized kernels" $?
+ls "$W/cache"/pipeline-spec-*.bin >/dev/null 2>&1; [ $? -ne 0 ]; check "the variable overrides PGSTROM_GPUSERV_CACHE_DIR" $?
 
 echo "no cache directory"
 (PGSTROM_GPUSERV_CACHE_DIR=none; HOME=/nonexistent; XDG_CACHE_HOME=; export PGSTROM_GPUSERV_CACHE_DIR HOME XDG_CACHE_HOME; run nodir); check "pipelines created without a cache directory" $?
