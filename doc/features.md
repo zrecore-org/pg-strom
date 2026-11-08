@@ -26,8 +26,8 @@ it when it is ready (plan item A6; `pg_strom.gpu_specialize`, `PGSTROM_GPUSERV_S
 |---|---|---|
 | Sources | Heap tables (page by page); a table's GPU-Cache (see below); Arrow IPC files and Parquet files through Arrow_Fdw (GpuScan, GpuPreAgg and GpuJoin as the outer relation, and as the inner side of a GpuJoin) | BRIN-index assisted scans: not tested on this branch |
 | Scan (`GpuScan`) | Quals and computed projections over the types below; pass-through columns of any type; UPDATE and DELETE scans; query parameters | See "types" |
-| Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | float and text aggregates, `min`/`max` of numeric, `sum`/`avg` of numerics whose scale is not fixed by the plan; GROUP BY with more groups than `pg_strom.gpupreagg_max_groups` |
-| Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop and GiST joins, more than four inner relations, non-integer/non-bool/non-temporal keys |
+| Aggregation (`GpuPreAgg`) | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max` of integers (also `min`/`max` of dates and times), with `FILTER`; with and without GROUP BY | `sum(float4)`; float `avg`/`min`/`max`/`sum` with GROUP BY (without GROUP BY all but `sum(float4)` run); `min`/`max` of text, bool aggregates (`bool_and`, `bool_or`, `every`), `bit_*`, variance / stddev / corr / regr_*, `min`/`max` of numeric, `sum`/`avg` of a numeric whose scale is not fixed by the plan, a CASE expression as an aggregate argument; DISTINCT, ordered-set and `ORDER BY` aggregates, `string_agg` / `array_agg` (by design); GROUP BY with more groups than `pg_strom.gpupreagg_max_groups`, with three or more keys, or with a key of type float, text, bool or uuid, GROUPING SETS (measured by `coverage_test.sh`) |
+| Joins (`GpuJoin`) | Hash joins: inner, LEFT, RIGHT, FULL, semi, anti; up to four inner relations per GpuJoin | Nest-loop joins (non-equi, range, cross, LATERAL: no GpuNestLoop); keys of type float, numeric, text, varchar, bpchar, uuid and bool; `IS NOT DISTINCT FROM`; a hashed `NOT IN` SubPlan; GiST joins only in the forms of "GiST-index spatial join" below. More than four inner relations are planned as a chain of stacked GpuJoins (measured), not one GpuJoin |
 | Sorting (`GPU-Sort`, off by default: `pg_strom.enable_gpusort`) | The groups of a non-parallel GpuPreAgg: `GROUP BY ... ORDER BY` on group keys, `count`, integer `sum`/`min`/`max`, ASC/DESC, NULLS FIRST/LAST, up to 8 keys, `LIMIT` pushed into the sort, `rank()`/`dense_rank()`/`row_number()` below N per partition | Sorting of scan/join results, `avg`, float/numeric keys, parallel plans, `cpu_fallback = on` |
 | Other | GPU-Cache (below) | PostGIS beyond the box operators, point-in-polygon, `ST_DWithin`, `ST_Z` / `ST_M` and `ST_3DDWithin` of two points (not yet), SELECT INTO direct (dropped) |
 
@@ -92,7 +92,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 - Without GROUP BY (`count`, `sum`, `avg`, `min`, `max` of integers): 2.6x to 4x faster than 8-process
   PostgreSQL on a 16.8M-row table (plan A3).
 - With GROUP BY on **up to two** keys of type `int1/2/4/8`, `date`, `time`, `timestamp` or
-  `timestamptz` (a `bool` key is not offloaded). **GROUP BY is only worth it for up to about a hundred
+  `timestamptz`, or `numeric` (keys of type bool, float, text, varchar, bpchar and uuid, and three or more keys, are not offloaded). **GROUP BY is only worth it for up to about a hundred
   groups:** with the specialized kernels (plan A6) 5.7x faster than 8-process PostgreSQL at 7 groups and 3.9x at
   100 (dense integer keys; a direct-mapped table), 3.5x for a GROUP BY over a join; with the interpreter
   alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
@@ -113,11 +113,10 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 - Hash joins only. `INNER`, `LEFT`, `RIGHT`, `FULL`, semi (`EXISTS`, `IN`) and anti (`NOT EXISTS`, and
   `NOT IN` where PostgreSQL 18+ plans an anti join) joins; up to **four inner relations in one GpuJoin**
   (shown as `[1]` to `[4]`).
-- Join keys: integer, `bool` and the four temporal types. Any pushed-down join qualifier over the VM's
+- Join keys: integers and the four temporal types (a `bool` key stays on the CPU: `booleq` has no device function; measured by `test/gpuserv/coverage_test.sh`). Any pushed-down join qualifier over the VM's
   types, scan quals on the outer side, projections mixing outer and inner columns (pass-through of
   any type included).
-- Stays on PostgreSQL: nest-loop and GiST joins; more than four inner relations; non-integer keys
-  (text, numeric, float); an outer join with a qualifier coming from the WHERE clause; RIGHT and FULL
+- Stays on PostgreSQL: nest-loop joins; non-integer keys (float, numeric, text, varchar, bpchar, uuid, bool); an outer join with a qualifier coming from the WHERE clause; RIGHT and FULL
   joins in a parallel plan; PostgreSQL's "unique-ified" semi joins.
 - Performance: a selective join (6,000 result rows from a 2M-row outer and a 4,000-row inner) 12.5 ms
   against 24.8 ms for 8-process PostgreSQL; an unselective one (1.6M result rows) 175 ms against 62 ms,

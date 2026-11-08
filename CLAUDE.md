@@ -40,6 +40,7 @@ make -C test/port && test/port/port_test                                    # po
 sh test/gpuserv/f64soft_check.sh [N [device|-1]]                              # software binary64 (kernels_vm/f64_soft.inc) vs the hardware double, on the host and the device (no lock, no cluster)
 sh test/gpuserv/spec_compile_check.sh                                       # generator: every kernel kind's generated source compiles with slangc (no GPU, no lock)
 sh test/gpuserv/locked_test.sh "$PWD" spec_dev.sh                           # kernel specialization tests on a small data set (the section scan_test.sh sources as spec_tests.inc)
+sh test/gpuserv/locked_test.sh "$PWD" coverage_test.sh                      # A14 coverage assertion: ~600 join / GROUP BY shapes must plan as GpuJoin / GpuPreAgg unless listed in coverage_cpu_allowed.txt (the list may only shrink); GPU rows = CPU rows; prints the gap table (COVERAGE_ONLY=<regex>, COVERAGE_ROWS=0 for EXPLAIN only)
 sh test/gpuserv/locked_test.sh "$PWD" perf_bench.sh                         # benchmark: 16.8M rows, GPU vs 8-worker PostgreSQL, kernel ms per task (SPECS="off default" compares variants)
 ```
 
