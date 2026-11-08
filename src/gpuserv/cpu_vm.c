@@ -995,6 +995,8 @@ geom_dwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, ui
 
 		if (F64_NONFINITE(q))
 			return SOP_RECHECK_CODE;
+		if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
+			return SOP_RECHECK_CODE;		/* beyond FLT_MAX, PostGIS' initial distance */
 		*res = f64_le(f64_sqrt(q), tol);
 	}
 	else
@@ -1090,13 +1092,15 @@ gd_hdr(const unsigned char *s, uint32_t len, uint32_t *srid, uint32_t *nd, uint3
 /* ---- ST_Distance of a point and a line, polygon, multi-geometry or collection: the same as gd_geom() of scan_common.slang (see the comment
  * there: one loop over the members, one containment test, one segment projection, one distance) ---- */
 static int
-gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t *best, int *found)
+gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t pz, int d3, uint64_t *best, int *found)
 {
 	uint32_t	srid = 0, nd = 2, o = 0, gtype = gd_hdr(s, len, &srid, &nd, &o), p = o, end = len, stride, rem0 = 1, rem1 = 0;
 
 	if (gtype == 0 || gtype > 7)
 		return 1;
 	stride = 8 * nd;
+	if (d3 && (s[3] & 1) == 0)
+		return 1;
 	if (gtype >= 4)
 	{
 		rem0 = ld32u(s + p + 4);
@@ -1161,6 +1165,8 @@ gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t
 			uint32_t	data = base + 4 * n + ((n & 1) ? 4 : 0), q = data;
 			int			decided = 0;
 
+			if (d3)
+				return 1;
 			if (n > (end - base) / 4 || data > end)
 				return 1;
 			for (uint32_t r = 0; r < n; r++)
@@ -1197,56 +1203,101 @@ gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t
 			return 1;
 		if (measure)
 		{
-			uint64_t	ax = ld64u(s + aoff), ay = ld64u(s + aoff + 8);
+			uint64_t	ax = ld64u(s + aoff), ay = ld64u(s + aoff + 8), az = d3 ? ld64u(s + aoff + 16) : 0;
 
 			*found = 1;
 			for (uint32_t i = 0; i < an; i++)
 			{
-				uint64_t	bx = ax, by = ay, qx, qy, rad = 0, scl = 0x3FF0000000000000ull, dd;
+				uint64_t	bx = ax, by = ay, bz = az, qx, qy, qz, rad = 0, scl = 0x3FF0000000000000ull, dd;
 				int			inside = 0;
 
 				if (i > 0)
 				{
 					bx = ld64u(s + aoff + i * stride);
 					by = ld64u(s + aoff + i * stride + 8);
+					if (d3)
+						bz = ld64u(s + aoff + i * stride + 16);
 				}
-				if (F64_NONFINITE(bx) || F64_NONFINITE(by))
+				if (F64_NONFINITE(bx) || F64_NONFINITE(by) || (d3 && F64_NONFINITE(bz)))
 					return 1;
 				qx = bx;
 				qy = by;
+				qz = bz;
 				if (i > 0)
 				{
 					qx = ax;
 					qy = ay;
-					if (!(f64_eq(ax, bx) && f64_eq(ay, by)))
+					qz = az;
+					if (!(f64_eq(ax, bx) && f64_eq(ay, by) && (!d3 || f64_eq(az, bz))))
 					{
 						uint64_t	bxa = f64_sub(bx, ax), bya = f64_sub(by, ay);
 						uint64_t	pxa = f64_sub(px, ax), pya = f64_sub(py, ay);
+						uint64_t	bza = d3 ? f64_sub(bz, az) : 0, pza = d3 ? f64_sub(pz, az) : 0;
 						uint64_t	num = f64_fma(pxa, bxa, f64_mul(pya, bya));
-						uint64_t	den = f64_fma(bxa, bxa, f64_mul(bya, bya)), mag;
+						uint64_t	den = f64_fma(bxa, bxa, f64_mul(bya, bya));
+						uint64_t	mag = f64_add(f64_mul(pxa, bxa) & F64_MAG, f64_mul(pya, bya) & F64_MAG);
 
-						if (F64_NONFINITE(bxa) || F64_NONFINITE(bya) || F64_NONFINITE(pxa) || F64_NONFINITE(pya) ||
-							F64_NONFINITE(num) || F64_NONFINITE(den) || (den & F64_MAG) == 0)
-							return 1;
-						mag = f64_add(f64_mul(pxa, bxa) & F64_MAG, f64_mul(pya, bya) & F64_MAG);
-						if (f64_le(num & F64_MAG, f64_mul(mag, 0x3D70000000000000ull)) ||
-							f64_le(f64_sub(num, den) & F64_MAG, f64_mul(f64_add(mag, den), 0x3D70000000000000ull)))
-							return 1;
-						if (f64_gt(num, den))
+						if (d3)
 						{
-							qx = bx;
-							qy = by;
+							num = f64_fma(pza, bza, num);
+							den = f64_fma(bza, bza, den);
 						}
-						else if (!f64_lt(num, 0))
+						if (F64_NONFINITE(bxa) || F64_NONFINITE(bya) || F64_NONFINITE(pxa) || F64_NONFINITE(pya) ||
+							F64_NONFINITE(bza) || F64_NONFINITE(pza) || F64_NONFINITE(num) || F64_NONFINITE(den) ||
+							(den & F64_MAG) == 0)
+							return 1;
+						if (d3)
 						{
-							uint64_t	cross = f64_fma(f64_sub(ay, py), bxa, f64_mul(f64_sub(ax, px), bya) ^ F64_SIGN);
-							uint64_t	sv = f64_div(cross, den);
+							uint64_t	rr = f64_div(num, den);
 
-							if (F64_NONFINITE(sv))
+							if (F64_NONFINITE(rr))
 								return 1;
-							scl = sv & F64_MAG;
-							rad = den;
-							inside = 1;
+							if (f64_gt(rr, 0x3FF0000000000000ull))
+							{
+								qx = bx;
+								qy = by;
+								qz = bz;
+							}
+							else if (!f64_lt(rr, 0))
+							{
+								qx = f64_fma(rr, bxa, ax);
+								qy = f64_fma(rr, bya, ay);
+								qz = f64_fma(rr, bza, az);
+							}
+						}
+						else
+						{
+							if (f64_le(num & F64_MAG, f64_mul(mag, 0x3D70000000000000ull)) ||
+								f64_le(f64_sub(num, den) & F64_MAG, f64_mul(f64_add(mag, den), 0x3D70000000000000ull)))
+								return 1;
+							if (f64_gt(num, den))
+							{
+								qx = bx;
+								qy = by;
+							}
+							else if (!f64_lt(num, 0))
+							{
+								/* a vertical or horizontal segment: |px - ax| / |py - ay| exactly (see the kernel) */
+								uint64_t	sv;
+
+								if (f64_eq(ax, bx))
+									sv = f64_sub(px, ax) & F64_MAG;
+								else if (f64_eq(ay, by))
+									sv = f64_sub(py, ay) & F64_MAG;
+								else
+								{
+									uint64_t	cross = f64_fma(f64_sub(ay, py), bxa, f64_mul(f64_sub(ax, px), bya) ^ F64_SIGN);
+
+									sv = f64_div(cross, den);
+									rad = den;
+								}
+								if (F64_NONFINITE(sv))
+									return 1;
+								scl = sv & F64_MAG;
+								if (f64_eq(ax, bx) || f64_eq(ay, by))
+									rad = 0x3FF0000000000000ull;
+								inside = 1;
+							}
 						}
 					}
 				}
@@ -1255,6 +1306,14 @@ gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t
 					uint64_t	h = f64_sub(qx, px), v = f64_sub(qy, py);
 
 					rad = f64_sqr_add(h, f64_mul(v, v));
+					if (d3)
+					{
+						uint64_t	w = f64_sub(qz, pz);
+
+						if (F64_NONFINITE(w))
+							return 1;
+						rad = f64_sqr_add(w, rad);
+					}
 					if (F64_NONFINITE(h) || F64_NONFINITE(v))
 						return 1;
 				}
@@ -1267,6 +1326,7 @@ gd_geom(const unsigned char *s, uint32_t len, uint64_t px, uint64_t py, uint64_t
 					*best = dd;
 				ax = bx;
 				ay = by;
+				az = bz;
 			}
 		}
 	}
@@ -1289,50 +1349,6 @@ geom_dist(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint3
 	int			ea = 0, eb = 0, hza = 1, hzb = 1;
 
 	*isnull = 0;
-	/* a point and something else (a line, a polygon, a multi-geometry, a collection): the 2D distance only */
-	{
-		uint32_t	hsa = 0, hsb = 0, hna = 0, hnb = 0, hoa = 0, hob = 0;
-		uint32_t	ta = fa ? 1 : gd_hdr(str_ptr(env, a.v), str_len(a.v), &hsa, &hna, &hoa);
-		uint32_t	tb = fb ? 1 : gd_hdr(str_ptr(env, b.v), str_len(b.v), &hsb, &hnb, &hob);
-
-		if (ta == 0 || tb == 0)
-			return SOP_RECHECK_CODE;
-		if (ta != 1 || tb != 1)
-		{
-			int			pa = (ta == 1), pe = 0, phz = 1, found = 0;
-			uint64_t	px = pa ? ax : bx, py = pa ? ay : by, pz = 0, best = 0x7FEFFFFFFFFFFFFFull;
-			uint32_t	psrid = k1 & 0xfffff;
-			vm_reg		g = pa ? b : a;
-
-			if (d3 || (ta != 1 && tb != 1))
-				return SOP_RECHECK_CODE;
-			if (pa ? !fa : !fb)
-			{
-				vm_reg		pr = pa ? a : b;
-
-				if (gdw3_load(str_ptr(env, pr.v), str_len(pr.v), &psrid, &px, &py, &pz, &phz, &pe))
-					return SOP_RECHECK_CODE;
-			}
-			if ((pa ? hsb : hsa) != psrid)
-				return SOP_RECHECK_CODE;
-			if (pe)
-			{
-				*isnull = 1;
-				return 0;
-			}
-			if (F64_NONFINITE(px) || F64_NONFINITE(py))
-				return SOP_RECHECK_CODE;
-			if (gd_geom(str_ptr(env, g.v), str_len(g.v), px, py, &best, &found))
-				return SOP_RECHECK_CODE;
-			if (!found)
-			{
-				*isnull = 1;
-				return 0;
-			}
-			*val = best;
-			return 0;
-		}
-	}
 	if (!fa && gdw3_load(str_ptr(env, a.v), str_len(a.v), &sa, &ax, &ay, &az, &hza, &ea))
 		return SOP_RECHECK_CODE;
 	if (!fb && gdw3_load(str_ptr(env, b.v), str_len(b.v), &sb, &bx, &by, &bz, &hzb, &eb))
@@ -1363,6 +1379,87 @@ geom_dist(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, uint3
 	if (F64_NONFINITE(dx) || F64_NONFINITE(dy) || F64_NONFINITE(q))
 		return SOP_RECHECK_CODE;
 	*val = f64_sqrt(q);
+	if (f64_lt(0x47EFFFFFE0000000ull, *val))
+		return SOP_RECHECK_CODE;
+	return 0;
+}
+
+/* ST_Distance / ST_3DDistance (op SOP_GEOMDIST), ST_DWithin (SOP_GEOMDWITHIN) and ST_3DDWithin (SOP_GEOM3DDW) with an operand that is not a point:
+ * the same as the non-point part of vm_geom_dwdist() of scan_common.slang. *np = 0: both operands are points (the caller calls geom_dist /
+ * geom_dwithin / geom_3ddwithin); else the result is in *isnull and *val (ST_DWithin: the boolean) or the return value is SOP_RECHECK_CODE.
+ * The null checks are the caller's. */
+static uint32_t
+geom_dwdist_np(const vm_env *env, const vm_reg *regs, uint32_t op, uint32_t ra, uint32_t rb, uint32_t k0, uint32_t k1,
+			   int *np, int *isnull, uint64_t *val)
+{
+	int			isdw = (op == SOP_GEOMDWITHIN || op == SOP_GEOM3DDW);
+	int			d3 = (op == SOP_GEOM3DDW) || (op == SOP_GEOMDIST && (k1 & SOP_GDIST_3D) != 0);
+	vm_reg		a = regs[ra], b = regs[rb];
+	vm_reg		ya = regs[(k0 >> 8) & 0xff], yb = regs[(k0 >> 16) & 0xff], t = regs[k0 >> 24];
+	vm_reg		za = regs[(k1 >> 20) & 0x1f], zb = regs[(k1 >> 25) & 0x1f];
+	int			fa = (k0 & SOP_GDW_FUSED_A) != 0, fb = (k0 & SOP_GDW_FUSED_B) != 0;
+	uint32_t	hsa = 0, hsb = 0, hna = 0, hnb = 0, hoa = 0, hob = 0;
+	uint32_t	ta = fa ? 1 : gd_hdr(str_ptr(env, a.v), str_len(a.v), &hsa, &hna, &hoa);
+	uint32_t	tb = fb ? 1 : gd_hdr(str_ptr(env, b.v), str_len(b.v), &hsb, &hnb, &hob);
+	int			pa = (ta == 1), pe = 0, phz = 1, found = 0;
+	uint64_t	px, py, pz, best = 0x7FEFFFFFFFFFFFFFull, tol = (uint64_t) t.v;
+	uint32_t	psrid = k1 & 0xfffff;
+	vm_reg		g = pa ? b : a;
+
+	*np = 0;
+	if (ta == 0 || tb == 0)
+		return SOP_RECHECK_CODE;
+	if (ta == 1 && tb == 1)
+		return 0;
+	*np = 1;
+	*isnull = 0;
+	if (ta != 1 && tb != 1)
+		return SOP_RECHECK_CODE;
+	if (isdw ? ((k0 & SOP_GDW_NP) == 0 || (k1 & SOP_GDW_EXACT) == 0) : (k0 & SOP_GDW_NP) == 0)
+		return SOP_RECHECK_CODE;
+	px = pa ? (uint64_t) a.v : (uint64_t) b.v;
+	py = pa ? (uint64_t) ya.v : (uint64_t) yb.v;
+	pz = pa ? (uint64_t) za.v : (uint64_t) zb.v;
+	if (pa ? !fa : !fb)
+	{
+		vm_reg		pr = pa ? a : b;
+
+		if (gdw3_load(str_ptr(env, pr.v), str_len(pr.v), &psrid, &px, &py, &pz, &phz, &pe))
+			return SOP_RECHECK_CODE;
+	}
+	if ((pa ? hsb : hsa) != psrid)
+		return SOP_RECHECK_CODE;
+	if (d3 && !phz)
+		return SOP_RECHECK_CODE;
+	if (isdw && (F64_NONFINITE(tol) || ((tol >> 63) != 0 && (tol & F64_MAG) != 0)))
+		return SOP_RECHECK_CODE;
+	*val = 0;
+	if (pe)
+	{
+		*isnull = !isdw;
+		return 0;
+	}
+	if (F64_NONFINITE(px) || F64_NONFINITE(py) || (d3 && F64_NONFINITE(pz)))
+		return SOP_RECHECK_CODE;
+	if (gd_geom(str_ptr(env, g.v), str_len(g.v), px, py, pz, d3, &best, &found))
+		return SOP_RECHECK_CODE;
+	if (!found)
+	{
+		*isnull = !isdw;
+		return 0;
+	}
+	if (isdw)
+	{
+		if (f64_lt(0x47EFFFFFE0000000ull, best))
+			return SOP_RECHECK_CODE;
+		*val = f64_le(best, tol) ? 1 : 0;
+	}
+	else
+	{
+		if (f64_lt(0x47EFFFFFE0000000ull, best))
+			return SOP_RECHECK_CODE;
+		*val = best;
+	}
 	return 0;
 }
 
@@ -1395,6 +1492,8 @@ geom_len(const unsigned char *s, uint32_t len, uint32_t k0, uint64_t *val)
 	if (gtype == 0 || gtype > 7)
 		return SOP_RECHECK_CODE;
 	stride = 8 * nd;
+	if (d3 && (s[3] & 1) == 0)
+		return 1;
 	if (gtype >= 4)
 	{
 		rem0 = ld32u(s + p + 4);
@@ -1591,6 +1690,8 @@ geom_3ddwithin(const vm_env *env, const vm_reg *regs, uint32_t ra, uint32_t rb, 
 
 		if (F64_NONFINITE(q))
 			return SOP_RECHECK_CODE;
+		if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
+			return SOP_RECHECK_CODE;		/* beyond FLT_MAX, PostGIS' initial distance */
 		*res = f64_le(f64_sqrt(q), tol);
 	}
 	else
@@ -1690,7 +1791,7 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 		case SOP_GEOMDIST:
 		{
 			vm_reg		a = regs[ra], b = regs[rb];
-			int			isnull = 0, d3 = (k1 & SOP_GDIST_3D) != 0;
+			int			isnull = 0, np = 0, d3 = (k1 & SOP_GDIST_3D) != 0;
 			uint64_t	val = 0;
 			uint32_t	rc;
 
@@ -1701,7 +1802,9 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				regs[dst].isnull = 1;
 				return 0;
 			}
-			rc = geom_dist(env, regs, ra, rb, k0, k1, &isnull, &val);
+			rc = geom_dwdist_np(env, regs, SOP_GEOMDIST, ra, rb, k0, k1, &np, &isnull, &val);
+			if (rc == 0 && !np)
+				rc = geom_dist(env, regs, ra, rb, k0, k1, &isnull, &val);
 			if (rc != 0)
 				return rc;
 			regs[dst].isnull = isnull;
@@ -1730,7 +1833,8 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 		case SOP_GEOM3DDW:
 		{
 			vm_reg		a = regs[ra], b = regs[rb];
-			int			res = 0;
+			int			res = 0, np = 0, isnull = 0;
+			uint64_t	val = 0;
 			uint32_t	rc;
 
 			if (a.isnull || b.isnull || regs[k0 >> 24].isnull ||
@@ -1740,7 +1844,11 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				regs[dst].isnull = 1;
 				return 0;
 			}
-			rc = geom_3ddwithin(env, regs, ra, rb, k0, k1, &res);
+			rc = geom_dwdist_np(env, regs, SOP_GEOM3DDW, ra, rb, k0, k1, &np, &isnull, &val);
+			if (rc == 0 && np)
+				res = (int) val;
+			else if (rc == 0)
+				rc = geom_3ddwithin(env, regs, ra, rb, k0, k1, &res);
 			if (rc != 0)
 				return rc;
 			regs[dst].isnull = 0;
@@ -1754,7 +1862,8 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 		case SOP_GEOMDWITHIN:
 		{
 			vm_reg		a = regs[ra], b = regs[rb];
-			int			res = 0;
+			int			res = 0, np = 0, isnull = 0;
+			uint64_t	val = 0;
 			uint32_t	rc;
 
 			if (a.isnull || b.isnull || regs[k0 >> 24].isnull ||
@@ -1764,7 +1873,11 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 				regs[dst].isnull = 1;
 				return 0;
 			}
-			rc = geom_dwithin(env, regs, ra, rb, k0, k1, &res);
+			rc = geom_dwdist_np(env, regs, SOP_GEOMDWITHIN, ra, rb, k0, k1, &np, &isnull, &val);
+			if (rc == 0 && np)
+				res = (int) val;
+			else if (rc == 0)
+				rc = geom_dwithin(env, regs, ra, rb, k0, k1, &res);
 			if (rc != 0)
 				return rc;
 			regs[dst].isnull = 0;

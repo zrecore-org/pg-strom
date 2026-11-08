@@ -2618,6 +2618,9 @@ typedef struct
 /* ST_DWithin / ST_3DDWithin of two points: the installed PostGIS decides "exact distance <= tolerance" (calibrated by the planner), so the
  * kernel need not keep a band around the boundary (codegen.c vulkan_geom_dwithin_exact_calibrated) */
 #define KEXP_FLAG__GEOM_EXACT			0x0002U
+/* ST_DWithin of a point and a line, polygon or multi-geometry (2D): the installed PostGIS decides it as the kernel's model of the distance
+ * does (codegen.c vulkan_geom_dwithin_np_calibrated); without the flag the kernel hands such rows to the backend */
+#define KEXP_FLAG__GEOM_NP				0x0004U
 
 #define SPECIAL_DEPTH__PREAGG_FINAL		(-2)
 
