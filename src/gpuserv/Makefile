@@ -203,6 +203,16 @@ f64soft_check.o: f64soft_check.c kernels_vm/f64_soft.inc gpu_vk.h
 f64soft_check: f64soft_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ f64soft_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
+# self-check of the string hash of the join kernels (kernels_vm/hash_bytes.inc) against PostgreSQL's hashtext() (test/gpuserv/hash_check.sh)
+build/hash_check.spv: kernels_check/hash_check.slang kernels_vm/hash_bytes.inc | build
+	$(SLANGC) kernels_check/hash_check.slang -I kernels_vm -target spirv -entry main -stage compute -o $@
+
+hash_check.o: hash_check.c gpu_vk.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+hash_check: hash_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ hash_check.o libgpuserv.a $(VK_LIBS) -lpthread
+
 ARROW_INCS := kernels_vm/arrow_load.inc
 build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }

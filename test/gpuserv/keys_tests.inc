@@ -25,4 +25,15 @@ runkj "text key and an integer key" "select t.i, d.i from %T t join %D d on t.k 
 runkj "text key with a qual on both sides" "select t.i, d.i from %T t join %D d on t.k = d.k where t.n < 20 and d.grp > 300"
 runkj "RIGHT join on a text key" "select t.i, d.i from %T t right join %D d on t.k = d.k"
 runkj "FULL join on a bpchar key" "select t.i, d.i from %T t full join %D d on t.kb = d.kb"
+# Arrow, Parquet and GPU-Cache outer relations (the inner side is the heap table tki)
+for src in tkoa tkop tkog; do
+	for col in k kv kb; do
+		runkj "$src.$col: inner join" "select t.i, d.i from $src t join %D d on t.$col = d.$col" "set pg_strom.enabled=on;"
+		runkj "$src.$col: LEFT join" "select t.i, d.i from $src t left join %D d on t.$col = d.$col"
+		runkj "$src.$col: count, sum, max over the join" "select count(*), sum(t.pay), max(d.grp) from $src t join %D d on t.$col = d.$col"
+		runkj "$src.$col: GROUP BY an integer over the join" "select t.n, count(*), sum(d.grp) from $src t join %D d on t.$col = d.$col group by t.n"
+	done
+done
+# an Arrow file as the inner relation
+runkj "heap outer, Arrow inner, text key" "select t.i, a.i from %T t join tkoa a on t.k = a.k where t.n < 10"
 echo

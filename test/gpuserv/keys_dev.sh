@@ -71,6 +71,24 @@ sql "update tki set ext = ext where i % 1 = 0"
 sql "insert into tki select i + 5000, k, kv, kb, n, big, ext, grp from tki where i % 10 = 0"
 sql "vacuum analyze tko"; sql "vacuum analyze tki"
 
+# the same keys as an Arrow file, a Parquet file and a GPU-Cache (tkoa / tkop / tkog: the first 30000 rows of tko)
+KDIR=$ROOT/arrow; mkdir -p "$KDIR"
+make -C "${0%/*}/../../arrow-tools" PG_CONFIG="$PGBIN/pg_config" pg2arrow >"$ROOT/pg2arrow.log" 2>&1
+check "pg2arrow builds" $?
+P2A="${0%/*}/../../arrow-tools/pg2arrow"
+KCOLS="i int4, k text, kv varchar(40), kb char(14), n int4, pay int8"
+KSEL="i, k, kv, kb, n, pay"
+$P2A -h "$ROOT" -p "$PORT" -u postgres -d scantest -c "select $KSEL from tko where i <= 30000 order by i" -s 2MB -o "$KDIR/tko.arrow" >"$ROOT/p2a1.log" 2>&1
+check "pg2arrow writes the Arrow file" $?
+$P2A -h "$ROOT" -p "$PORT" -u postgres -d scantest -c "select $KSEL from tko where i <= 30000 order by i" -s 2MB -q -o "$KDIR/tko.parquet" >"$ROOT/p2a2.log" 2>&1
+check "pg2arrow writes the Parquet file" $?
+sql "create foreign table tkoa ($KCOLS) server arrow_fdw options (file '$KDIR/tko.arrow')"
+sql "create foreign table tkop ($KCOLS) server arrow_fdw options (file '$KDIR/tko.parquet')"
+sql "create table tkog as select $KSEL from tko where i <= 30000"
+sql "vacuum analyze tkog"
+sql "create trigger gc_sync after insert or update or delete on tkog for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=90000')"
+sql "analyze tkoa"; sql "analyze tkop"
+
 GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 CPU="set max_parallel_workers_per_gather=0; set pg_strom.enabled=off;"
 q() { # query -> md5 of the sorted result text
