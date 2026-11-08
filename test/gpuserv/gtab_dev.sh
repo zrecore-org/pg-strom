@@ -78,6 +78,7 @@ n=0; while [ $n -lt 40 ]; do
 done
 check "service is ready with pg_strom.gpuserv_group_memory = 64" "$([ $n -lt 40 ]; echo $?)"
 . "${0%/*}/gtab_mem_tests.inc"
+[ "$(grep -c "group task:.*table" "$ROOT/log2")" -gt 0 ]; check "the memory-bound queries ran on the session table" $?
 echo
 nused=$(cat "$ROOT/log" "$ROOT/log2" 2>/dev/null | grep -c "group task:.*table")
 check "the session-wide table served the tasks ($nused task lines)" "$([ "$nused" -gt 0 ]; echo $?)"
