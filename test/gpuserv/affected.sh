@@ -25,13 +25,14 @@ for f in $files; do
 		src/gpuserv/specialize.c|src/gpuserv/spec_*.c|src/gpuserv/spec_*.h)
 			add spec_compile_check.sh; add spec_dev.sh ;;
 		src/gpuserv/scan_prog.c|src/gpuserv/scan_caps.c|src/gpuserv/cpu_vm.c|src/codegen.c|src/xpu_opcodes.h|src/gpuserv/scan_exec.c|src/gpuserv/arrow_exec.c)
-			full=1; add spec_compile_check.sh ;;
+			full=1; add spec_compile_check.sh; add coverage_test.sh ;;
 		test/gpuserv/*_dev.sh) add "$(basename "$f")" ;;
-		src/gist.c|src/gpu_join.c|test/gpuserv/gist_*) add gist_dev.sh ;;
+		src/gist.c|src/gpu_join.c|test/gpuserv/gist_*) add gist_dev.sh; add coverage_test.sh ;;
 		src/gpu_cache.c|src/gpuserv/gcache.c|test/gpuserv/gpucache_*) add gpucache_dev.sh; add recheck_dev.sh ;;
 		src/arrow_*|src/gpuserv/arrow*|test/gpuserv/arrow_*) add arrow_dev.sh; add recheck_dev.sh ;;
 		test/gpuserv/recheck_*) add recheck_dev.sh ;;
-		src/gpu_preagg.c|test/gpuserv/joinagg_*) add joinagg_dev.sh ;;
+		src/gpu_preagg.c|test/gpuserv/joinagg_*) add joinagg_dev.sh; add coverage_test.sh ;;
+		test/gpuserv/coverage_*) add coverage_test.sh ;;
 		test/gpuserv/gpusort_*) add gpusort_dev.sh ;;
 		test/gpuserv/postgis3d_*|test/gpuserv/postgis/*) add postgis3d_dev.sh; add postgis_dev.sh ;;
 		test/gpuserv/postgis_*) add postgis_dev.sh ;;
