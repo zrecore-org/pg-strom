@@ -1821,6 +1821,12 @@ uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
             if (f64_nonfinite(q))
                 return SOP_RECHECK_CODE;
+#ifndef WITH_INNER
+            // PostGIS starts its minimum at FLT_MAX: a distance beyond it is never seen (ST_DWithin is true for a tolerance >= FLT_MAX, ST_Distance NULL)
+            // (not in the join kernels: any change there makes Metal compile them again, ~5 minutes each; probe: postgis/fltmax_probe.sql)
+            if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
+                return SOP_RECHECK_CODE;
+#endif
             res = f64_le(f64_sqrt(q), tol);
         }
         else
@@ -1934,8 +1940,13 @@ uint gd_hdr(Reg r, inout uint srid, inout uint nd, inout uint o)
 // measure. One loop over the members, with exactly one copy of each heavy step (the containment test of a polygon's rings, the segment
 // projection, the distance): the Slang compiler inlines every call, so a step written once but called from several places multiplies the
 // kernel (the first version of this was 22 MB of SPIR-V per kernel).
-uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool found)
+[noinline] uint gd_geom(Reg g, uint64_t px, uint64_t py, uint64_t pz, bool d3in, inout uint64_t best, inout bool found)
 {
+#ifdef VM_NO_GEOM3D
+    const bool d3 = false;                              // (a variant without the 3D distance: the wrapper hands those to the backend)
+#else
+    bool d3 = d3in;
+#endif
     uint s = str_src(g);
     uint b = str_off(g);
     uint end = b + str_len(g);
@@ -1946,6 +1957,8 @@ uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool fo
     if (gtype == 0u || gtype > 7u)
         return 1u;
     uint stride = 8u * nd;
+    if (d3 && (ldb_s(s, b + 3u) & 1u) == 0u)
+        return 1u;                                      // the 3D distance needs a Z in the geometry
     uint p = b + o;
     uint rem0 = 1u;                                     // members still to read at the top level
     uint rem1 = 0u;                                     // members left in a multi-geometry inside a collection
@@ -2009,6 +2022,11 @@ uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool fo
         }
         else if (t == 3u)
         {
+#ifdef VM_NO_GEOMPOLY
+            return 1u;                                  // (a variant without polygons)
+#endif
+            if (d3)
+                return 1u;                              // the 3D distance of a polygon is the backend's (PostGIS projects onto its plane)
             uint data = base + 4u * n + ((n & 1u) != 0u ? 4u : 0u);
             if (n > (end - base) / 4u || data > end)
                 return 1u;
@@ -2050,23 +2068,31 @@ uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool fo
             found = true;
             uint64_t ax = ld64s(s, aoff);
             uint64_t ay = ld64s(s, aoff + 8u);
+            uint64_t az = d3 ? ld64s(s, aoff + 16u) : 0ull;
             for (uint i = 0u; i < an; i++)
             {
                 uint64_t bx = ax;
                 uint64_t by = ay;
+                uint64_t bz = az;
                 if (i > 0u)
                 {
                     bx = ld64s(s, aoff + i * stride);
                     by = ld64s(s, aoff + i * stride + 8u);
+                    if (d3)
+                        bz = ld64s(s, aoff + i * stride + 16u);
                 }
-                if (f64_nonfinite(bx) || f64_nonfinite(by))
+                if (f64_nonfinite(bx) || f64_nonfinite(by) || (d3 && f64_nonfinite(bz)))
                     return 1u;
-                // the distance of this step is scl * sqrt(rad): to a vertex (the first step; a segment's end A or B when the point projects
+                // the distance of this step is scl * sqrt(rad). 2D: to a vertex (the first step; a segment's end A or B when the point projects
                 // before or after it): rad = h^2 + v^2, scl = 1; to the inside of a segment A -> B: PostGIS' distance2d_pt_seg,
                 // |s| * sqrt(L2) with s = ((Ay - py) (Bx - Ax) - (Ax - px) (By - Ay)) / L2 and L2 = |B - A|^2 (the fused operations, found
-                // by postgis/seg_probe.c: 0 differences in 89,523 inside rows; the foot-of-the-perpendicular model was wrong in the last bits)
+                // by postgis/seg_probe.c: 0 differences in 89,523 inside rows; the foot-of-the-perpendicular model was wrong in the last bits).
+                // 3D: PostGIS' lw_dist3d_pt_seg: r = num / den with num = fma(pz', bz', fma(px', bx', py' * by')) and den likewise (primes: relative
+                // to A), A for r < 0, B for r > 1, else the foot c = fma(r, B - A, A) per coordinate, then the distance to it, rad =
+                // fma(dz, dz, fma(dx, dx, dy * dy)) (postgis/seg3d_probe.c: 0 differences in 113,586 inside rows)
                 uint64_t qx = bx;
                 uint64_t qy = by;
+                uint64_t qz = bz;
                 uint64_t rad = 0ull;
                 uint64_t scl = 0x3FF0000000000000ull;
                 bool inside = false;
@@ -2074,37 +2100,87 @@ uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool fo
                 {
                     qx = ax;
                     qy = ay;
-                    if (!(f64_eq(ax, bx) && f64_eq(ay, by)))
+                    qz = az;
+                    if (!(f64_eq(ax, bx) && f64_eq(ay, by) && (!d3 || f64_eq(az, bz))))
                     {
                         uint64_t bxa = f64_sub(bx, ax);
                         uint64_t bya = f64_sub(by, ay);
                         uint64_t pxa = f64_sub(px, ax);
                         uint64_t pya = f64_sub(py, ay);
+                        uint64_t bza = d3 ? f64_sub(bz, az) : 0ull;
+                        uint64_t pza = d3 ? f64_sub(pz, az) : 0ull;
                         uint64_t num = f64_fma(pxa, bxa, f64_mul(pya, bya));
                         uint64_t den = f64_fma(bxa, bxa, f64_mul(bya, bya));
-                        if (f64_nonfinite(bxa) || f64_nonfinite(bya) || f64_nonfinite(pxa) || f64_nonfinite(pya) ||
-                            f64_nonfinite(num) || f64_nonfinite(den) || (den & F64_MAG) == 0ull)
-                            return 1u;
-                        // which side of A and B the point projects to is decided by r = num / den; how PostGIS' build fuses num and den is not
-                        // known to the last bit, so a point whose r is within 2^-40 (of the terms' size) of 0 or 1 is the backend's
                         uint64_t mag = f64_add(f64_mul(pxa, bxa) & F64_MAG, f64_mul(pya, bya) & F64_MAG);
-                        if (f64_le(num & F64_MAG, f64_mul(mag, 0x3D70000000000000ull)) ||
-                            f64_le(f64_sub(num, den) & F64_MAG, f64_mul(f64_add(mag, den), 0x3D70000000000000ull)))
-                            return 1u;
-                        if (f64_gt(num, den))
+                        if (d3)
                         {
-                            qx = bx;
-                            qy = by;
+                            num = f64_fma(pza, bza, num);
+                            den = f64_fma(bza, bza, den);
                         }
-                        else if (!f64_lt(num, 0ull))
+                        if (f64_nonfinite(bxa) || f64_nonfinite(bya) || f64_nonfinite(pxa) || f64_nonfinite(pya) ||
+                            f64_nonfinite(bza) || f64_nonfinite(pza) || f64_nonfinite(num) || f64_nonfinite(den) || (den & F64_MAG) == 0ull)
+                            return 1u;
+                        if (d3)
                         {
-                            uint64_t cross = f64_fma(f64_sub(ay, py), bxa, f64_mul(f64_sub(ax, px), bya) ^ F64_SIGN);
-                            uint64_t sv = f64_div(cross, den);
-                            if (f64_nonfinite(sv))
+                            uint64_t rr = f64_div(num, den);
+                            if (f64_nonfinite(rr))
                                 return 1u;
-                            scl = sv & F64_MAG;
-                            rad = den;
-                            inside = true;
+                            if (f64_gt(rr, 0x3FF0000000000000ull))
+                            {
+                                qx = bx;
+                                qy = by;
+                                qz = bz;
+                            }
+                            else if (!f64_lt(rr, 0ull))
+                            {
+                                for (uint kk = 0u; kk < 3u; kk++)
+                                {
+                                    uint64_t cb = (kk == 0u) ? bxa : ((kk == 1u) ? bya : bza);
+                                    uint64_t ca = (kk == 0u) ? ax : ((kk == 1u) ? ay : az);
+                                    uint64_t cc = f64_fma(rr, cb, ca);
+                                    if (kk == 0u)
+                                        qx = cc;
+                                    else if (kk == 1u)
+                                        qy = cc;
+                                    else
+                                        qz = cc;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // which side of A and B the point projects to is decided by r = num / den; how PostGIS' build fuses num and den is not
+                            // known to the last bit, so a point whose r is within 2^-40 (of the terms' size) of 0 or 1 is the backend's
+                            if (f64_le(num & F64_MAG, f64_mul(mag, 0x3D70000000000000ull)) ||
+                                f64_le(f64_sub(num, den) & F64_MAG, f64_mul(f64_add(mag, den), 0x3D70000000000000ull)))
+                                return 1u;
+                            if (f64_gt(num, den))
+                            {
+                                qx = bx;
+                                qy = by;
+                            }
+                            else if (!f64_lt(num, 0ull))
+                            {
+                                // a vertical or horizontal segment: PostGIS answers |px - ax| / |py - ay| exactly (postgis/seg_axis_probe.c: the generic
+                                // model is off by 1-2 ulp in 35% of those rows, this one in none)
+                                uint64_t sv;
+                                if (f64_eq(ax, bx))
+                                    sv = f64_sub(px, ax) & F64_MAG;
+                                else if (f64_eq(ay, by))
+                                    sv = f64_sub(py, ay) & F64_MAG;
+                                else
+                                {
+                                    uint64_t cross = f64_fma(f64_sub(ay, py), bxa, f64_mul(f64_sub(ax, px), bya) ^ F64_SIGN);
+                                    sv = f64_div(cross, den);
+                                    rad = den;
+                                }
+                                if (f64_nonfinite(sv))
+                                    return 1u;
+                                scl = sv & F64_MAG;
+                                if (f64_eq(ax, bx) || f64_eq(ay, by))
+                                    rad = 0x3FF0000000000000ull;
+                                inside = true;
+                            }
                         }
                     }
                 }
@@ -2113,6 +2189,13 @@ uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool fo
                     uint64_t h = f64_sub(qx, px);
                     uint64_t v = f64_sub(qy, py);
                     rad = f64_sqr_add(h, f64_mul(v, v));
+                    if (d3)
+                    {
+                        uint64_t w = f64_sub(qz, pz);
+                        if (f64_nonfinite(w))
+                            return 1u;
+                        rad = f64_sqr_add(w, rad);
+                    }
                     if (f64_nonfinite(h) || f64_nonfinite(v))
                         return 1u;
                 }
@@ -2125,6 +2208,7 @@ uint gd_geom(Reg g, uint64_t px, uint64_t py, inout uint64_t best, inout bool fo
                     best = dd;
                 ax = bx;
                 ay = by;
+                az = bz;
             }
         }
     }
@@ -2163,57 +2247,6 @@ uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[V
     bool eb = false;
     bool hza = true;
     bool hzb = true;
-    // a point and something else (a line, a polygon, a multi-geometry, a collection): the 2D distance only
-    {
-        uint hsa = 0u;
-        uint hsb = 0u;
-        uint hna = 0u;
-        uint hnb = 0u;
-        uint hoa = 0u;
-        uint hob = 0u;
-        uint ta = fa ? 1u : gd_hdr(a, hsa, hna, hoa);
-        uint tb = fb ? 1u : gd_hdr(b, hsb, hnb, hob);
-        if (ta == 0u || tb == 0u)
-            return SOP_RECHECK_CODE;
-        if (ta != 1u || tb != 1u)
-        {
-            if (d3 || (ta != 1u && tb != 1u))
-                return SOP_RECHECK_CODE;                // 3D distance of a non-point; two non-points
-            bool pa = (ta == 1u);                       // the point is operand a
-            uint64_t px = pa ? ax : bx;
-            uint64_t py = pa ? ay : by;
-            uint psrid = k1 & 0xfffffu;
-            bool pe = false;
-            uint64_t pz = 0ull;
-            bool phz = true;
-            if (pa ? !fa : !fb)
-            {
-                if (gdw3_load(pa ? a : b, psrid, px, py, pz, phz, pe) != 0u)
-                    return SOP_RECHECK_CODE;
-            }
-            if ((pa ? hsb : hsa) != psrid)
-                return SOP_RECHECK_CODE;                // PostGIS raises "mixed SRID"
-            if (pe)
-            {
-                regs[dst].isnull = 1u;
-                return 0u;
-            }
-            if (f64_nonfinite(px) || f64_nonfinite(py))
-                return SOP_RECHECK_CODE;
-            uint64_t best = 0x7FEFFFFFFFFFFFFFull;
-            bool found = false;
-            if (gd_geom(pa ? b : a, px, py, best, found) != 0u)
-                return SOP_RECHECK_CODE;
-            if (!found)
-            {
-                regs[dst].isnull = 1u;                  // the other geometry is empty
-                return 0u;
-            }
-            regs[dst].isnull = 0u;
-            regs[dst].v = int64_t(best);
-            return 0u;
-        }
-    }
     if (!fa && gdw3_load(a, sa, ax, ay, az, hza, ea) != 0u)
         return SOP_RECHECK_CODE;
     if (!fb && gdw3_load(b, sb, bx, by, bz, hzb, eb) != 0u)
@@ -2242,10 +2275,122 @@ uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[V
     }
     if (f64_nonfinite(dx) || f64_nonfinite(dy) || f64_nonfinite(q))
         return SOP_RECHECK_CODE;                        // an overflow: PostGIS' answer (NULL or Infinity) is the backend's
+    uint64_t dist = f64_sqrt(q);
+    if (f64_lt(0x47EFFFFFE0000000ull, dist))
+        return SOP_RECHECK_CODE;                        // beyond FLT_MAX PostGIS answers NULL (its minimum starts there)
     regs[dst].isnull = 0u;
-    regs[dst].v = int64_t(f64_sqrt(q));
+    regs[dst].v = int64_t(dist);
     return 0u;
 }
+
+// ST_Distance / ST_3DDistance (GEOMDIST), ST_DWithin (GEOMDWITHIN) and ST_3DDWithin (GEOM3DDW) with an operand that is not a point (a line, a polygon,
+// a multi-geometry or a collection; the other operand a point), the same as geom_dwdist_np() of cpu_vm.c. The entry of all three instructions: a
+// point and a point go to vm_geom_dist / vm_geom_dwithin / vm_geom_3ddwithin, everything else is measured here, so the walker gd_geom is called from
+// one place (and is a real function, [noinline]: inlined it made the join kernels 4 MB bigger, which Metal's compiler could not take). The
+// ST_DWithin forms need SOP_GDW_NP (the planner's calibration) and SOP_GDW_EXACT; PostGIS decides them as "distance <= tolerance" with the distance of
+// ST_Distance / ST_3DDistance (lwgeom_mindistance2d_tolerance, initial value FLT_MAX), an empty geometry is false. The 3D forms measure lines, points
+// and multi-geometries of those that have a Z; a polygon is the backend's.
+#ifndef WITH_INNER
+uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+{
+    bool isdw = (op == SOP_GEOMDWITHIN || op == SOP_GEOM3DDW);
+    bool d3 = (op == SOP_GEOM3DDW) || (op == SOP_GEOMDIST && (k1 & SOP_GDIST_3D) != 0u);
+    Reg a = regs[ra];
+    Reg b = regs[rb];
+    bool fa = (k0 & SOP_GDW_FUSED_A) != 0u;
+    bool fb = (k0 & SOP_GDW_FUSED_B) != 0u;
+    Reg ya = regs[(k0 >> 8) & 0xffu];
+    Reg yb = regs[(k0 >> 16) & 0xffu];
+    Reg za = regs[(k1 >> 20) & 0x1fu];
+    Reg zb = regs[(k1 >> 25) & 0x1fu];
+    Reg t = regs[k0 >> 24];
+    if ((a.isnull | b.isnull) != 0u || (fa && ya.isnull != 0u) || (fb && yb.isnull != 0u) || (isdw && t.isnull != 0u) ||
+        (d3 && ((fa && za.isnull != 0u) || (fb && zb.isnull != 0u))))
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint hsa = 0u;
+    uint hsb = 0u;
+    uint hna = 0u;
+    uint hnb = 0u;
+    uint hoa = 0u;
+    uint hob = 0u;
+    uint ta = fa ? 1u : gd_hdr(a, hsa, hna, hoa);
+    uint tb = fb ? 1u : gd_hdr(b, hsb, hnb, hob);
+    if (ta == 0u || tb == 0u)
+        return SOP_RECHECK_CODE;
+    if (ta == 1u && tb == 1u)
+    {
+        if (op == SOP_GEOM3DDW)
+            return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
+#ifndef WITH_INNER
+        if (!isdw)
+            return vm_geom_dist(dst, ra, rb, k0, k1, regs);
+#endif
+        return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
+    }
+    if (ta != 1u && tb != 1u)
+        return SOP_RECHECK_CODE;                        // two non-points
+#ifdef VM_NO_GEOM3D
+    if (d3)
+        return SOP_RECHECK_CODE;
+#endif
+    if (isdw ? ((k0 & SOP_GDW_NP) == 0u || (k1 & SOP_GDW_EXACT) == 0u) : (k0 & SOP_GDW_NP) == 0u)
+        return SOP_RECHECK_CODE;                        // not calibrated; ST_3DMaxDistance (no flag) is not the minimum
+    bool pa = (ta == 1u);                               // the point is operand a
+    uint64_t px = pa ? uint64_t(a.v) : uint64_t(b.v);
+    uint64_t py = pa ? uint64_t(ya.v) : uint64_t(yb.v);
+    uint64_t pz = pa ? uint64_t(za.v) : uint64_t(zb.v);
+    uint psrid = k1 & 0xfffffu;
+    bool pe = false;
+    bool phz = true;
+    if (pa ? !fa : !fb)
+    {
+        if (gdw3_load(pa ? a : b, psrid, px, py, pz, phz, pe) != 0u)
+            return SOP_RECHECK_CODE;
+    }
+    if ((pa ? hsb : hsa) != psrid)
+        return SOP_RECHECK_CODE;                        // PostGIS raises "mixed SRID"
+    if (d3 && !phz)
+        return SOP_RECHECK_CODE;                        // a point without Z: PostGIS measures in 2D (and says so)
+    uint64_t tol = uint64_t(t.v);
+    if (isdw && (f64_nonfinite(tol) || ((tol >> 63) != 0ull && (tol & F64_MAG) != 0ull)))
+        return SOP_RECHECK_CODE;                        // negative (PostGIS raises), NaN or infinite
+    if (pe)
+    {
+        regs[dst].isnull = isdw ? 0u : 1u;              // an empty point: ST_Distance NULL, ST_DWithin false
+        regs[dst].v = 0;
+        return 0u;
+    }
+    if (f64_nonfinite(px) || f64_nonfinite(py) || (d3 && f64_nonfinite(pz)))
+        return SOP_RECHECK_CODE;
+    uint64_t best = 0x7FEFFFFFFFFFFFFFull;
+    bool found = false;
+    if (gd_geom(pa ? b : a, px, py, pz, d3, best, found) != 0u)
+        return SOP_RECHECK_CODE;
+    if (!found)
+    {
+        regs[dst].isnull = isdw ? 0u : 1u;              // the other geometry is empty
+        regs[dst].v = 0;
+        return 0u;
+    }
+    regs[dst].isnull = 0u;
+    if (isdw)
+    {
+        if (f64_lt(0x47EFFFFFE0000000ull, best))
+            return SOP_RECHECK_CODE;                    // beyond FLT_MAX, PostGIS' initial distance
+        regs[dst].v = f64_le(best, tol) ? 1 : 0;
+    }
+    else
+    {
+        if (f64_lt(0x47EFFFFFE0000000ull, best))
+            return SOP_RECHECK_CODE;                    // beyond FLT_MAX PostGIS answers NULL
+        regs[dst].v = int64_t(best);
+    }
+    return 0u;
+}
+#endif
 
 // ST_Length / ST_Length2D / ST_3DLength (k0 0 / 1) and ST_Perimeter / ST_Perimeter2D / ST_3DPerimeter (k0 2 / 3) of a geometry (GEOMLEN),
 // the same as geom_len() of cpu_vm.c. PostGIS adds up per geometry: a line's length is the sum of its segment lengths
@@ -2693,6 +2838,10 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
         uint64_t q = f64_sqr_add(dz, f64_sqr_add(dx, f64_mul(dy, dy)));
         if (f64_nonfinite(q))
             return SOP_RECHECK_CODE;
+#ifndef WITH_INNER
+        if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
+            return SOP_RECHECK_CODE;                    // beyond FLT_MAX, PostGIS' initial distance (see vm_geom_dwithin)
+#endif
         res = f64_le(f64_sqrt(q), tol);                 // PostGIS' own double against the tolerance (calibrated by the planner)
     }
     else
@@ -3040,11 +3189,19 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             return vm_geom(op, dst, ra, rb, k0, k1, regs);
         if (op == SOP_GEOMPIP)
             return vm_geom_pip(dst, ra, rb, k0, k1, regs);
+#ifdef WITH_INNER
+        // A join kernel has no point-to-geometry walker: geometry is already 8.8 of its 9.6 MB, Metal's compiler takes 294 s for it and
+        // gave up (or ran past 900 s) with the walker added (plan, A13 slice 4). A non-point operand is a poison record there.
         if (op == SOP_GEOMDWITHIN)
             return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
         // A13 slice 3: ST_3DDWithin(inner point, fused point, tolerance) of a GiST join (the only 3D function a join program runs)
         if (op == SOP_GEOM3DDW)
             return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
+#else
+        // ONE call site for the three: the walker inside is a real function ([noinline]) and is called from vm_geom_dwdist only
+        if (op == SOP_GEOMDWITHIN || op == SOP_GEOM3DDW || op == SOP_GEOMDIST)
+            return vm_geom_dwdist(op, dst, ra, rb, k0, k1, regs);
+#endif
 #endif
 #if !defined(WITH_INNER) && !defined(VM_NO_GEOM)    // the planner keeps these out of join programs; their soft-float code made Metal take minutes
         if (op == SOP_GEOMZM)
@@ -3052,8 +3209,6 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if (op == SOP_GEOMFLAG)
             return vm_geom_flag(dst, ra, k0, regs);
 #ifndef VM_NO_GEOMDIST
-        if (op == SOP_GEOMDIST)
-            return vm_geom_dist(dst, ra, rb, k0, k1, regs);
 #endif
 #ifndef VM_NO_GEOMLEN
         if (op == SOP_GEOMLEN)

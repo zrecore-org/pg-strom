@@ -33,7 +33,9 @@
 #                NOTICE where the CUDA kernel met a compressed text value. Here text predicates are evaluated by the
 #                Vulkan VM (which detoasts through the CPU side), nothing fails, and the rows equal the CPU's; the
 #                second "SELECT INTO test01g" of the test then fails with "relation already exists" (recorded in the
-#                alternate file). The test no longer exercises CPU fallback (there is none on this branch).
+#                alternate file). The test no longer exercises the per-row CPU fallback of the CUDA kernel (the Vulkan VM
+#                re-evaluates such rows through the recheck path); the A14 fallback of a failed GPU session is tested in
+#                test/gpuserv/fallback_tests.inc.
 # arrow_index    The data is generated with pgstrom.random_*(), whose output differs between platforms, so every
 #                count in upstream's file differs; the GPU and CPU counts inside the test agree with each other.
 #
@@ -78,8 +80,9 @@
 gpu_cache (A7 part 2)
   test/sql/gpu_cache.sql is upstream's, changed for the v6.2 SQL surface (the older view pgstrom.gpucache_info no longer exists:
   pgstrom.gpucache_info(regclass) returns json, pgstrom.gpucache_apply_redo() takes no argument) and for one planner limit: the final
-  comparison joins two 35-column temporary tables, which GpuJoin refuses in the service ("unsupported join session (slots 70)", an
-  error rather than a CPU plan), so that statement runs with pg_strom.enable_gpujoin = off. Plans differ from the CUDA-era file in the
+  comparison joins two 35-column temporary tables, which GpuJoin refuses in the service ("unsupported join session (slots 70)");
+  before A14 that was an error rather than a CPU plan, so that statement ran with pg_strom.enable_gpujoin = off, and since A14 the
+  node falls back to the CPU (the row result is the CPU's). Plans differ from the CUDA-era file in the
   GPU Scan Quals / Projection text; the rows equal the CPU run. gpu_cache_9.out also shows: after pgstrom.gpucache_recovery() the phase
   is "not_built" (the cache is rebuilt at its next use), and PREPARE of a writing transaction is refused (tested in gpucache_tests.inc).
   Found, not cache related: a whole-row reference ("select t from tbl t where ...") through a GpuScan fails with "cache lookup failed
@@ -114,12 +117,16 @@ gpu_cache (A7 part 2)
 # 14. Unary minus of a computed operand (-(a + b)) overwrote the operand's register with the constant 0 (scan_prog.c).
 #
 # ---------------------------------------------------------------------------------------------------------------
-# TRANSLATION LIMITS: the planner now respects them (codegen.c pgstrom_vulkan_expr_limits, gpu_scan.c, gpu_join.c,
+# TRANSLATION LIMITS: the planner now respects them (and since A14 the backend recovers when the estimate is wrong) (codegen.c pgstrom_vulkan_expr_limits, gpu_scan.c, gpu_join.c,
 # gpu_preagg.c; constants in src/gpuserv/scan_caps.h)
 # ---------------------------------------------------------------------------------------------------------------
-# A query the service cannot translate FAILS ("the expression needs more than 32 registers", "variable slot N is out of
-# range", ...): there is no CPU fallback for a refused program. The planner used to offer such plans. Now it keeps them on
-# the CPU when its (conservative) estimate says the program may not fit:
+# A14 (runtime CPU fallback, pg_strom.gpu_error_fallback, default on): a program the service refuses ("the expression needs
+# more than 32 registers", "variable slot N is out of range", "unsupported join session (slots 70)", ...), a task that fails,
+# a lost device, a service that is not ready or goes away no longer fail the query: the node continues on the CPU and returns
+# the rows of the plan with pg_strom.enabled = off (fallback.c, test/gpuserv/fallback_tests.inc; what is not recoverable is in
+# the parameter's description: GPU-Sort, pinned inner buffers, SELECT INTO direct). The planner used to offer such plans and the
+# query failed. It keeps them on the CPU when its (conservative) estimate says the program may not fit, which is cheaper than
+# starting on the GPU and falling back:
 #   - an expression needs more temporary registers than SCAN_VM_TEMP_BUDGET (6; the estimate follows expr_to_reg of
 #     scan_prog.c) or has more than SCAN_VM_EXPR_NODES (120) nodes: the expression stays on the host (qual, projection column,
 #     aggregate argument, key);

@@ -1,0 +1,9 @@
+edge rows 100000, mismatches 0
+region 0 (before A): 43192 rows
+   best: vertex A: 0 mismatches
+region 1 (after B): 43572 rows
+   best: vertex B: 0 mismatches
+region 2 (inside): 113236 rows
+   best: num0 den0 c0: 0 mismatches
+   num0 den0 c0             mismatches 0
+   num0 den0 c2             mismatches 0

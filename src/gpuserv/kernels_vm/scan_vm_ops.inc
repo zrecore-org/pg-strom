@@ -111,6 +111,12 @@
  *            non-finite coordinate or intermediate, an underflow, a multipoint, a line or a geodetic operand returns
  *            SCANVM_RECHECK_CODE. An empty point is false.
  *
+ *            Of a point and a line, polygon, multi-geometry or collection (either order; two non-points: never), with SOP_GDW_NP and
+ *            SOP_GDW_EXACT set, the instruction decides "distance <= tolerance" with the exact point-to-geometry distance of GEOMDIST
+ *            (gd_geom: the minimum over the members; 0 inside a polygon; Z and M of the geometry ignored); an empty geometry is false, and
+ *            a distance beyond FLT_MAX (PostGIS' initial value) is the backend's. The walker is compiled once, shared with GEOMDIST
+ *            (vm_geom_dwdist is the entry of both).
+ *
  *   GEOMZM   dst = ST_Z(point) (k0 = 0), ST_M(point) (k0 = 1), ST_X(point) (2) or ST_Y(point) (3): the float8 bits of the coordinate. NULL (as PostGIS) for a point
  *            without that dimension, an empty point and a NULL geometry; NaN, Infinity and -0 pass through. Every other
  *            geometry type (PostGIS raises "Argument to ST_Z() must have type POINT"), a geodetic point and a malformed value
@@ -221,6 +227,9 @@ SCANVM_OP(GPIP_SYMM,        2)
 /* GEOMDWITHIN: the flags of k0 */
 SCANVM_OP(GDW_FUSED_A,      1)
 SCANVM_OP(GDW_FUSED_B,      2)
+/* GEOMDWITHIN: bit 2 of k0 says the kernel may decide ST_DWithin of a point and a line, polygon, multi-geometry or collection (2D; KEXP_FLAG__GEOM_NP:
+ * the planner checked the installed PostGIS against the model of the distance); it also needs GDW_EXACT. Without it such a row is the backend's. */
+SCANVM_OP(GDW_NP,           4)
 /* DUNARY kinds (k0) */
 SCANVM_OP(DUN_NEG,   0)
 SCANVM_OP(DUN_ABS,   1)

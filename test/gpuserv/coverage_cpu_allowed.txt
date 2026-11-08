@@ -1,0 +1,188 @@
+# A14 coverage allowlist: the shapes of coverage_shapes.py that stay on the CPU today, each with the measured reason.
+#
+#   shape-id (a glob) | reason | kind
+#
+# kind is "by-design" (the CPU is the right place: unbounded or variable-size aggregate states, user code, types the device
+# does not model) or "gap:<milestone>" (to be closed; deleting the line is part of closing it). coverage_test.sh fails when a shape
+# that is not listed stays on the CPU, and when a listed shape reaches the GPU: the list can only shrink, and a glob that matches
+# no shape is an error. The reasons are the planner's own DEBUG2 messages (coverage_test.sh keeps them in work/cpu_shapes.tsv).
+# Sources: srcfull.arrow / srcfull.parquet hold the cf columns except uuid and the unconstrained numeric (pg2arrow cannot write them).
+
+# Each distinct reason is one row of the gap table printed by the test, so the same gap always carries the same text here.
+join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
+join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
+aggjoin.key.float4 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
+aggjoin.key.float8 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
+srcfull.*.join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
+srcfull.*.join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
+join.key.text.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+join.key.varchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+join.key.bpchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+join.key.multi2.text_int.inner | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+aggjoin.key.text | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+aggjoin.key.varchar | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+aggjoin.key.bpchar | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+src.*.join.key_text | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+srcfull.*.join.key.text.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+srcfull.*.join.key.varchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+srcfull.*.join.key.bpchar.* | hash-join key text/varchar/bpchar: texteq / bpchareq are not device hash-join functions | gap:A6
+join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
+aggjoin.key.numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
+src.*.join.key_numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
+srcfull.*.join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
+join.key.uuid.* | hash-join key uuid: uuid_eq is not a device function | gap:A6
+aggjoin.key.uuid | hash-join key uuid: uuid_eq is not a device function | gap:A6
+srcfull.*.join.key.uuid.* | hash-join key uuid: uuid_eq is not a device function | gap:A6
+join.key.bool.* | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
+aggjoin.key.bool | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
+srcfull.*.join.key.bool.* | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
+join.key.null_safe.inner | IS NOT DISTINCT FROM as a join clause: a DistinctExpr is not an opcode and the clause is not hash-joinable | gap:A14
+join.nl.nonequi.* | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+join.nl.range.inner | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+join.nl.cross | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+join.type.cross_small | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+join.type.lateral | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+aggjoin.type.nestloop | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+spatial.join.nl_no_index | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
+join.type.not_in_subquery | NOT IN (subquery) is a hashed SubPlan, not an opcode | by-design
+join.type.text_qual | text ordering / LIKE under a non-C collation (the cluster's initdb locale) stay on the CPU | by-design
+src.heap.union_all_agg | UNION ALL / Append below the aggregate: GpuPreAgg does not push below an Append | gap:A14
+agg.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group2.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group2.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group2.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.*.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+src.*.agg.group_text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+src.*.agg.group_varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+src.*.agg.group_bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.groups.50000.text.raised | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+aggjoin.type.group_text_key | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.gpucache.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
+srcfull.gpucache.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
+src.gpucache.agg.group_uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+agg.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+srcfull.*.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+srcfull.*.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+src.*.agg.group_bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+src.*.agg.group_two_keys | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+agg.group.expr_date | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
+agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
+agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
+agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
+agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
+agg.group3.* | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
+agg.group4.int | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
+srcfull.*.group3.* | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
+aggjoin.type.group_three_keys | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
+src.*.agg.group_three_keys | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
+agg.groups.500.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
+agg.groups.50000.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
+agg.groups.1000000.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
+agg.group.grouping_sets | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
+agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
+agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
+agg.group.composite_key | GROUP BY a row value or an array: not hashable on the device | by-design
+agg.group.array_key | GROUP BY a row value or an array: not hashable on the device | by-design
+agg.fn.sum.vf4* | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+srcfull.*.fn.sum.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.avg.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.min.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.max.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+srcfull.*.fn.max.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.sum.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.avg.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.min.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.max.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+srcfull.*.fn.sum.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+srcfull.*.fn.max.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.sum_float_product | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.avg_filter_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.having_avg | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.multi_mix | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+src.gpucache.agg.sum_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+src.gpucache.agg.minmax_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+src.arrow.types.agg_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+src.arrow.types.agg_sum_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+aggjoin.type.sum_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+spatial.agg.sum_distance | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
+agg.fn.stddev_float8* | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.stddev_int | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.variance_int | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.var_pop_float8 | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.corr | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.regr_slope | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.covar_pop | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.sum.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.avg.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.min.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.max.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+srcfull.gpucache.fn.sum.vnu | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+srcfull.gpucache.fn.max.vnu | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.min.vn | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.max.vn | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.min.vn.ungrouped | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.max.vn.ungrouped | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.max_numeric_expr | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+srcfull.gpucache.fn.max.vn | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+aggjoin.type.sum_numeric | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+agg.fn.min_text* | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+agg.fn.max_text* | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+agg.fn.max_varchar | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+agg.fn.min_char | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+agg.fn.min_uuid | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+srcfull.*.fn.min_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+aggjoin.type.min_max_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6
+agg.fn.bool_and* | bool_and / bool_or / every: not device aggregates | gap:A6
+agg.fn.bool_or | bool_and / bool_or / every: not device aggregates | gap:A6
+agg.fn.every | bool_and / bool_or / every: not device aggregates | gap:A6
+srcfull.*.fn.bool_and | bool_and / bool_or / every: not device aggregates | gap:A6
+agg.fn.bit_and | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
+agg.fn.bit_or | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
+agg.fn.bit_xor | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
+agg.fn.sum_case | a CASE expression as an aggregate argument is not an opcode | gap:A6
+agg.fn.string_agg_unordered | string_agg / array_agg: a variable-size transition state | by-design
+srcfull.*.fn.string_agg_unordered | string_agg / array_agg: a variable-size transition state | by-design
+agg.fn.array_agg_unordered | string_agg / array_agg: a variable-size transition state | by-design
+agg.fn.string_agg_ordered* | aggregate with ORDER BY inside the call | by-design
+agg.fn.array_agg_ordered | aggregate with ORDER BY inside the call | by-design
+agg.fn.jsonb_agg | aggregate with ORDER BY inside the call | by-design
+agg.fn.count_distinct_* | DISTINCT aggregate | by-design
+agg.fn.sum_distinct_int | DISTINCT aggregate | by-design
+srcfull.*.fn.count_distinct_int | DISTINCT aggregate | by-design
+aggjoin.type.count_distinct | DISTINCT aggregate | by-design
+agg.fn.percentile_cont* | ordered-set aggregate (percentile_*, mode) | by-design
+agg.fn.percentile_disc | ordered-set aggregate (percentile_*, mode) | by-design
+agg.fn.mode* | ordered-set aggregate (percentile_*, mode) | by-design
+spatial.join.box_outer | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
+spatial.join.box_intersects_geom_outer | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
+spatial.join.distance_no_index | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
+spatial.join.geometry_equality | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
+spatial.agg.semi | GpuPreAgg over a GiST semi join: the path is built and loses on cost | gap:A13
+spatial.agg.group_geometry | GROUP BY a geometry column or st_x(geom)::numeric | gap:A13
+spatial.agg.group_st_x | GROUP BY a geometry column or st_x(geom)::numeric | gap:A13
+spatial.agg.st_extent | PostGIS aggregates with a geometry transition state (st_extent, st_union) | by-design
+spatial.agg.st_union | PostGIS aggregates with a geometry transition state (st_extent, st_union) | by-design
+src.gpucache.agg.sum_numeric | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
+srcfull.arrow.group1.numeric | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.arrow.group2.numeric | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.arrow.fn.sum.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.arrow.fn.max.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.parquet.group1.numeric | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.parquet.group2.numeric | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.parquet.fn.sum.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+srcfull.parquet.fn.max.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5

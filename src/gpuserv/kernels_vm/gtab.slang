@@ -1,0 +1,344 @@
+// GpuPreAgg with GROUP BY over many groups (A3): a hash table in global memory that lives for the whole session.
+//
+// gagg.slang keeps a table of 64-128 slots per workgroup in shared memory and sends the rows that find no slot to the
+// CPU, which is right for tens of groups and hopeless for thousands. Here one table serves every workgroup and every
+// task of the session; the service reads it once, at the end (or when it has to grow it).
+//
+// No thread ever waits for another (the Vulkan model gives no forward progress guarantee, and the base tier has no
+// memory model and no 64-bit atomics), and a key written by one thread is read by another only after a dispatch has
+// ended (the dispatch boundary is the one synchronization point with defined visibility). So a task runs in up to
+// three dispatches over the same pages (the mode is in the top 4 bits of kparam.page_base):
+//   0  every row is evaluated, its key looked up in the table; a found row adds its values to the slot's accumulators with
+//      32-bit atomics, a row whose key is not in the table is flagged 4 (its values are not added)
+//   1  (only if rows were flagged 4) the flagged rows insert their keys: a slot is claimed with one compare-and-swap of its
+//      tag (the 32-bit hash of the key); the thread that wins writes the key words, a thread that finds the tag
+//      equal does nothing (the same key, or a different key with the same hash, which then never gets a slot and is
+//      aggregated on the CPU)
+//   2  the flagged rows look up again and add their values; a row that still finds no slot (probe limit, table
+//      full, hash collision) is flagged 1: the service aggregates it on the CPU (exact)
+// A row is flagged 2 if the backend must evaluate it (a string or numeric the kernel cannot read, as in gagg.slang).
+//
+// Table buffer (gtab): header { 0: slots claimed, 1: rows that qualified, 2: slot mask, 3: words per slot }, from word 8
+// the slots, each { tag, null mask, k0 lo, k0 hi, k1 lo, k1 hi, accumulators of the aggregates in order }.
+//   count:   { n }
+//   sum:     { n, Lpos, Cpos, Lneg, Cneg, nbig, Lxl, Cxl, Lxh, Cxh }   v in [0, 2^32): Lpos += v;  v in (-2^32, 0): Lneg += -v;
+//            other v: x = v + 2^63 (unsigned), Lxl += low word of x, Lxh += high word, nbig++. L is a 32-bit sum and C counts
+//            its wraps (a wrap is seen by the add that causes it: the add returns the old value), so the total of a pair is
+//            L + C * 2^32. sum = (Pos) - (Neg) + (Lxl + 2^32 Lxh - nbig * 2^63).
+//   min/max: { flag, ~b (min) or b (max) } with b = value + 2^31 as unsigned (values outside 32 bits overflow to the CPU)
+// Flags (as gagg.slang): outb[4 + total_lps ...] one word per line pointer, 0 done, 1 CPU, 2 backend, 4 insert.
+// Program header as gagg.slang: [10] aggregates, [11] aggregate table, [12] keys, [13] key registers.
+#define GTAB 1
+#include "scan_common.slang"
+
+#ifdef ARROW_SRC
+#error "gtab.slang: the heap source only"
+#endif
+
+#ifndef GA_NA
+#define GA_NA 12
+#endif
+#define GA_NK 2
+#define GT_MAXPROBE 64
+#define GT_HDR 8
+#define GT_KEYW 6
+
+[[vk::binding(5, 0)]] RWStructuredBuffer<uint> gtab;
+
+static const uint AC_COUNT_ANY  = 1;
+static const uint AC_COUNT_COND = 2;
+static const uint AC_SUM        = 3;
+static const uint AC_MIN        = 4;
+static const uint AC_MAX        = 5;
+static const uint NONE_REG      = 0xffffffffu;
+static const uint NO_SLOT       = 0xffffffffu;
+
+groupshared uint    sh_hits;
+groupshared uint    st_kn[SCAN_WG];                 // null mask | 0x80000000 if the row qualifies
+groupshared uint    st_hash[SCAN_WG];
+groupshared int64_t st_key[SCAN_WG * GA_NK];
+groupshared uint    st_ok[SCAN_WG * GA_NA];
+groupshared int64_t st_val[SCAN_WG * GA_NA];
+
+uint hash_keys(int64_t k0, int64_t k1, uint kn)
+{
+    uint h = 0x811c9dc5u;
+    h = (h ^ (uint(k0) ^ (uint(k0 >> 32) * 0x9e3779b1u) ^ ((kn & 1u) * 0x85ebca6bu))) * 0x01000193u;
+    h = (h ^ (uint(k1) ^ (uint(k1 >> 32) * 0x9e3779b1u) ^ ((kn & 2u) * 0x85ebca6bu))) * 0x01000193u;
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    h *= 0x297a2d39u;
+    h ^= h >> 15;
+    return h;
+}
+
+#ifdef SPEC_PROG
+#include "spec_gen.inc"
+#endif
+
+uint acc_width(uint cls)
+{
+    if (cls == AC_COUNT_ANY || cls == AC_COUNT_COND)
+        return 1;
+    if (cls == AC_SUM)
+        return 10;
+    return 2;
+}
+
+// word i += x, and the wrap into word c
+void add_wrap(uint i, uint c, uint x)
+{
+    uint prev;
+    InterlockedAdd(gtab[i], x, prev);
+    if (prev + x < prev)
+    {
+        uint d;
+        InterlockedAdd(gtab[c], 1, d);
+    }
+}
+
+// the first word of the slot of a key, NO_SLOT if the table has no such slot (yet)
+uint gt_find(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride)
+{
+    uint s = tag & mask;
+    uint k0l = uint(k0), k0h = uint(uint64_t(k0) >> 32), k1l = uint(k1), k1h = uint(uint64_t(k1) >> 32);
+    for (uint p = 0; p < GT_MAXPROBE; p++)
+    {
+        uint base = GT_HDR + s * stride;
+        uint t = gtab[base];
+        if (t == 0)
+            return NO_SLOT;
+        if (t == tag && gtab[base + 1] == kn && gtab[base + 2] == k0l && gtab[base + 3] == k0h &&
+            gtab[base + 4] == k1l && gtab[base + 5] == k1h)
+            return base;
+        s = (s + 1) & mask;
+    }
+    return NO_SLOT;
+}
+
+void gt_insert(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride)
+{
+    uint s = tag & mask;
+    for (uint p = 0; p < GT_MAXPROBE; p++)
+    {
+        uint base = GT_HDR + s * stride;
+        uint t = gtab[base];
+        if (t == tag)
+            return;
+        if (t == 0)
+        {
+            uint prev;
+            InterlockedCompareExchange(gtab[base], 0, tag, prev);
+            if (prev == 0)
+            {
+                gtab[base + 1] = kn;
+                gtab[base + 2] = uint(k0);
+                gtab[base + 3] = uint(uint64_t(k0) >> 32);
+                gtab[base + 4] = uint(k1);
+                gtab[base + 5] = uint(uint64_t(k1) >> 32);
+                uint d;
+                InterlockedAdd(gtab[0], 1, d);
+                return;
+            }
+            if (prev == tag)
+                return;
+        }
+        s = (s + 1) & mask;
+    }
+}
+
+void gt_accumulate(uint base, uint tid, uint naggs, uint aggoff)
+{
+    uint off = base + GT_KEYW;
+    for (uint k = 0; k < naggs; k++)
+    {
+        uint cls = prog[aggoff + 4 * k];
+        if (st_ok[tid * GA_NA + k] != 0)
+        {
+            int64_t v = st_val[tid * GA_NA + k];
+            uint prev;
+            if (cls == AC_COUNT_ANY || cls == AC_COUNT_COND)
+                InterlockedAdd(gtab[off], 1, prev);
+            else if (cls == AC_SUM)
+            {
+                InterlockedAdd(gtab[off], 1, prev);
+                if (v >= 0 && v < 4294967296)
+                    add_wrap(off + 1, off + 2, uint(v));
+                else if (v < 0 && v > -4294967296)
+                    add_wrap(off + 3, off + 4, uint(-v));
+                else
+                {
+                    uint64_t x = uint64_t(v) ^ 0x8000000000000000ull;
+                    InterlockedAdd(gtab[off + 5], 1, prev);
+                    add_wrap(off + 6, off + 7, uint(x & 0xffffffffu));
+                    add_wrap(off + 8, off + 9, uint(x >> 32));
+                }
+            }
+            else
+            {
+                uint b = uint(int(v)) ^ 0x80000000u;
+                InterlockedOr(gtab[off], 1, prev);
+                if (cls == AC_MIN)
+                    InterlockedMax(gtab[off + 1], ~b, prev);
+                else
+                    InterlockedMax(gtab[off + 1], b, prev);
+            }
+        }
+        off += acc_width(cls);
+    }
+}
+
+[shader("compute")]
+[numthreads(SCAN_WG, 1, 1)]
+void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint wg = (kparam.page_base & 0x0fffffffu) + gid.x;     // page_base counts workgroups here; bits 28.. are the mode
+    uint ppw = kparam.blcksz;                       // pages per workgroup
+    uint first_page = wg * ppw;
+    if (first_page >= kparam.npages)
+        return;                                     // uniform: the whole group leaves
+    uint last_page = min(first_page + ppw, kparam.npages);
+    uint tid = lid.x;
+    uint mode = kparam.page_base >> 28;
+
+    uint coloff  = prog[0];
+    uint insnoff = prog[2];
+    uint ncols   = prog[3];
+    uint nq      = prog[5];
+    uint nins    = prog[6];
+    uint qreg    = prog[7];
+    uint naggs   = prog[10];
+    uint aggoff  = prog[11];
+    uint nkeys   = prog[12];
+    uint keyoff  = prog[13];
+    uint flags_base = kparam.total_lps;
+    uint mask    = gtab[2];
+    uint stride  = gtab[3];
+    uint a_cls[GA_NA];
+    for (uint k = 0; k < GA_NA; k++)
+        a_cls[k] = (k < naggs) ? prog[aggoff + 4 * k] : 0;
+
+    if (tid == 0)
+        sh_hits = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint page = first_page; page < last_page; page++)
+    {
+        uint pte      = ptab[2 * page];
+        uint lp_base  = ptab[2 * page + 1];
+        g_src         = (pte & 0x80000000u) != 0 ? 1u : 0u;
+        uint pbase    = pte & 0x7fffffffu;
+        uint pd_lower = ld16(pbase + 12);
+        uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);
+
+        for (uint lp = tid; lp < nlp; lp += SCAN_WG)
+        {
+            uint fidx = flags_base + lp_base + lp;
+            if (mode != 0 && outb[fidx] != 4u)
+                continue;                           // only the rows that found no slot
+
+            Reg  regs[VM_MAX_REGS];
+            bool hit = false;
+#ifdef SPEC_PROG
+            hit = spec_eval_row(pbase, page, lp, false, regs);
+#else
+            hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#endif
+#ifdef SPEC_PROG
+            if (hit && !spec_scales_ok(regs))
+#else
+            if (hit && !agg_scales_ok(aggoff, naggs, keyoff, nkeys, regs))
+#endif
+            {
+                hit = false;                        // a numeric of another scale than the plan's:
+                g_recheck = 1;                      // the backend evaluates the row
+            }
+            if (!hit)
+            {
+                if (mode == 0)
+                    outb[fidx] = (g_recheck != 0) ? 2u : 0u;
+                continue;
+            }
+#ifdef SPEC_PROG
+            spec_stage(regs, tid);
+#else
+            {
+                int64_t k0 = 0, k1 = 0;
+                uint kn = 0;
+                if (nkeys > 0)
+                {
+                    Reg r = regs[prog[keyoff]];
+                    if (r.isnull != 0) kn |= 1u; else k0 = r.v;
+                }
+                if (nkeys > 1)
+                {
+                    Reg r = regs[prog[keyoff + 1]];
+                    if (r.isnull != 0) kn |= 2u; else k1 = r.v;
+                }
+                st_key[tid * GA_NK + 0] = k0;
+                st_key[tid * GA_NK + 1] = k1;
+                st_hash[tid] = hash_keys(k0, k1, kn);
+                st_kn[tid] = kn | 0x80000000u;
+                for (uint k = 0; k < naggs; k++)
+                {
+                    uint cls = prog[aggoff + 4 * k];
+                    uint ra  = prog[aggoff + 4 * k + 1];
+                    uint rf  = prog[aggoff + 4 * k + 2];
+                    bool ok  = true;
+                    if (rf != NONE_REG && (regs[rf].isnull != 0 || regs[rf].v == 0))
+                        ok = false;                         // FILTER (WHERE ...) is not true
+                    if (ok && cls != AC_COUNT_ANY && regs[ra].isnull != 0)
+                        ok = false;
+                    st_ok[tid * GA_NA + k] = ok ? 1u : 0u;
+                    st_val[tid * GA_NA + k] = (cls == AC_COUNT_ANY || cls == AC_COUNT_COND) ? 0 : regs[ra].v;
+                }
+            }
+#endif
+            if (mode == 0)
+            {
+                uint prev;
+                InterlockedAdd(sh_hits, 1, prev);
+            }
+            // min/max arguments must fit 32 bits
+            bool fits = true;
+            for (uint k = 0; k < naggs; k++)
+            {
+                int64_t v = st_val[tid * GA_NA + k];
+                if ((a_cls[k] == AC_MIN || a_cls[k] == AC_MAX) && st_ok[tid * GA_NA + k] != 0 &&
+                    (v < -2147483648 || v > 2147483647))
+                    fits = false;
+            }
+            if (!fits)
+            {
+                outb[fidx] = 1u;
+                continue;
+            }
+            uint kn = st_kn[tid] & 3u;
+            int64_t k0 = st_key[tid * GA_NK + 0];
+            int64_t k1 = st_key[tid * GA_NK + 1];
+            uint tag = st_hash[tid];
+            if (tag == 0)
+                tag = 1;
+            if (mode == 1)
+            {
+                gt_insert(tag, kn, k0, k1, mask, stride);
+                continue;
+            }
+            uint base = gt_find(tag, kn, k0, k1, mask, stride);
+            if (base == NO_SLOT)
+            {
+                outb[fidx] = (mode == 0) ? 4u : 1u;
+                continue;
+            }
+            gt_accumulate(base, tid, naggs, aggoff);
+            outb[fidx] = 0u;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (tid == 0 && mode == 0 && sh_hits != 0)
+    {
+        uint prev;
+        InterlockedAdd(gtab[1], sh_hits, prev);
+    }
+}

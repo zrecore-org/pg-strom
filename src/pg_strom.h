@@ -415,6 +415,8 @@ typedef struct
 	pg_atomic_uint32	join_reconstruction_msec;	/* usec of inner buffer reconstruction */
 	pg_atomic_uint32	select_into_nblocks; /* # of blocks written by SELECT INTO direct */
 	pg_atomic_uint32	pinned_buffer_divisor; /* # of pinned-inner-buffer partitions */
+	pg_atomic_uint32	cpu_mode_workers;	/* # of processes that continued on the CPU (A14) */
+	pg_atomic_uint64	cpu_mode_chunks;	/* # of tasks / chunks the CPU ran instead of the GPU */
 	/* for join-inner-preload */
 	pthread_cond_t		preload_cond;		/* sync object */
 	pthread_mutex_t		preload_mutex;		/* mutex for inner-preloading */
@@ -494,6 +496,24 @@ typedef struct
 	List		   *brin_quals;
 } pgstromTaskScanState;
 
+/*
+ * A14: the journal of the tasks sent to the GPU service, and the state of a node that continues on the CPU.
+ * Replies of one connection arrive in the order of the commands, so the first 'nacked' entries are
+ * the tasks whose reply was consumed; the others are replayed on the CPU when the service fails.
+ */
+typedef struct
+{
+	int			kind;			/* CPUJOB_HEAP_BLOCKS, CPUJOB_ARROW_BATCH, CPUJOB_HEAP_ALL */
+	int32_t		scan_relidx;
+	uint32_t	rb_flat;		/* CPUJOB_ARROW_BATCH: record batch (row group) */
+	uint32_t	nblocks;		/* CPUJOB_HEAP_BLOCKS */
+	BlockNumber	*blocks;
+} pgstromCpuJob;
+
+#define CPUJOB_HEAP_BLOCKS	1	/* the listed heap blocks */
+#define CPUJOB_ARROW_BATCH	2	/* one record batch / row group */
+#define CPUJOB_HEAP_ALL		3	/* the whole heap table (a GPU-Cache scan) */
+
 struct pgstromTaskState
 {
 	CustomScanState		css;
@@ -529,6 +549,25 @@ struct pgstromTaskState
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;
+	/* A14: runtime CPU fallback of the whole node */
+	bool				cpu_fallback_ok;	/* may continue on the CPU if the GPU service fails */
+	bool				cpu_mode;			/* the GPU session is gone, the CPU runs the rest */
+	bool				defer_fallback;		/* GpuPreAgg: hold back the recheck tuples until Final */
+	bool				drain_fallback;		/* GpuPreAgg: Final is done, emit them */
+	bool				final_is_last;		/* result of pgstromTaskStateEndScan() */
+	bool				cpu_final_done;
+	pgstromCpuJob	   *journal;			/* tasks sent to the service */
+	uint32_t			journal_nrooms;
+	uint32_t			journal_head;		/* first entry that has no consumed reply */
+	uint32_t			journal_tail;		/* # of entries */
+	uint32_t			cpujob_next;		/* CPU mode: next journal entry to replay */
+	pgstromCpuJob		cpujob;				/* CPU mode: the job in progress */
+	bool				cpujob_active;
+	uint32_t			cpujob_pos;
+	uint32_t			cpujob_nrows;
+	TableScanDesc		cpujob_scan;		/* CPUJOB_HEAP_ALL */
+	HeapTupleData	   *cpujob_htups;
+	uint32_t			cpujob_nhtups;
 	/* request command buffer */
 	StringInfoData		xcmd_buf;
 	/* scan relations state (can be multiple) */
@@ -954,6 +993,8 @@ extern bool		kds_arrow_fetch_tuple(TupleTableSlot *slot,
 									  kern_data_store *kds,
 									  size_t index,
 									  const Bitmapset *referenced);
+extern bool		pgstromArrowFdwClaimBatch(ArrowFdwState *arrow_state, uint32_t *p_rb_flat);
+extern uint32_t	pgstromArrowFdwBatchNrows(ArrowFdwState *arrow_state, Relation scan_rel, uint32_t rb_flat);
 extern HeapTuple pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
 											 Relation scan_rel,
 											 uint32_t rb_flat,
@@ -987,6 +1028,16 @@ extern void		pgstrom_init_gpu_cache(void);
 /*
  * fallback.c
  */
+extern bool		pgstrom_gpu_error_fallback;		/* GUC pg_strom.gpu_error_fallback */
+extern char	   *pgstrom_gpuserv_fault;
+extern bool		pgstrom_debug_no_limits;		/* GUC pg_strom.debug_no_program_limits */
+extern int		pgstrom_scan_chunk_blocks;		/* GUC pg_strom.scan_chunk_blocks */			/* GUC pg_strom.gpuserv_fault */
+extern void		pgstromCpuModeBegin(pgstromTaskState *pts, const char *reason);
+extern void		pgstromCpuModeReset(pgstromTaskState *pts);
+extern bool		pgstromCpuModeStep(pgstromTaskState *pts);
+extern void		pgstromJournalAppend(pgstromTaskState *pts, const XpuCommand *xcmd);
+extern void		pgstromJournalAck(pgstromTaskState *pts);
+
 extern TupleTableSlot *pgstromFetchFallbackTuple(pgstromTaskState *pts);
 extern void		execCpuRecheckOneChunk(pgstromTaskState *pts);
 extern void		execCpuFallbackBaseTuple(pgstromTaskState *pts,

@@ -2101,8 +2101,92 @@ calib_pt_dist(double px, double py, double qx, double qy)
 	return sqrt(fma(h, h, v2));
 }
 
+/* the model of lw_dist2d_pt_ptarray for the point pt and the vertices v[0 .. npts - 1] (see above) */
+static double
+calib_ptarray_min(const double *pt, const double (*v)[3], int npts)
+{
+	double		best = calib_pt_dist(pt[0], pt[1], v[0][0], v[0][1]);
+
+	for (int k = 1; k < npts; k++)
+	{
+		double		ax = v[k - 1][0], ay = v[k - 1][1], bx = v[k][0], by = v[k][1];
+		double		bxa = bx - ax, bya = by - ay, pxa = pt[0] - ax, pya = pt[1] - ay, d;
+		volatile double t1 = pya * bya, t2 = bya * bya, t3 = (ax - pt[0]) * bya;
+		double		num = fma(pxa, bxa, t1), den = fma(bxa, bxa, t2), rr = num / den;
+
+		if (rr < 0)
+			d = calib_pt_dist(pt[0], pt[1], ax, ay);
+		else if (rr > 1)
+			d = calib_pt_dist(pt[0], pt[1], bx, by);
+		else
+		{
+			/* PostGIS' distance2d_pt_seg inside the segment: |s| * sqrt(L2), s = cross / L2; for a vertical or horizontal segment exactly |px - ax| /
+			 * |py - ay| (test/gpuserv/postgis/seg_axis_probe.c) */
+			double		cross = fma(ay - pt[1], bxa, -t3);
+
+			if (ax == bx)
+				d = fabs(pt[0] - ax);
+			else if (ay == by)
+				d = fabs(pt[1] - ay);
+			else
+				d = fabs(cross / den) * sqrt(den);
+		}
+		if (d < best)
+			best = d;
+	}
+	return best;
+}
+
+/* the 3D model (lw_dist3d_pt_ptarray / pt_seg, found by test/gpuserv/postgis/seg3d_probe.c): r = num / den with num = fma(pz', bz', fma(px', bx', py' * by'))
+ * and den likewise (primes: relative to A), the end A for r < 0, B for r > 1, else the foot c = fma(r, B - A, A) per coordinate; the distance to it
+ * is sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) */
+static double
+calib_pt_dist3(const double *p, const double *q)
+{
+	volatile double v2 = (q[1] - p[1]) * (q[1] - p[1]);
+	double		h = q[0] - p[0], z = q[2] - p[2];
+
+	return sqrt(fma(z, z, fma(h, h, v2)));
+}
+
+static double
+calib_ptarray_min3(const double *pt, const double (*v)[3], int npts)
+{
+	double		best = calib_pt_dist3(pt, v[0]);
+
+	for (int k = 1; k < npts; k++)
+	{
+		const double *A = v[k - 1], *B = v[k];
+		double		d;
+
+		if (A[0] == B[0] && A[1] == B[1] && A[2] == B[2])
+			d = calib_pt_dist3(pt, A);
+		else
+		{
+			double		bxa = B[0] - A[0], bya = B[1] - A[1], bza = B[2] - A[2];
+			double		pxa = pt[0] - A[0], pya = pt[1] - A[1], pza = pt[2] - A[2];
+			volatile double t1 = pya * bya, t2 = bya * bya;
+			double		num = fma(pza, bza, fma(pxa, bxa, t1)), den = fma(bza, bza, fma(bxa, bxa, t2)), r = num / den;
+
+			if (r < 0)
+				d = calib_pt_dist3(pt, A);
+			else if (r > 1)
+				d = calib_pt_dist3(pt, B);
+			else
+			{
+				double		c[3] = {fma(r, bxa, A[0]), fma(r, bya, A[1]), fma(r, bza, A[2])};
+
+				d = calib_pt_dist3(pt, c);
+			}
+		}
+		if (d < best)
+			best = d;
+	}
+	return best;
+}
+
 static bool
-vulkan_geom_ptline_calibrated(Oid func_oid)
+vulkan_geom_ptline_calibrated(Oid func_oid, bool d3)
 {
 	static const double scales[3] = {1000.0, 1.0, 1e-3};
 	uint64_t	rng = 0x2545F4914F6CDD1DULL;
@@ -2133,6 +2217,10 @@ vulkan_geom_ptline_calibrated(Oid func_oid)
 					else
 						pt[c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
 				}
+			if (!d3 && i % 8 == 4)
+				v[1][0] = v[0][0];			/* a vertical segment (PostGIS answers |px - ax| exactly) */
+			if (!d3 && i % 8 == 6)
+				v[1][1] = v[0][1];			/* a horizontal one */
 			SET_VARSIZE(line, VARHDRSZ + 4 + 8 + 24 * npts);
 			line[VARHDRSZ + 3] = 0x01;
 			memcpy(line + VARHDRSZ + 4, &two, 4);
@@ -2143,28 +2231,7 @@ vulkan_geom_ptline_calibrated(Oid func_oid)
 			memcpy(pnt + VARHDRSZ + 4, &one, 4);
 			memcpy(pnt + VARHDRSZ + 8, &one, 4);
 			memcpy(pnt + VARHDRSZ + 12, pt, 24);
-			best = calib_pt_dist(pt[0], pt[1], v[0][0], v[0][1]);
-			for (int k = 1; k < npts; k++)
-			{
-				double		ax = v[k - 1][0], ay = v[k - 1][1], bx = v[k][0], by = v[k][1];
-				double		bxa = bx - ax, bya = by - ay, pxa = pt[0] - ax, pya = pt[1] - ay, d;
-				volatile double t1 = pya * bya, t2 = bya * bya, t3 = (ax - pt[0]) * bya;
-				double		num = fma(pxa, bxa, t1), den = fma(bxa, bxa, t2), rr = num / den;
-
-				if (rr < 0)
-					d = calib_pt_dist(pt[0], pt[1], ax, ay);
-				else if (rr > 1)
-					d = calib_pt_dist(pt[0], pt[1], bx, by);
-				else
-				{
-					/* PostGIS' distance2d_pt_seg inside the segment: |s| * sqrt(L2), s = cross / L2 */
-					double		cross = fma(ay - pt[1], bxa, -t3);
-
-					d = fabs(cross / den) * sqrt(den);
-				}
-				if (d < best)
-					best = d;
-			}
+			best = (d3 ? calib_ptarray_min3(pt, v, npts) : calib_ptarray_min(pt, v, npts));
 			InitFunctionCallInfoData(*fcinfo, &flinfo, 2, InvalidOid, NULL, NULL);
 			fcinfo->args[0].value = PointerGetDatum(pnt);
 			fcinfo->args[0].isnull = false;
@@ -2174,7 +2241,7 @@ vulkan_geom_ptline_calibrated(Oid func_oid)
 			got = DatumGetFloat8(r);
 			if (fcinfo->isnull || memcmp(&best, &got, sizeof(double)) != 0)
 			{
-				elog(LOG, "PG-Strom: ST_Distance(point, line) calibration case %d (%d points): model %.17g, PostGIS %.17g%s", i, npts, best, got,
+				elog(LOG, "PG-Strom: ST_Distance / ST_3DDistance(point, line) calibration case %d (%d points): model %.17g, PostGIS %.17g%s", i, npts, best, got,
 					 fcinfo->isnull ? " (NULL)" : "");
 				ok = false;
 			}
@@ -2193,7 +2260,7 @@ vulkan_geom_ptline_calibrated(Oid func_oid)
 }
 
 static bool
-vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
+vulkan_geom_dist_calibrated(Oid func_oid, bool d3, bool maxd)
 {
 	static struct { Oid oid; bool ok; } done[16];
 	static int	ndone = 0;
@@ -2272,9 +2339,9 @@ vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
 		ok = false;
 	}
 	PG_END_TRY();
-	/* the 2D distance of a point and a line: the model of the segment projection (a different build could contract it differently) */
-	if (ok && !d3)
-		ok = vulkan_geom_ptline_calibrated(func_oid);
+	/* the distance of a point and a line: the model of the segment projection (a different build could contract it differently) */
+	if (ok && !maxd)			/* ST_3DMaxDistance of a non-point stays on the backend: its kernel flag is off */
+		ok = vulkan_geom_ptline_calibrated(func_oid, d3);
 	if (!ok && getenv("PGSTROM_GEOM_NO_CALIBRATION"))
 		ok = true;						/* debugging aid: trust the kernel without the calibration */
 	if (!ok)
@@ -2443,6 +2510,151 @@ calib_host_ring(const double (*pt)[3], int n, bool d3)
 }
 
 static bool vulkan_geom_area_calibrated(Oid func_oid);
+
+/*
+ * Does the installed PostGIS decide ST_DWithin(point, line or polygon, d) as "the 2D distance of the model (calib_ptarray_min per line or
+ * ring; a polygon: 0 inside it, the distance to the exterior ring outside it, to the hole's ring inside a hole) <= d"? Called, with the
+ * operands in both orders, on 120 fixed cases (lines, polygons with a hole and points outside, in the hole and in the body; Z geometries,
+ * so the 2D function must ignore the Z) at d, its float neighbour below and above. When it holds the kernel decides point-to-geometry
+ * ST_DWithin itself (KEXP_FLAG__GEOM_NP); when it does not, the kernel hands every such row to the backend.
+ */
+static bool
+vulkan_geom_dwithin_np_calibrated(Oid func_oid, bool d3)
+{
+	static struct { Oid oid; bool ok; } done[16];
+	static int	ndone = 0;
+	static const double scales[3] = {1000.0, 1.0, 1e-3};
+	uint64_t	rng = 0x5851F42D4C957F2DULL;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 3);
+	bool		ok = true;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < ndone; i++)
+		if (done[i].oid == func_oid)
+			return done[i].ok;
+	oldcxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int i = 0; i < 120 && ok; i++)
+		{
+			int			kind = (d3 ? 0 : i % 4);	/* 0 line, 1 point outside a polygon, 2 in its hole, 3 in its body (2D only) */
+			double		sc = scales[(i / 4) % 3], pt[3], tol[3], d = 0.0, h = sc * 0.25;
+			double		v[8][3];
+			int			cnt[2], nr = 1, npts = 3 + (i / 4) % 4;
+			unsigned char *geom = palloc0(VARHDRSZ + 4 + 8 + 4 * 2 + 24 * 12 + 16);
+			unsigned char *pnt = palloc0(VARHDRSZ + 4 + 8 + 24);
+			uint32		one = 1;
+			size_t		len;
+
+			memset(v, 0, sizeof(v));
+			for (int c = 0; c < 3; c++)
+			{
+				rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+				pt[c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+			}
+			if (kind == 0)
+			{
+				for (int k = 0; k < npts; k++)
+					for (int c = 0; c < 3; c++)
+					{
+						rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+						v[k][c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc;
+					}
+				if (!d3 && i % 8 == 4)		/* a vertical segment */
+					v[1][0] = v[0][0];
+				if (!d3 && i % 8 == 6)		/* a horizontal segment */
+					v[1][1] = v[0][1];
+				cnt[0] = npts;
+				d = (d3 ? calib_ptarray_min3(pt, v, npts) : calib_ptarray_min(pt, v, npts));
+				len = calib_put_poly_or_line(geom, VARHDRSZ + 4, v, cnt, 1, true);
+			}
+			else
+			{
+				double		ext[5][3] = {{-sc, -sc, 0}, {sc, -sc, 0}, {sc, sc, 0}, {-sc, sc, 0}, {-sc, -sc, 0}};
+				double		hole[5][3] = {{-h, -h, 0}, {-h, h, 0}, {h, h, 0}, {h, -h, 0}, {-h, -h, 0}};
+				double		both[10][3];
+
+				memcpy(both, ext, sizeof(ext));
+				memcpy(both + 5, hole, sizeof(hole));
+				cnt[0] = 5;
+				cnt[1] = 5;
+				nr = 2;
+				if (kind == 1)
+				{
+					/* outside: push the random point beyond the exterior ring */
+					pt[0] = (pt[0] < 0 ? -1.0 : 1.0) * sc * (1.05 + fabs(pt[0]) / sc);
+					pt[1] = pt[1] * 1.7;
+					d = calib_ptarray_min(pt, ext, 5);
+				}
+				else if (kind == 2)
+				{
+					pt[0] = pt[0] * 0.2 * 0.8;
+					pt[1] = pt[1] * 0.2 * 0.8;
+					d = calib_ptarray_min(pt, hole, 5);
+				}
+				else
+				{
+					pt[0] = (pt[0] < 0 ? -1.0 : 1.0) * sc * (0.4 + 0.4 * fabs(pt[0]) / sc);
+					pt[1] = (pt[1] < 0 ? -1.0 : 1.0) * sc * (0.4 + 0.4 * fabs(pt[1]) / sc);
+					d = 0.0;
+				}
+				len = calib_put_poly_or_line(geom, VARHDRSZ + 4, both, cnt, nr, false);
+			}
+			SET_VARSIZE(geom, len);
+			geom[VARHDRSZ + 3] = 0x01;
+			SET_VARSIZE(pnt, VARHDRSZ + 4 + 8 + 24);
+			pnt[VARHDRSZ + 3] = 0x01;
+			memcpy(pnt + VARHDRSZ + 4, &one, 4);
+			memcpy(pnt + VARHDRSZ + 8, &one, 4);
+			memcpy(pnt + VARHDRSZ + 12, pt, 24);
+			tol[0] = d;
+			tol[1] = (d > 0.0 ? nextafter(d, 0.0) : -1.0);	/* -1: not tried */
+			tol[2] = (d > 0.0 ? nextafter(d, INFINITY) : -1.0);
+			for (int k = 0; k < 3 && ok; k++)
+				for (int order = 0; order < 2 && ok; order++)
+				{
+					bool		want = (d <= tol[k]);
+					Datum		r;
+
+					if (tol[k] < 0.0)
+						continue;
+					InitFunctionCallInfoData(*fcinfo, &flinfo, 3, InvalidOid, NULL, NULL);
+					fcinfo->args[0].value = PointerGetDatum(order ? geom : pnt);
+					fcinfo->args[0].isnull = false;
+					fcinfo->args[1].value = PointerGetDatum(order ? pnt : geom);
+					fcinfo->args[1].isnull = false;
+					fcinfo->args[2].value = Float8GetDatum(tol[k]);
+					fcinfo->args[2].isnull = false;
+					r = FunctionCallInvoke(fcinfo);
+					if (fcinfo->isnull || DatumGetBool(r) != want)
+					{
+						elog(LOG, "PG-Strom: ST_DWithin / ST_3DDWithin(point, %s) calibration case %d tolerance %d: model %d", kind == 0 ? "line" : "polygon", i, k, (int) want);
+						ok = false;
+					}
+				}
+			pfree(geom);
+			pfree(pnt);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	if (!ok)
+		elog(LOG, "PG-Strom: PostGIS function %u does not decide ST_DWithin of a point and a line or polygon as the GPU kernel does; those rows go to the CPU", func_oid);
+	if (ndone < lengthof(done))
+	{
+		done[ndone].oid = func_oid;
+		done[ndone].ok = ok;
+		ndone++;
+	}
+	return ok;
+}
 
 static bool
 vulkan_geom_len_calibrated(Oid func_oid, int kind)
@@ -2942,8 +3154,8 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0 &&
 				vulkan_geom_len_calibrated(dfunc->func_oid, (int) fc.kind));
 	if (fc.cls == SOP_GEOMDIST)
-		return (vulkan_geom_dist_args_ok(func_args, fc.kind == 1) &&
-				vulkan_geom_dist_calibrated(dfunc->func_oid, fc.kind == 1));
+		return (vulkan_geom_dist_args_ok(func_args, fc.kind >= 1) &&
+				vulkan_geom_dist_calibrated(dfunc->func_oid, fc.kind >= 1, fc.kind == 2));
 	if (fc.cls == SOP_GEOM3DDW && fc.kind == SOP_G3DDW_INTERSECTS)
 		return vulkan_geom_3dintersects_args_ok(func_args);
 	if (fc.cls == SOP_GEOM3DDW)
@@ -3084,7 +3296,12 @@ __codegen_func_expression(codegen_context *context,
 		/* ST_DWithin / ST_3DDWithin (not ST_3DIntersects): the exact decision, if this PostGIS makes it */
 		if ((xfc.cls == SOP_GEOMDWITHIN || (xfc.cls == SOP_GEOM3DDW && xfc.kind == 0)) &&
 			vulkan_geom_dwithin_exact_calibrated(dfunc->func_oid, xfc.cls == SOP_GEOM3DDW))
+		{
 			kexp.expflags |= KEXP_FLAG__GEOM_EXACT;
+			/* a point and a line, polygon or multi-geometry (3D: lines and points): decided by the kernel when this PostGIS does it the modelled way */
+			if (vulkan_geom_dwithin_np_calibrated(dfunc->func_oid, xfc.cls == SOP_GEOM3DDW))
+				kexp.expflags |= KEXP_FLAG__GEOM_NP;
+		}
 	}
 	if (buf)
 		pos = __appendBinaryStringInfo(buf, &kexp, SizeOfKernExpr(0));
@@ -5879,7 +6096,7 @@ pgstrom_vulkan_expr_limits(Expr *expr)
 	int			regs = vulkan_expr_regs((Node *) expr, &nodes);
 
 	/* one register less: a list of quals is one AND whose accumulator takes a register */
-	if (regs > SCAN_VM_TEMP_BUDGET - 1 || nodes > SCAN_VM_EXPR_NODES)
+	if (!pgstrom_debug_no_limits && (regs > SCAN_VM_TEMP_BUDGET - 1 || nodes > SCAN_VM_EXPR_NODES))
 	{
 		elog(DEBUG2, "expression is too deep for the Vulkan service (%d registers, %d nodes): %s",
 			 regs, nodes, nodeToString(expr));

@@ -1,0 +1,16 @@
+dist point-point 1e39|
+dist point-line 1e39|
+dist point-line 3.4e38|3.4e+38
+dist 3d point-line 1e39|
+dwithin point-point 1e39 tol 5e38|t
+dwithin point-point 1e39 tol 1e300|t
+dwithin point-line 1e39 tol 5e38|t
+dwithin point-line 1e39 tol 1e300|t
+dwithin point-line 1e39 tol 3.5e38|t
+dwithin point-line 1e39 tol 1e39|t
+dwithin 3d point-line 1e39 tol 1e300|t
+dwithin 3d point-point 1e39 tol 1e300|t
+dwithin empty line|f
+dwithin empty polygon|f
+dwithin empty point-line|f
+dist empty line|

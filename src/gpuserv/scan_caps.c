@@ -1314,7 +1314,9 @@ classify_geometry(const char *name)
 	/* ST_3DIntersects of two points is ST_3DDWithin with the tolerance 0 (probe: threed_probe2.sql); the n-D box operator &&& */
 	else if (!strcmp(name, "st_distance"))
 		{ fc.cls = SOP_GEOMDIST; fc.kind = 0; }
-	else if (!strcmp(name, "st_3ddistance") || !strcmp(name, "st_3dmaxdistance"))
+	else if (!strcmp(name, "st_3dmaxdistance"))
+		{ fc.cls = SOP_GEOMDIST; fc.kind = 2; }
+	else if (!strcmp(name, "st_3ddistance"))
 		{ fc.cls = SOP_GEOMDIST; fc.kind = 1; }
 	else if (!strcmp(name, "st_length") || !strcmp(name, "st_length2d"))
 		{ fc.cls = SOP_GEOMLEN; fc.kind = 0; }

@@ -573,6 +573,7 @@ scan_engine_fini(scan_engine *eng)
 	SCAN_PIPES_DESTROY(eng, join_pipe, join_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, agg_pipe, agg_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, gagg_pipe, gagg_pipe_ready);
+	SCAN_PIPES_DESTROY(eng, gtab_pipe, gtab_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, jagg_pipe, jagg_pipe_ready);
 	SCAN_PIPES_DESTROY(eng, jgagg_pipe, jgagg_pipe_ready);
 }
@@ -1956,9 +1957,12 @@ group_lookup(struct group_table **p_gt, const int64_t *key, uint32_t knull)
 	}
 }
 
+static void gtab_destroy(agg_state *st);
+
 void
 agg_state_free(agg_state *st)
 {
+	gtab_destroy(st);
 	free(st->rck.buf);
 	st->rck.buf = NULL;
 	st->rck.len = st->rck.cap = st->rck.nitems = 0;
@@ -2054,6 +2058,536 @@ group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, ui
 	return 0;
 }
 
+/*
+ * The rows of a GROUP BY task that the kernel did not aggregate (flags, one word per line pointer: 1 the CPU aggregates the row
+ * here, 2 the backend evaluates it): evaluated by the VM on the CPU into the session's groups, or kept for the backend.
+ * -1 on error (err is set).
+ */
+static int
+group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_src, const page_set *ps,
+			   const uint32_t *lp_base, uint32_t npages, uint32_t total_lps, const uint32_t *flags,
+			   uint64_t *p_noverflow, char *err, size_t errlen)
+{
+	const uint32_t *w = prog->words;
+	uint32_t	nagg = prog->nagg;
+	uint64_t	n_overflow = 0;
+	uint32_t	aggoff = w[11], keyoff = w[13];
+	uint32_t	nkeys = prog->nkeys;
+
+	for (uint32_t i = 0; i < npages; i++)
+	{
+		uint32_t	nlp = (i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i];
+		const unsigned char *page = PAGE_AT(ps, i);
+
+		for (uint32_t lp = 0; lp < nlp; lp++)
+		{
+			vm_reg		regs[SCAN_MAX_REGS];
+			uint32_t	lpd, e = 0, knull = 0;
+			int64_t		key[SCAN_GROUP_KEYS] = {0, 0};
+			group_entry *g;
+
+			if (!flags[lp_base[i] + lp])
+				continue;
+			memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+			if (flags[lp_base[i] + lp] == 2)		/* a string the GPU cannot read: the backend */
+			{
+				if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
+							page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+				{
+					snprintf(err, errlen, "out of memory");
+					return -1;
+				}
+				continue;
+			}
+			n_overflow++;
+			if (cpu_eval_row(prog, page + (lpd & 0x7fff), regs, &e) != 1)
+			{
+				if (e == SOP_RECHECK_CODE)			/* a numeric the VM cannot evaluate: the backend */
+				{
+					if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
+								page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+					{
+						snprintf(err, errlen, "out of memory");
+						return -1;
+					}
+					continue;
+				}
+				if (e != 0)
+				{
+					describe_kernel_error(e, i, lp, err, errlen);
+					return -1;
+				}
+				continue;
+			}
+			if (!cpu_scales_ok(w, aggoff, nagg, keyoff, nkeys, regs))
+			{
+				/* a numeric of another scale than the plan's: the backend evaluates the row */
+				if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
+							page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+				{
+					snprintf(err, errlen, "out of memory");
+					return -1;
+				}
+				continue;
+			}
+			for (uint32_t k = 0; k < nkeys; k++)
+			{
+				const vm_reg *r = &regs[w[keyoff + k]];
+
+				if (r->isnull)
+					knull |= (1u << k);
+				else
+					key[k] = r->v;
+			}
+			g = group_lookup(&st->groups, key, knull);
+			if (!g)
+			{
+				snprintf(err, errlen, "out of memory");
+				return -1;
+			}
+			for (uint32_t a = 0; a < nagg; a++)
+			{
+				uint32_t	cls = w[aggoff + 4 * a], ra = w[aggoff + 4 * a + 1], rf = w[aggoff + 4 * a + 2];
+
+				if (rf != 0xffffffffu && (regs[rf].isnull || regs[rf].v == 0))
+					continue;
+				if (cls != 1 && regs[ra].isnull)
+					continue;
+				acc_add_value(&g->acc[a], cls, (cls == 1 || cls == 2) ? 0 : regs[ra].v);
+			}
+		}
+	}
+	*p_noverflow += n_overflow;
+	return 0;
+}
+
+/* ---------------------------------------------------------------- */
+/*
+ * GROUP BY over many groups: one hash table in device memory for the whole session (kernels_vm/gtab.slang, which describes
+ * the layout). The tasks add to it; it is read once, when it has to grow and at the end of the session (scan_group_flush),
+ * and merged into the session's groups, where the rows aggregated on the CPU are too.
+ */
+#define GT_HDR			8
+#define GT_KEYW			6
+#define GT_MAX_BYTES	(512U << 20)	/* the table of a session */
+#define GT_INIT_SLOTS	(1U << 20)		/* the largest table created from the planner's estimate (it grows if needed) */
+
+typedef struct gtab_state
+{
+	gpu_vk_ctx *vk;
+	gpu_vk_buffer buf;
+	uint32_t	cap;				/* slots (a power of 2) */
+	uint32_t	stride;				/* words per slot */
+	uint32_t	maxcap;
+} gtab_state;
+
+static uint32_t
+gt_width(uint32_t cls)
+{
+	return (cls == 1 || cls == 2) ? 1 : (cls == 3 ? 10 : 2);
+}
+
+static uint32_t
+gt_stride(const scan_prog *prog)
+{
+	uint32_t	stride = GT_KEYW;
+
+	for (uint32_t a = 0; a < prog->nagg; a++)
+		stride += gt_width(prog->words[prog->words[11] + 4 * a]);
+	return stride;
+}
+
+/*
+ * PGSTROM_GPUSERV_GTAB: 0 never, 1 always (tests); default: once a task of the shared-memory kernel has found that most of
+ * its rows overflow (scan_exec_group_task), the session uses the table. The planner's estimate is no guide (PostgreSQL
+ * estimates an expression such as a % 10 by the distinct values of a), it only sizes the table.
+ */
+static int
+gtab_wanted(const agg_state *st)
+{
+	static int	mode = -1;
+
+	if (mode < 0)
+	{
+		const char *s = getenv("PGSTROM_GPUSERV_GTAB");
+
+		mode = s ? atoi(s) : 2;
+	}
+	if (mode == 0)
+		return 0;
+	return mode == 1 || st->gt != NULL;
+}
+
+static void
+gtab_destroy(agg_state *st)
+{
+	if (st->gt)
+	{
+		if (st->gt->cap)
+			gpu_vk_buffer_destroy(st->gt->vk, &st->gt->buf);
+		free(st->gt);
+		st->gt = NULL;
+	}
+}
+
+/* a (new) table of at least 'want' slots; the memory limit caps it */
+static int
+gtab_create(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, uint64_t want, char *err, size_t errlen)
+{
+	gtab_state *gt = st->gt;
+	uint32_t	stride = gt_stride(prog), cap = 4096, maxcap = 4096;
+	size_t		bytes;
+	uint32_t   *hdr;
+
+	while ((uint64_t)(maxcap * 2) * stride * 4 <= GT_MAX_BYTES)
+		maxcap *= 2;
+	while (cap < want && cap < maxcap)
+		cap *= 2;
+	if (!gt)
+	{
+		gt = calloc(1, sizeof(*gt));
+		if (!gt)
+		{
+			snprintf(err, errlen, "out of memory");
+			return -1;
+		}
+		st->gt = gt;
+	}
+	bytes = ((size_t) GT_HDR + (size_t) cap * stride) * 4;
+	if (gpu_vk_buffer_create(vk, &gt->buf, bytes, 0) != 0)
+	{
+		gt->cap = 0;
+		snprintf(err, errlen, "cannot allocate the group table: %s", vk->err);
+		return -1;
+	}
+	memset(gt->buf.map, 0, bytes);
+	hdr = (uint32_t *) gt->buf.map;
+	hdr[2] = cap - 1;
+	hdr[3] = stride;
+	gt->vk = vk;
+	gt->cap = cap;
+	gt->stride = stride;
+	gt->maxcap = maxcap;
+	return 0;
+}
+
+/* one slot's accumulators of an aggregate into an accumulator (the words are described in gtab.slang) */
+static void
+acc_merge_gtab(agg_acc *acc, uint32_t action, const uint32_t *w)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__NROWS_ANY:
+		case KAGG_ACTION__NROWS_COND:
+			acc->n += w[0];
+			break;
+		case KAGG_ACTION__PSUM_INT:
+		case KAGG_ACTION__PSUM_INT64:
+		case KAGG_ACTION__PAVG_INT:
+		case KAGG_ACTION__PAVG_INT64:
+		case KAGG_ACTION__PSUM_NUMERIC:
+		case KAGG_ACTION__PAVG_NUMERIC:
+		{
+			__int128	pos = (__int128) w[1] + ((__int128)(uint64_t) w[2] << 32);
+			__int128	neg = (__int128) w[3] + ((__int128)(uint64_t) w[4] << 32);
+			__int128	xl = (__int128) w[6] + ((__int128)(uint64_t) w[7] << 32);
+			__int128	xh = (__int128) w[8] + ((__int128)(uint64_t) w[9] << 32);
+
+			acc->n += w[0];
+			acc->sum += pos - neg + xl + (xh << 32) - ((__int128) w[5] << 63);
+			break;
+		}
+		case KAGG_ACTION__PMIN_INT32:
+		case KAGG_ACTION__PMIN_INT64:
+		{
+			int64_t		v = (int32_t)(~w[1] ^ 0x80000000u);
+
+			if (w[0] && (!acc->n || v < acc->val))
+				acc->val = v;
+			if (w[0])
+				acc->n = 1;
+			break;
+		}
+		default:		/* PMAX_* */
+		{
+			int64_t		v = (int32_t)(w[1] ^ 0x80000000u);
+
+			if (w[0] && (!acc->n || v > acc->val))
+				acc->val = v;
+			if (w[0])
+				acc->n = 1;
+			break;
+		}
+	}
+}
+
+/* merge the device table into the session's groups; 'clear' empties the table */
+static int
+gtab_flush(const scan_prog *prog, agg_state *st, int clear, char *err, size_t errlen)
+{
+	gtab_state *gt = st->gt;
+	uint32_t	nagg = prog->nagg;
+	uint32_t	agg_col[SCAN_AGG_MAX], agg_off[SCAN_AGG_MAX];
+	uint32_t   *base = gt ? (uint32_t *) gt->buf.map : NULL;
+	uint32_t	off = GT_KEYW;
+
+	if (!gt || !gt->cap)
+		return 0;
+	for (uint32_t a = 0; a < nagg; a++)
+	{
+		uint32_t	col;
+
+		for (col = 0; col < (uint32_t) prog->nattrs; col++)
+			if (prog->agg_of_col[col] == (int8_t) a)
+				break;
+		agg_col[a] = col;
+		agg_off[a] = off;
+		off += gt_width(prog->words[prog->words[11] + 4 * a]);
+	}
+	for (uint32_t s = 0; s < gt->cap; s++)
+	{
+		const uint32_t *w = base + GT_HDR + (size_t) s * gt->stride;
+		int64_t		key[SCAN_GROUP_KEYS];
+		group_entry *e;
+
+		if (!w[0])
+			continue;
+		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
+			key[i] = (int64_t)((uint64_t) w[2 + 2 * i] | ((uint64_t) w[3 + 2 * i] << 32));
+		e = group_lookup(&st->groups, key, w[1]);
+		if (!e)
+		{
+			snprintf(err, errlen, "out of memory");
+			return -1;
+		}
+		for (uint32_t a = 0; a < nagg; a++)
+			acc_merge_gtab(&e->acc[a], prog->agg_action[agg_col[a]], w + agg_off[a]);
+	}
+	if (clear)
+	{
+		memset(base + GT_HDR, 0, (size_t) gt->cap * gt->stride * 4);
+		base[0] = 0;
+	}
+	return 0;
+}
+
+/* the end of the session: the table's groups into the session's groups (the reply is built from those) */
+int
+scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen)
+{
+	if (!st->gt)
+		return 0;
+	if (gtab_flush(prog, st, 0, err, errlen) != 0)
+		return -1;
+	gtab_destroy(st);
+	return 0;
+}
+
+static int
+gtab_wanted_switch(void)
+{
+	const char *s = getenv("PGSTROM_GPUSERV_GTAB");
+
+	return !s || atoi(s) == 2;
+}
+
+static int
+ensure_gtab_pipeline(scan_engine *eng, int variant, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	static const struct { const unsigned char *spv; const unsigned int *len; } tab[] = {
+		{kspv_gtab16, &kspv_gtab16_len}, {kspv_gtab32, &kspv_gtab32_len},
+		{kspv_gtab16_lite, &kspv_gtab16_lite_len}, {kspv_gtab32_lite, &kspv_gtab32_lite_len},
+		{kspv_gtab16_nogeom, &kspv_gtab16_nogeom_len}, {kspv_gtab32_nogeom, &kspv_gtab32_nogeom_len},
+	};
+	_Static_assert(sizeof(tab) / sizeof(tab[0]) == SCAN_NV2, "tab: one entry per register variant and tier");
+
+	if (!eng->gtab_pipe_ready[variant])
+	{
+		if (gpu_vk_pipeline_create(vk, &eng->gtab_pipe[variant], tab[variant].spv, *tab[variant].len, 6, 16) != 0)
+		{
+			snprintf(err, errlen, "cannot create the group table pipeline: %s", vk->err);
+			return -1;
+		}
+		eng->gtab_pipe_ready[variant] = 1;
+	}
+	return 0;
+}
+
+/*
+ * A GROUP BY task on the session's device table: up to three dispatches (gtab.slang: look up and add, insert the keys that
+ * were missing, add those rows), then the rows no slot could take on the CPU.
+ */
+static int
+group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *prog, agg_state *st,
+				const XpuCommand *task, const kern_data_store *kds_src, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const char *pathname = NULL;
+	const io_vector *iovec = NULL;
+	gpu_vk_buffer bout, bprog, btab;
+	page_set	ps;
+	int			have_out = 0, have_prog = 0, have_tab = 0, mapped, variant, rv = -1;
+	uint32_t	npages = kds_src->nitems, nloaded = kds_src->block_nloaded, total_lps = 0, ngroups_total, nmiss = 0;
+	uint32_t   *lp_base = NULL, *hdr;
+	size_t		out_words;
+	const uint32_t *out;
+	double		t0 = now_ms(), t1, t2 = 0, t3 = 0;
+	uint64_t	n_overflow = 0;
+	uint32_t	hits0;
+
+	memset(&ps, 0, sizeof(ps));
+	err[0] = '\0';
+	if (task->u.task.kds_src_pathname)
+		pathname = (const char *) task + task->u.task.kds_src_pathname;
+	if (task->u.task.kds_src_iovec)
+		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
+	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
+	if (ensure_gtab_pipeline(eng, variant, err, errlen) != 0)
+		return -1;
+	if (!st->gt || !st->gt->cap)
+	{
+		double		est = session->groupby_ngroups_estimation;
+
+		if (!(est >= 0))
+			est = 0;
+		if (est * 2 > GT_INIT_SLOTS)
+			est = GT_INIT_SLOTS / 2;
+		/* the planner's estimate, and at least what the session has seen (twice: the table is kept below half full) */
+		if (gtab_create(vk, prog, st, (uint64_t)(est * 2) > 4096 ? (uint64_t)(est * 2) : 4096, err, errlen) != 0)
+			return -1;
+		if (st->groups && (uint64_t) st->groups->nents * 2 > st->gt->cap)
+		{
+			gtab_destroy(st);
+			if (gtab_create(vk, prog, st, (uint64_t) st->groups->nents * 4, err, errlen) != 0)
+				return -1;
+		}
+	}
+	if (npages == 0)
+		return 0;
+	if (task_pages_open(eng, &ps, kds_src, pathname, iovec, &mapped, err, errlen) != 0)
+		goto done;
+	lp_base = malloc(sizeof(uint32_t) * npages);
+	if (!lp_base)
+	{
+		snprintf(err, errlen, "out of memory");
+		goto done;
+	}
+	t1 = now_ms();
+	if (gpu_vk_buffer_create(vk, &btab, sizeof(uint32_t) * 2 * npages, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the page table: %s", vk->err);
+		goto done;
+	}
+	have_tab = 1;
+	for (uint32_t i = 0; i < npages; i++)
+	{
+		uint16_t	pd_lower;
+
+		memcpy(&pd_lower, PAGE_AT(&ps, i) + 12, 2);
+		lp_base[i] = total_lps;
+		if (pd_lower > 24)
+			total_lps += (pd_lower - 24) / 4;
+		((uint32_t *) btab.map)[2 * i] = ps.ptab[i];
+		((uint32_t *) btab.map)[2 * i + 1] = lp_base[i];
+	}
+	st->nitems_raw += total_lps;
+	ngroups_total = (npages + group_ppw(AGG_PAGES_PER_WG) - 1) / group_ppw(AGG_PAGES_PER_WG);
+	out_words = 4 + (size_t) total_lps;
+	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
+		goto done;
+	}
+	have_out = 1;
+	out = (const uint32_t *) bout.map;
+	memset(bout.map, 0, 16);
+	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
+	{
+		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
+		goto done;
+	}
+	have_prog = 1;
+	memcpy(bprog.map, prog->words, prog->nwords * 4);
+	hdr = (uint32_t *) st->gt->buf.map;
+	hits0 = hdr[1] = 0;
+	{
+		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &st->gt->buf};
+		const uint32_t *flags = out + 4;
+
+		for (uint32_t mode = 0; mode < 3; mode++)
+		{
+			if (mode == 1 && nmiss == 0)
+				continue;
+			if (mode == 2 && nmiss == 0)
+				continue;
+			for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
+			{
+				uint32_t	groups = ngroups_total - base;
+				uint32_t	pc[4];
+
+				if (groups > SCAN_WG_MAX)
+					groups = SCAN_WG_MAX;
+				pc[0] = npages;
+				pc[1] = base | (mode << 28);
+				pc[2] = group_ppw(AGG_PAGES_PER_WG);
+				pc[3] = 4;
+				if (gpu_vk_dispatch(vk, &eng->gtab_pipe[variant], bufs, pc, groups, 1, 1, NULL) != 0)
+				{
+					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+					goto done;
+				}
+			}
+			if (out[1] != 0)
+			{
+				describe_kernel_error(out[1], out[2], out[3], err, errlen);
+				goto done;
+			}
+			if (mode == 0)
+			{
+				for (uint32_t i = 0; i < total_lps; i++)
+					nmiss += (flags[i] == 4);
+				t2 = now_ms();
+			}
+		}
+	}
+	st->nitems_in += hdr[1] - hits0;
+	t3 = now_ms();
+	/* the rows that found no slot: on the CPU */
+	if (group_cpu_rows(prog, st, kds_src, &ps, lp_base, npages, total_lps, out + 4, &n_overflow, err, errlen) != 0)
+		goto done;
+	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
+	if (eng->trace)
+		fprintf(stderr, "pgstrom-gpuserv: group task: %u pages, gpu %.1f ms (lookup %.1f), new-key rows %u, table %u/%u slots, overflow rows %llu (%.1f ms)\n",
+				npages, t3 - t1, t2 - t1, nmiss, hdr[0], st->gt->cap, (unsigned long long) n_overflow, now_ms() - t3);
+	/* a table more than half full grows: its groups move to the session's groups and the next task starts a bigger one */
+	if (st->gt->cap < st->gt->maxcap && (uint64_t) hdr[0] * 2 > st->gt->cap)
+	{
+		uint32_t	ncap = st->gt->cap * 4;
+
+		if (gtab_flush(prog, st, 0, err, errlen) != 0)
+			goto done;
+		gtab_destroy(st);
+		if (gtab_create(vk, prog, st, ncap, err, errlen) != 0)
+			goto done;
+	}
+	(void) t0;
+	rv = 0;
+done:
+	free(lp_base);
+	if (have_prog)
+		gpu_vk_buffer_destroy(vk, &bprog);
+	if (have_out)
+		gpu_vk_buffer_destroy(vk, &bout);
+	if (have_tab)
+		gpu_vk_buffer_destroy(vk, &btab);
+	page_set_release(vk, &ps);
+	if (rv != 0 && err[0] == '\0')
+		snprintf(err, errlen, "GROUP BY aggregation failed");
+	return rv;
+}
+
+
 int
 scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 					 agg_state *st, const XpuCommand *task, char *err, size_t errlen)
@@ -2073,7 +2607,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	uint32_t   *lp_base = NULL;
 	size_t		out_words;
 	const uint32_t *out;
-	int			rv = -1;
+	int			rv = -1, redo = 0;
 	const uint32_t *w;
 	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
@@ -2111,6 +2645,8 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		snprintf(err, errlen, "not a GROUP BY program");
 		return -1;
 	}
+	if (gtab_wanted(st))
+		return group_task_gtab(eng, session, prog, st, task, kds_src, err, errlen);
 	nagg = prog->nagg;
 	w = prog->words;
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
@@ -2201,6 +2737,27 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		goto done;
 	}
 	t2 = now_ms();
+	/*
+	 * Most rows found no slot in the workgroups' tables (many groups): the CPU would aggregate them one by one. Run the task
+	 * again on the session-wide table (gtab.slang) and keep using it. (The groups so far, if any, stay in the session's groups.)
+	 */
+	if (gtab_wanted_switch())
+	{
+		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
+		uint64_t	nov = 0, nhits = 0;
+
+		for (uint32_t i = 0; i < total_lps; i++)
+			nov += (flags[i] == 1);
+		for (uint32_t wg = 0; wg < ngroups_total; wg++)
+			nhits += out[4 + (size_t) wg * blk_words];
+		if (nov > 1000 && nov * 16 > nhits)
+		{
+			st->nitems_raw -= total_lps;
+			redo = 1;
+			rv = 0;
+			goto done;
+		}
+	}
 	/* merge the workgroups' tables */
 	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
 	{
@@ -2209,95 +2766,9 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	}
 	t3 = now_ms();
 	/* the rows that found no slot: on the CPU */
-	{
-		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
-		uint32_t	aggoff = w[11], keyoff = w[13];
-		uint32_t	nkeys = prog->nkeys;
-
-		for (uint32_t i = 0; i < npages; i++)
-		{
-			uint32_t	nlp = (i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i];
-			const unsigned char *page = PAGE_AT(&ps, i);
-
-			for (uint32_t lp = 0; lp < nlp; lp++)
-			{
-				vm_reg		regs[SCAN_MAX_REGS];
-				uint32_t	lpd, e = 0, knull = 0;
-				int64_t		key[SCAN_GROUP_KEYS] = {0, 0};
-				group_entry *g;
-
-				if (!flags[lp_base[i] + lp])
-					continue;
-				memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
-				if (flags[lp_base[i] + lp] == 2)		/* a string the GPU cannot read: the backend */
-				{
-					if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
-								page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
-					{
-						snprintf(err, errlen, "out of memory");
-						goto done;
-					}
-					continue;
-				}
-				n_overflow++;
-				if (cpu_eval_row(prog, page + (lpd & 0x7fff), regs, &e) != 1)
-				{
-					if (e == SOP_RECHECK_CODE)			/* a numeric the VM cannot evaluate: the backend */
-					{
-						if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
-									page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
-						{
-							snprintf(err, errlen, "out of memory");
-							goto done;
-						}
-						continue;
-					}
-					if (e != 0)
-					{
-						describe_kernel_error(e, i, lp, err, errlen);
-						goto done;
-					}
-					continue;
-				}
-				if (!cpu_scales_ok(w, aggoff, nagg, keyoff, nkeys, regs))
-				{
-					/* a numeric of another scale than the plan's: the backend evaluates the row */
-					if (rck_add(&st->rck, ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i], lp + 1,
-								page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
-					{
-						snprintf(err, errlen, "out of memory");
-						goto done;
-					}
-					continue;
-				}
-				for (uint32_t k = 0; k < nkeys; k++)
-				{
-					const vm_reg *r = &regs[w[keyoff + k]];
-
-					if (r->isnull)
-						knull |= (1u << k);
-					else
-						key[k] = r->v;
-				}
-				g = group_lookup(&st->groups, key, knull);
-				if (!g)
-				{
-					snprintf(err, errlen, "out of memory");
-					goto done;
-				}
-				for (uint32_t a = 0; a < nagg; a++)
-				{
-					uint32_t	cls = w[aggoff + 4 * a], ra = w[aggoff + 4 * a + 1], rf = w[aggoff + 4 * a + 2];
-
-					if (rf != 0xffffffffu && (regs[rf].isnull || regs[rf].v == 0))
-						continue;
-					if (cls != 1 && regs[ra].isnull)
-						continue;
-					acc_add_value(&g->acc[a], cls, (cls == 1 || cls == 2) ? 0 : regs[ra].v);
-				}
-			}
-		}
-	}
+	if (group_cpu_rows(prog, st, kds_src, &ps, lp_base, npages, total_lps,
+					   out + 4 + (size_t) ngroups_total * blk_words, &n_overflow, err, errlen) != 0)
+		goto done;
 	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: group task: %u pages, gpu %.1f ms, merge %.1f ms, overflow rows %llu (%.1f ms), groups so far %u\n",
@@ -2315,6 +2786,8 @@ done:
 	page_set_release(vk, &ps);
 	if (rv != 0 && err[0] == '\0')
 		snprintf(err, errlen, "GROUP BY aggregation failed");
+	if (redo)
+		return group_task_gtab(eng, session, prog, st, task, kds_src, err, errlen);
 	return rv;
 }
 
