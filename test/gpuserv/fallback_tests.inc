@@ -13,6 +13,8 @@ FBN=${FBN:-60000}
 fbcount() { grep -c "the CPU runs the rest of the node" "$ROOT/log"; }
 FBSET="set pg_strom.scan_chunk_blocks=16; set pg_strom.max_async_tasks=2;"
 FBJOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
+# an aggregation over a join: without enable_seqscan=off (its penalty would let a sorted CPU aggregate win)
+FBJAGGSET="set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_mergejoin=off; set enable_nestloop=off;"
 FBAGGSET="set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off;"
 
 sql "create table fb1 (id int4, a int2, b int4, c int8, f text, n numeric(12,2), g date, d float4, k int4)"
@@ -35,7 +37,7 @@ sql "analyze fb2"
 # every fault must (a) return the CPU's rows (b) be logged as a fallback
 fbrun() {
 	label=$1; pat=$2; kind=$3; faults=$4; qry=$5; extra=${6:-}
-	case $kind in join) pre="$GPU $FBJOINSET $FBSET";; agg) pre="$GPU $FBAGGSET $FBSET";; *) pre="$GPU set enable_seqscan=off; $FBSET";; esac
+	case $kind in join) pre="$GPU $FBJOINSET $FBSET";; jagg) pre="$GPU $FBJAGGSET $FBSET";; agg) pre="$GPU $FBAGGSET $FBSET";; *) pre="$GPU set enable_seqscan=off; $FBSET";; esac
 	pre="$pre $extra"
 	plan=$($PSQL -d scantest -c "$pre explain $qry" 2>&1 | grep -c "$pat")
 	c=$(q "$CPU" "$qry"); g0=$(q "$pre" "$qry")
@@ -59,21 +61,41 @@ fbrun "scan: no row qualifies" "Custom Scan (GpuScan)" scan "refuse" "select id 
 fbrun "scan: every row qualifies" "Custom Scan (GpuScan)" scan "lost=2 drop=3" "select id, a from fb1 where id > 0 or id <= 0"
 fbrun "scan: computed projection" "Custom Scan (GpuScan)" scan "refuse=2" "select id, a + b, c * 2 from fb1 where b is not null"
 
+# the visibility rules of the CPU run: the transaction's own changes are seen, deleted rows are not
+for f in refuse=2 drop=3; do
+	qry="select id, a, b from fb2 where b > 100"
+	out=$($PSQL -d scantest 2>&1 <<EOF
+begin;
+delete from fb2 where id % 4 = 0;
+update fb2 set b = b + 7 where id % 5 = 0;
+insert into fb2 select id + 1000000, a, b + 3, c, f, n, g, d, k from fb2 where id % 11 = 0;
+$GPU set enable_seqscan=off; $FBSET set pg_strom.gpuserv_fault='$f';
+select md5(coalesce(string_agg(x::text, E'\n' order by x::text), '')), count(*) from ($qry) x;
+$CPU
+select md5(coalesce(string_agg(x::text, E'\n' order by x::text), '')), count(*) from ($qry) x;
+rollback;
+EOF
+)
+	g=$(echo "$out" | grep -E '^[0-9a-f]{32}\|' | sed -n 1p); c=$(echo "$out" | grep -E '^[0-9a-f]{32}\|' | sed -n 2p)
+	if [ -n "$g" ] && [ "$g" = "$c" ] && ! echo "$out" | grep -q ERROR; then echo "  ok    scan inside a transaction with its own changes: $f (${g#*|} rows)"
+	else echo "  FAIL  scan inside a transaction with its own changes: $f"; echo "$out" | head; fail=$((fail+1)); fi
+done
+
 echo "-- GpuJoin on a heap table"
 fbrun "join: inner" "Custom Scan (GpuJoin)" join "$FAULTS" "select fb1.id, sd.pay, sd.txt from fb1 join sd on fb1.k = sd.k where fb1.b > 0"
 fbrun "join: left outer" "Custom Scan (GpuJoin)" join "refuse=3 drop=2" "select fb1.id, sd.k, sd.pay from fb1 left join sd on fb1.k = sd.k and sd.grp < 5"
 fbrun "join: right outer (the unmatched inner rows)" "Custom Scan (GpuJoin)" join "refuse refuse=3 drop=2 final" "select fb1.id, sd.k, sd.pay from fb1 right join sd on fb1.k = sd.k and fb1.b > 40000"
 fbrun "join: full outer" "Custom Scan (GpuJoin)" join "refuse=3 lost=2 final" "select fb1.id, sd.k from fb1 full join sd on fb1.k = sd.k and fb1.b > 40000"
-fbrun "join: semi" "Custom Scan (GpuJoin)" join "refuse=2" "select id, a from fb1 where a in (select k from sd where grp = 3)"
-fbrun "join: anti" "Custom Scan (GpuJoin)" join "drop=3" "select id, a from fb1 where a not in (select k from sd where grp < 16 and k is not null)"
+fbrun "join: semi" "Custom Scan (GpuJoin)" join "refuse=2" "select id, a from fb1 t where exists (select 1 from sd d where d.k = t.k and d.grp = 3)"
+fbrun "join: anti" "Custom Scan (GpuJoin)" join "drop=3" "select id, a from fb1 t where not exists (select 1 from sd d where d.k = t.k and d.grp < 16)"
 fbrun "join: two inner relations" "Custom Scan (GpuJoin)" join "refuse=3 open" "select fb1.id, sd.pay, fb2.b from fb1 join sd on fb1.k = sd.k join fb2 on fb1.id = fb2.id"
 
 echo "-- GpuPreAgg on a heap table"
 fbrun "agg: without GROUP BY" "Custom Scan (GpuPreAgg)" agg "$FAULTS_AGG" "select count(*), sum(b), min(a), max(c), avg(b) from fb1 where a > -5000"
 fbrun "agg: GROUP BY" "Custom Scan (GpuPreAgg)" agg "$FAULTS_AGG" "select a % 7 as k, count(*), sum(b), max(c) from fb1 group by 1"
 fbrun "agg: two keys" "Custom Scan (GpuPreAgg)" agg "refuse=3 lost=2" "select a % 5, b % 3, count(*), sum(c) from fb1 group by 1, 2"
-fbrun "agg: over a join" "Custom Scan (GpuPreAgg)" agg "refuse refuse=3 drop=3 final" "select sd.grp, count(*), sum(fb1.b) from fb1 join sd on fb1.k = sd.k group by 1"
-fbrun "agg: over a right join" "Custom Scan (GpuPreAgg)" agg "refuse=3 final" "select sd.grp, count(*), count(fb1.id) from fb1 right join sd on fb1.k = sd.k and fb1.b > 40000 group by 1"
+fbrun "agg: over a join" "Custom Scan (GpuPreAgg)" jagg "refuse refuse=3 drop=3 final" "select sd.grp, count(*), sum(fb1.b) from fb1 join sd on fb1.k = sd.k group by 1"
+fbrun "agg: over a right join" "Custom Scan (GpuPreAgg)" jagg "refuse=3 final" "select sd.grp, count(*), count(fb1.id) from fb1 right join sd on fb1.k = sd.k and fb1.b > 40000 group by 1"
 fbrun "agg: recheck rows are held back (no duplicates)" "Custom Scan (GpuPreAgg)" agg "refuse=3 drop=3 final" "select a % 4, count(*), sum(length(f)) from fb1 group by 1"
 
 echo "-- Arrow and Parquet"
@@ -106,7 +128,7 @@ n=$($PSQL -d scantest -c "$GPU $PAR set enable_seqscan=off; explain select id, a
 check "a parallel GpuScan plan is chosen" "$([ "$n" -ge 1 ]; echo $?)"
 fbrun "parallel scan" "Gather" scan "refuse refuse=3 drop=2" "select id, a, f from fb1 where b > 100" "$PAR"
 fbrun "parallel aggregation" "Gather" agg "refuse drop=3" "select a % 5, count(*), sum(b) from fb1 group by 1" "$PAR"
-fbrun "parallel join" "Gather" join "refuse=2" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k" "$PAR"
+fbrun "parallel join" "Gather" jagg "refuse=2" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k" "$PAR"
 
 echo "-- real refusals (the planner's limits switched off: the service rejects the program)"
 NL="set pg_strom.debug_no_program_limits=on;"
