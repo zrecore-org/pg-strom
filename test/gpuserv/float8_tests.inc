@@ -10,7 +10,7 @@ F8ROWS=${F8ROWS:-200000}
 # value (NaN, +-Infinity, -0, 0, subnormals, the largest and smallest normals, halves for rint, 2^63 for the int8
 # cast); d: float4 with NaN and Infinity; a, b, c: int2, int4, int8.
 f8_create() { # table
-	sql "create table $1 (i int4, a int2, b int4, c int8, d float4, x float8, y float8, w float8, z float8)"
+	sql "create table $1 (i int4, a int2, b int4, c int8, d float4, x float8, y float8, w float8, z float8, g2 int4, g3 int4, g4 int4, g5 int4, g6 int4, g7 int4)"
 	sql "insert into $1 select i,
 		((i % 20000) - 10000)::int2,
 		case when i % 7 = 0 then null else ((i * 31) % 100000 - 50000)::int4 end,
@@ -27,7 +27,8 @@ f8_create() { # table
 			when 12 then 1.5 when 13 then 2.5 when 14 then -2.5 when 15 then 9.2233720368547758e18
 			when 16 then -9.2233720368547758e18 when 17 then 3.0000000000000004 when 18 then null
 			when 19 then 4503599627370497.5 when 20 then 1e15 when 21 then -1e300 when 22 then 1e300
-			else ((i % 1000) / 8.0)::float8 end
+			else ((i % 1000) / 8.0)::float8 end,
+		i % 2, i % 3, i % 4, i % 5, i % 6, i % 7
 		from generate_series(1, $F8ROWS) i"
 }
 f8_create f8_1; sql "vacuum analyze f8_1"                                  # all-visible pages
@@ -128,17 +129,18 @@ done
 # exact. A float8 / float4 sum that overflows raises PostgreSQL's error on both paths.
 # like runagg, but compares the whole result (runagg compares the last row only): md5 of the output, GpuPreAgg in the plan
 rungrp() { # table, label, query-with-%T [, extra settings]
-	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); set_extra=${4:-}
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/ order by [0-9, ]*\$//"); set_extra=${4:-}
 	gs="$GPU set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; $set_extra"
 	plan=$($PSQL -d scantest -c "$gs explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
-	g=$($PSQL -d scantest -c "$gs $qry" 2>&1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1)
+	g=$($PSQL -d scantest -c "$gs $qry" 2>&1 | sort); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | sort)
 	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR && [ -n "$g" ]; then echo "  ok    $tbl: $label ($(echo "$g" | wc -l | tr -d ' ') rows)"
 	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan)"; echo "        gpu: $(echo "$g" | head -3)"; echo "        cpu: $(echo "$c" | head -3)"; fail=$((fail+1)); fi
 }
 runerr_agg() { # table, label, query-with-%T, text of the error: the plan must use GpuPreAgg
+	gmax="set pg_strom.gpupreagg_max_groups=1000000;"
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); want=$4
-	plan=$($PSQL -d scantest -c "$GPU set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
-	g=$($PSQL -d scantest -c "$GPU set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
+	plan=$($PSQL -d scantest -c "$GPU $gmax set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
+	g=$($PSQL -d scantest -c "$GPU $gmax set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; $qry" 2>&1 | tail -1); c=$($PSQL -d scantest -c "$CPU $qry" 2>&1 | tail -1)
 	if [ "$plan" -ge 1 ] && echo "$g" | grep -q "$want" && echo "$c" | grep -q "$want"; then echo "  ok    $tbl: $label ($want)"
 	else echo "  FAIL  $tbl: $label (plan GpuPreAgg=$plan, expected '$want')"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
@@ -162,7 +164,7 @@ for t in $(f8part agg); do
 	runagg $t "sum(float4) of +Infinity and -Infinity is NaN" "select sum(d) from %T where d = 'Infinity' or d = '-Infinity'"
 	runagg $t "sum and avg of -0 (sum keeps the sign, avg starts from +0)" "select sum(z)::text, avg(z)::text, min(z)::text, max(z)::text from %T where i % 24 = 3"
 	runerr_agg $t "sum(float4) overflows" "select sum((w * 0 + 3e38)::float4) from %T" "value out of range: overflow"
-	rungrp $t "float8 aggregates with GROUP BY" "select a % 5, count(*), sum(w), min(w), max(w), avg(w) from %T group by 1 order by 1"
+	rungrp $t "float8 aggregates with GROUP BY" "select g5, count(*), sum(w), min(w), max(w), avg(w) from %T group by 1"
 	runagg $t "count and an int aggregate next to float8 ones" "select count(*), sum(b), max(c), sum(w), min(x) from %T"
 	runerr_agg $t "sum overflows" "select sum(z) from %T where z = 1.7976931348623157e308" "value out of range: overflow"
 done
@@ -173,21 +175,21 @@ sql "create table f8_big as select i, (i % 7)::int4 as g, (i % 300)::int4 as g2,
 sql "analyze f8_big"
 for t in $(f8part agg); do
 	echo "aggregates with GROUP BY, table $t"
-	rungrp $t "min, max of float8 with NULLs, NaN and Infinity per group" "select b % 7, min(x), max(x), min(z), max(z), count(z) from %T group by 1 order by 1"
-	rungrp $t "sum and avg rounded (inexact values) per group" "select a % 5, round(sum(x)::numeric, 3), round(avg(y)::numeric, 6), count(y) from %T group by 1 order by 1"
-	rungrp $t "sum of exact specials per group" "select a % 3, sum(z), count(z) from %T where abs(z) < 1e10 and z <> 3.0000000000000004 and (abs(z) > 1e-300 or z = 0) group by 1 order by 1"
-	rungrp $t "FILTER and a qual per group" "select a % 4, sum(w) filter (where i % 3 = 0), max(x) filter (where b > 0), min(y) filter (where a < 0), avg(w) from %T where i % 7 <> 1 group by 1 order by 1"
-	rungrp $t "computed float8 arguments per group" "select b % 6, sum(w * 2 + 1), max(x * 2.5 - y), min(w / 4) from %T where i % 5 = 2 group by 1 order by 1"
-	rungrp $t "groups where every value is NULL or nothing qualifies" "select a % 3, min(x) filter (where x is null), sum(w) filter (where false), max(y) filter (where i < 0), count(*) from %T group by 1 order by 1"
-	rungrp $t "float4: min, max, avg per group" "select a % 5, min(d), max(d), avg(d), count(d) from %T group by 1 order by 1"
-	rungrp $t "sum(float4) per group (small integers: exact in any order)" "select a % 5, sum((a % 8)::float4), sum((b % 5)::float4) from %T group by 1 order by 1"
-	rungrp $t "sum(float4) of NaN and Infinity per group" "select a % 3, sum(d), count(d) from %T where d = 'NaN' or d = 'Infinity' or d = '-Infinity' group by 1 order by 1"
-	rungrp $t "sum and avg of -0 per group (sum keeps the sign, avg starts from +0)" "select i % 2, sum(z)::text, avg(z)::text, min(z)::text from %T where i % 24 = 3 group by 1 order by 1"
-	rungrp $t "int and float8 aggregates together per group" "select a % 5, count(*), sum(b), max(c), sum(w), min(x), avg(d) from %T group by 1 order by 1"
-	rungrp $t "two group keys" "select a % 3, b % 4, sum(w), max(x), count(*) from %T group by 1, 2 order by 1, 2"
-	rungrp $t "more groups than the table holds (overflow rows aggregated by the service)" "select i % 300, sum(w), min(x), max(y), sum((a % 8)::float4), avg(w) from %T group by 1 order by 1"
-	runerr_agg $t "sum overflows in a group" "select a % 5, sum(z) from %T where z = 1.7976931348623157e308 group by 1" "value out of range: overflow"
-	runerr_agg $t "sum(float4) overflows in a group" "select a % 5, sum((w * 0 + 3e38)::float4) from %T group by 1" "value out of range: overflow"
+	rungrp $t "min, max of float8 with NULLs, NaN and Infinity per group" "select g7, min(x), max(x), min(z), max(z), count(z) from %T group by 1"
+	rungrp $t "sum and avg rounded (inexact values) per group" "select g5, round(sum(x)::numeric, 3), round(avg(y)::numeric, 6), count(y) from %T group by 1"
+	rungrp $t "sum of exact specials per group" "select g3, sum(z), count(z) from %T where abs(z) < 1e10 and z <> 3.0000000000000004 and (abs(z) > 1e-300 or z = 0) group by 1"
+	rungrp $t "FILTER and a qual per group" "select g4, sum(w) filter (where i % 3 = 0), max(x) filter (where b > 0), min(y) filter (where a < 0), avg(w) from %T where i % 7 <> 1 group by 1"
+	rungrp $t "computed float8 arguments per group" "select g6, sum(w * 2 + 1), max(x * 2.5 - y), min(w / 4) from %T where i % 5 = 2 group by 1"
+	rungrp $t "groups where every value is NULL or nothing qualifies" "select g3, min(x) filter (where x is null), sum(w) filter (where false), max(y) filter (where i < 0), count(*) from %T group by 1"
+	rungrp $t "float4: min, max, avg per group" "select g5, min(d), max(d), avg(d), count(d) from %T group by 1"
+	rungrp $t "sum(float4) per group (small integers: exact in any order)" "select g5, sum((a % 8)::float4), sum((b % 5)::float4) from %T group by 1"
+	rungrp $t "sum(float4) of NaN and Infinity per group" "select g3, sum(d), count(d) from %T where d = 'NaN' or d = 'Infinity' or d = '-Infinity' group by 1"
+	rungrp $t "sum and avg of -0 per group (sum keeps the sign, avg starts from +0)" "select g2, sum(z)::text, avg(z)::text, min(z)::text from %T where i % 24 = 3 group by 1"
+	rungrp $t "int and float8 aggregates together per group" "select g5, count(*), sum(b), max(c), sum(w), min(x), avg(d) from %T group by 1"
+	rungrp $t "two group keys" "select g3, b % 4, sum(w), max(x), count(*) from %T group by 1, 2 order by 1, 2"
+	rungrp $t "more groups than the table holds (overflow rows aggregated by the service)" "select i % 300, sum(w), min(x), max(y), sum((a % 8)::float4), avg(w) from %T group by 1"
+	runerr_agg $t "sum overflows in a group" "select g5, sum(z) from %T where z = 1.7976931348623157e308 group by 1" "value out of range: overflow"
+	runerr_agg $t "sum(float4) overflows in a group" "select g5, sum((w * 0 + 3e38)::float4) from %T group by 1" "value out of range: overflow"
 done
 echo "aggregates with GROUP BY, 1,000,000 rows (the order of additions matters for inexact values: rounded; exact values: equal)"
 rungrp f8_big "sum of exact values per group" "select g, count(*), sum(w), min(w), max(w), avg(w) from %T group by 1 order by 1"
