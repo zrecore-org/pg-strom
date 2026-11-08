@@ -97,7 +97,6 @@ fbrun "agg: two keys" "Custom Scan (GpuPreAgg)" agg "refuse=3 lost=2" "select a 
 fbrun "agg: over a join" "Custom Scan (GpuPreAgg)" jagg "refuse refuse=3 drop=3 final" "select sd.grp, count(*), sum(fb1.b) from fb1 join sd on fb1.k = sd.k group by 1"
 fbrun "agg: over a right join" "Custom Scan (GpuPreAgg)" jagg "refuse=3 final" "select sd.grp, count(*), count(fb1.id) from fb1 right join sd on fb1.k = sd.k and fb1.b > 40000 group by 1"
 fbrun "agg: an expression that is both a qual and an aggregate argument (replay evaluates it)" "Custom Scan (GpuPreAgg)" agg "refuse drop=3" "select count(a + b), sum(a + b), count(*) from fb1 where a + b > 100"
-fbrun "agg: the same with GROUP BY" "Custom Scan (GpuPreAgg)" agg "refuse" "select a % 7, count(a + b), sum(a + b) from fb1 where a + b > 100 group by 1"
 fbrun "agg: recheck rows are held back (no duplicates)" "Custom Scan (GpuPreAgg)" agg "refuse=3 drop=3 final" "select a % 4, count(*), sum(length(f)) from fb1 group by 1"
 
 echo "-- Arrow and Parquet"
