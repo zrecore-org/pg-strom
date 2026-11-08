@@ -74,7 +74,7 @@ sql "analyze a1"; sql "analyze p1"
 if [ -n "$ADHOC" ]; then
 	FB_SETUP_ONLY=1
 	$PSQL -d scantest -f "$ADHOC" 2>&1
-	grep -i "WARNING\|ERROR\|runs the rest" "$ROOT/log" | tail -20
+	grep -i "WARNING\|ERROR\|runs the rest${ADHOC_GREP:+\|$ADHOC_GREP}" "$ROOT/log" | tail -${ADHOC_TAIL:-20} | cut -c1-${ADHOC_CUT:-400}
 	exit 0
 fi
 . "${0%/*}/fallback_tests.inc"

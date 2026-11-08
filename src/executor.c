@@ -1482,9 +1482,13 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 				state = NULL;
 			}
 			PG_END_TRY();
-			fallback_proj = lappend(fallback_proj, state);
+			fallback_proj = lappend(fallback_proj, NULL);
 			if (state)
-				compatible = false;
+			{
+				/* computed before the base quals run (they refer to this entry): execCpuFallbackOneTuple() */
+				pts->fallback_pre_dst = lappend_int(pts->fallback_pre_dst, tle->resno);
+				pts->fallback_pre_expr = lappend(pts->fallback_pre_expr, state);
+			}
 		}
 		else
 		{
