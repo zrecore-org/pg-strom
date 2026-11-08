@@ -36,4 +36,19 @@ for src in tkoa tkop tkog; do
 done
 # an Arrow file as the inner relation
 runkj "heap outer, Arrow inner, text key" "select t.i, a.i from %T t join tkoa a on t.k = a.k where t.n < 10"
+# Timing (informational): aggregation over a join on a text key against an integer key of the same shape. The text key makes the
+# join program poison-capable (rck_walk), so the aggregating kernel runs a scout pass first; the integer key does not.
+tm() { # label, query: milliseconds of three runs on the GPU path, and on the CPU
+	best=999999999
+	for r in 1 2 3; do
+		t0=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000')
+		$PSQL -d scantest -c "$GPU $JOINSET $JAGGBIG $2" >/dev/null
+		t1=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000')
+		[ $((t1 - t0)) -lt $best ] && best=$((t1 - t0))
+	done
+	echo "  time  $1: ${best} ms"
+}
+tm "GPU, aggregation over a join, text key" "select t.n, count(*), sum(d.grp) from tko t join tki d on t.k = d.k group by t.n"
+tm "GPU, aggregation over a join, int key" "select t.n, count(*), sum(d.grp) from tko t join tki d on t.n = d.n group by t.n"
+tm "GPU, join without aggregation, text key" "select count(*) from (select t.i, d.i from tko t join tki d on t.k = d.k) x"
 echo
