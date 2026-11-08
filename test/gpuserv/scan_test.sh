@@ -200,8 +200,8 @@ for t in s1 s2 s3; do
 done
 runagg s1 "parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 runagg_any s1 "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
-runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
-if mine_tbl s1; then plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?; fi
+runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16; set pg_strom.gpupreagg_max_groups_heap=16;"
+if mine_tbl s1; then plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; set pg_strom.gpupreagg_max_groups_heap=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?; fi
 
 echo "joins"
 sql "create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp,
@@ -352,6 +352,9 @@ JOINSET="$JOINSET_SAVE"
 
 # ---- aggregation over a join (GpuPreAgg on GpuJoin), with and without GROUP BY
 unit_source joinagg "${0%/*}/joinagg_tests.inc"
+
+# ---- GROUP BY with many groups (the session-wide hash table)
+unit_source gtab "${0%/*}/gtab_tests.inc"
 
 echo "arrow (Arrow_Fdw)"
 # The foreign tables read Arrow IPC files written by arrow_gen.cpp (the arrow-tools do not build on macOS).
