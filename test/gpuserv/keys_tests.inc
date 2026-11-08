@@ -81,4 +81,9 @@ for src in tkoa tkop tkog; do
 	done
 	rung "$src: group by two strings" "select k, kv, count(*), sum(pay) from %T group by k, kv" $src
 done
+# Timing (informational): GROUP BY a text key against an integer key with the same number of groups (2M rows, 3000 groups)
+tm "GPU, group by a text key, 3000 groups, 2M rows" "$GBIG select k, count(*), sum(v) from tkb group by k"
+tm "GPU, group by an int key, 3000 groups, 2M rows" "$GBIG select (v % 3000)::int4, count(*), sum(v) from tkb group by 1"
+cpu_tm() { t0=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); $PSQL -d scantest -c "$CPU $1" >/dev/null; t1=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); echo "  time  $2: $((t1 - t0)) ms"; }
+cpu_tm "select k, count(*), sum(v) from tkb group by k" "CPU, group by a text key"
 echo

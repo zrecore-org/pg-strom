@@ -1850,6 +1850,8 @@ form_partial_tuple(const kern_data_store *kds_dst_head, const col_value *cols, u
 			snprintf(err, errlen, "the partial aggregate row is too large");
 			return -1;
 		}
+		if (t_next > t_hoff)
+			memset(tup + t_hoff, 0, t_next - t_hoff);	/* the padding of a varlena must be zero bytes (heap_deform_tuple) */
 		if (cols[k].ext)
 		{
 			uint32_t	hdr = vlen << 2;		/* a 4-byte varlena header (little endian) */
