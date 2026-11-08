@@ -296,14 +296,16 @@ The kernel needs about 18 ms per 64 MB task for 7 groups, against 2 ms for aggre
 
 | Groups | before (shared-memory tables + CPU overflow) | session table | 8-worker PostgreSQL |
 |---|---|---|---|
-| 1,000 | 977 ms | 280 ms | 268 ms |
-| 10,000 | 1,168 ms | 288 ms | 312 ms |
-| 100,000 | 2,255 ms | 353 ms | 1,854 ms |
-| 1,000,000 | 4,281 ms | 1,461 ms | 4,722 ms |
-| 100,000 skewed | 1,866 ms | 430 ms | 1,033 ms |
-| 1,000,000, int8 keys beyond 32 bits | 4,241 ms | 1,502 ms | 5,238 ms |
+| 1,000 | 977 ms | 274 ms | 265 ms |
+| 10,000 | 1,168 ms | 282 ms | 313 ms |
+| 100,000 | 2,255 ms | 361 ms | 1,799 ms |
+| 1,000,000 | 4,281 ms | 1,543 ms | 5,016 ms |
+| 100,000 skewed | 1,866 ms | 430 ms | 964 ms |
+| 1,000,000, int8 keys beyond 32 bits | 4,241 ms | 1,567 ms | 5,452 ms |
 
 Per task (64 MB): 8.8 ms at 1,000 groups (contention of the global atomics on hot slots; 1.5 ms without GROUP BY), 9 ms at 10-100k, 18 ms at 1M (cache misses). At 1,000 groups the GPU only ties PostgreSQL; the fixed cost of a query (~140 ms for page copy and setup) is what remains.
+
+**Verification.** `gtab_dev.sh` (table forced on and the switching policy) and `spec_dev.sh` pass on the final tree; the full `scan_test.sh` (check mode, including the new unit) passed on the tree before the switching policy and the 2M limit (they change only when the table is chosen and its size).
 
 **Tests.** `test/gpuserv/gtab_tests.inc` (also a unit of `scan_test.sh`; `gtab_dev.sh` runs it alone with the table forced on): 3,000 / 20,000 / 100,000 groups, NULL keys, skewed keys, int8 keys beyond 32 bits, min/max beyond 32 bits, sums wrapping the 32-bit words and beyond 64 bits, two keys, date keys, FILTER and quals, empty input, parallel workers, 150,000 groups over several tasks (the table grows), an expression key the planner cannot estimate.
 
