@@ -1415,7 +1415,7 @@ geom_dwdist_np(const vm_env *env, const vm_reg *regs, uint32_t op, uint32_t ra, 
 	*isnull = 0;
 	if (ta != 1 && tb != 1)
 		return SOP_RECHECK_CODE;
-	if (isdw && ((k0 & SOP_GDW_NP) == 0 || (k1 & SOP_GDW_EXACT) == 0))
+	if (isdw ? ((k0 & SOP_GDW_NP) == 0 || (k1 & SOP_GDW_EXACT) == 0) : (k0 & SOP_GDW_NP) == 0)
 		return SOP_RECHECK_CODE;
 	px = pa ? (uint64_t) a.v : (uint64_t) b.v;
 	py = pa ? (uint64_t) ya.v : (uint64_t) yb.v;

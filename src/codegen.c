@@ -2260,7 +2260,7 @@ vulkan_geom_ptline_calibrated(Oid func_oid, bool d3)
 }
 
 static bool
-vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
+vulkan_geom_dist_calibrated(Oid func_oid, bool d3, bool maxd)
 {
 	static struct { Oid oid; bool ok; } done[16];
 	static int	ndone = 0;
@@ -2340,7 +2340,7 @@ vulkan_geom_dist_calibrated(Oid func_oid, bool d3)
 	}
 	PG_END_TRY();
 	/* the distance of a point and a line: the model of the segment projection (a different build could contract it differently) */
-	if (ok)
+	if (ok && !maxd)			/* ST_3DMaxDistance of a non-point stays on the backend: its kernel flag is off */
 		ok = vulkan_geom_ptline_calibrated(func_oid, d3);
 	if (!ok && getenv("PGSTROM_GEOM_NO_CALIBRATION"))
 		ok = true;						/* debugging aid: trust the kernel without the calibration */
@@ -2887,8 +2887,8 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0 &&
 				vulkan_geom_len_calibrated(dfunc->func_oid, (int) fc.kind));
 	if (fc.cls == SOP_GEOMDIST)
-		return (vulkan_geom_dist_args_ok(func_args, fc.kind == 1) &&
-				vulkan_geom_dist_calibrated(dfunc->func_oid, fc.kind == 1));
+		return (vulkan_geom_dist_args_ok(func_args, fc.kind >= 1) &&
+				vulkan_geom_dist_calibrated(dfunc->func_oid, fc.kind >= 1, fc.kind == 2));
 	if (fc.cls == SOP_GEOM3DDW && fc.kind == SOP_G3DDW_INTERSECTS)
 		return vulkan_geom_3dintersects_args_ok(func_args);
 	if (fc.cls == SOP_GEOM3DDW)

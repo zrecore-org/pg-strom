@@ -2336,8 +2336,8 @@ uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout
     if (d3)
         return SOP_RECHECK_CODE;
 #endif
-    if (isdw && ((k0 & SOP_GDW_NP) == 0u || (k1 & SOP_GDW_EXACT) == 0u))
-        return SOP_RECHECK_CODE;                        // not calibrated
+    if (isdw ? ((k0 & SOP_GDW_NP) == 0u || (k1 & SOP_GDW_EXACT) == 0u) : (k0 & SOP_GDW_NP) == 0u)
+        return SOP_RECHECK_CODE;                        // not calibrated; ST_3DMaxDistance (no flag) is not the minimum
     bool pa = (ta == 1u);                               // the point is operand a
     uint64_t px = pa ? uint64_t(a.v) : uint64_t(b.v);
     uint64_t py = pa ? uint64_t(ya.v) : uint64_t(yb.v);

@@ -399,6 +399,7 @@ run pg_g5q3 "st_3ddwithin one float8 step above" "select id from %T where st_3dd
 run pg_g5q3 "st_3ddistance = the stored distance" "select id from %T where st_3ddistance(geom, st_makepoint(x, y, z)) = r"
 run pg_g5q3 "st_3ddistance <= rdn" "select id from %T where st_3ddistance(st_makepoint(x, y, z), geom) <= rdn"
 run pg_g5q3 "st_3ddwithin of a fused 4-argument point (M ignored)" "select id from %T where st_3ddwithin(geom, st_makepoint(x, y, z, 9), r)"
+run_any pg_g5q3 "st_3dmaxdistance of a point and a Z line: the maximum, not the minimum (backend)" "select id from %T where st_3dmaxdistance(geom, st_makepoint(x, y, z)) <= 5"
 run pg_g5q3 "st_dwithin (2D) of the Z geometries" "select id from %T where st_dwithin(geom, st_makepoint(x, y), 2.5)"
 run pg_g5q3 "st_distance (2D) of the Z geometries" "select id from %T where st_distance(geom, st_makepoint(x, y)) <= 2.5"
 nf3=$(fbscan "select id from pg_g5q3 where st_3ddwithin(geom, st_makepoint(x, y, z), r)")

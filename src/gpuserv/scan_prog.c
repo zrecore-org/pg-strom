@@ -657,8 +657,8 @@ emit_geomdist(builder *b, const kern_expression *kexp, scan_func_class fc, int *
 	int32_t		srid[2] = {0, 0};
 	int			mark = *next;
 	int			ra, rb, rya = 0, ryb = 0, rza = 0, rzb = 0, dst;
-	int			d3 = (fc.kind == 1);
-	uint32_t	flags = 0;
+	int			d3 = (fc.kind >= 1);
+	uint32_t	flags = (fc.kind == 2 ? 0 : SOP_GDW_NP);	/* the walker measures min distances: not ST_3DMaxDistance */
 
 	if (b->no_strings)
 		return fail(b, "a geometry is not supported in a join");
