@@ -73,10 +73,13 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   into Vulkan on unified-memory devices; `PGSTROM_GPUSERV_NO_MAP=1` turns this off).
 - The result tuples are formed on the CPU by the service from the source tuple plus the GPU's
   computed values, in heap order.
-- **Errors are not recovered.** A kernel error (division by zero, integer overflow) fails the query,
-  with a message that names the function, block and line pointer. PostgreSQL evaluates quals in an
-  order the GPU does not follow, so a row PostgreSQL would have skipped can raise an error on the GPU.
-  `pg_strom.cpu_fallback` does not change this (see [parameters.md](parameters.md)).
+- **Errors and refusals fall back to the CPU (A14).** A program the service refuses, a kernel error (division by
+  zero, integer overflow), a lost device, a service that is not ready or disappears do not fail the query: the node
+  continues on the CPU and returns the rows of the plan with `pg_strom.enabled = off`, including its own error when the
+  CPU raises one too (PostgreSQL evaluates quals in an order the GPU does not follow, so a row it would have skipped can
+  raise an error on the GPU only; the CPU re-run does not). See `pg_strom.gpu_error_fallback` in
+  [parameters.md](parameters.md) for how it works and for what is not recoverable (GPU-Sort, pinned inner buffers,
+  SELECT INTO direct).
 - Arrow_Fdw (A5): one or several Arrow files (any number of record batches) and Parquet files (one task per
   row group; **the backend decodes the row group with libparquet on the CPU**, the GPU only filters).
   The planner offers a GpuScan only if every referenced column has a supported Arrow type: Int

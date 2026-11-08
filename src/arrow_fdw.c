@@ -5518,15 +5518,12 @@ pgstromScanChunkArrowFdw(pgstromTaskState *pts,
  * filled; the other ones are NULL. The tuple and the by-reference values are allocated in the
  * current memory context. t_tableOid is set; there is no valid t_self.
  */
-HeapTuple
-pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
-							Relation scan_rel,
-							uint32_t rb_flat,
-							uint32_t row)
+static kern_data_store *
+__arrowFdwRecheckLoad(ArrowFdwState *arrow_state,
+					  Relation scan_rel,
+					  uint32_t rb_flat)
 {
 	TupleDesc		tupdesc = RelationGetDescr(scan_rel);
-	kern_data_store *kds;
-	HeapTuple		htup;
 
 	if (rb_flat >= arrow_state->rb_nitems)
 		elog(ERROR, "arrow_fdw: record batch %u of the CPU re-evaluation is out of range (%u batches)",
@@ -5535,6 +5532,7 @@ pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
 	{
 		RecordBatchState *rb_state = arrow_state->rb_states[rb_flat];
 		MemoryContext	oldcxt;
+		kern_data_store *kds;
 
 		/* the buffer and the slot live as long as the scan state */
 		oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(arrow_state));
@@ -5561,7 +5559,19 @@ pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
 		arrow_state->recheck_kds = kds;
 		arrow_state->recheck_rb_flat1 = rb_flat + 1;
 	}
-	kds = arrow_state->recheck_kds;
+	return arrow_state->recheck_kds;
+}
+
+HeapTuple
+pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
+							Relation scan_rel,
+							uint32_t rb_flat,
+							uint32_t row)
+{
+	TupleDesc		tupdesc = RelationGetDescr(scan_rel);
+	kern_data_store *kds = __arrowFdwRecheckLoad(arrow_state, scan_rel, rb_flat);
+	HeapTuple		htup;
+
 	if (!kds_arrow_fetch_tuple(arrow_state->recheck_slot, kds, row,
 							   arrow_state->referenced))
 		elog(ERROR, "arrow_fdw: row %u of the record batch %u (%u rows) is out of range in the CPU re-evaluation",
@@ -5571,6 +5581,26 @@ pgstromArrowFdwRecheckTuple(ArrowFdwState *arrow_state,
 						   arrow_state->recheck_slot->tts_isnull);
 	htup->t_tableOid = RelationGetRelid(scan_rel);
 	return htup;
+}
+
+/*
+ * pgstromArrowFdwClaimBatch - the next record batch (row group) of the scan, claimed from the shared counter
+ * like the GPU path does (stats hints apply); false if none is left.  For the CPU mode of a node (A14).
+ */
+bool
+pgstromArrowFdwClaimBatch(ArrowFdwState *arrow_state, uint32_t *p_rb_flat)
+{
+	return __arrowFdwNextRecordBatch(arrow_state, p_rb_flat) != NULL;
+}
+
+/*
+ * pgstromArrowFdwBatchNrows - number of rows of a record batch (it is loaded for the following
+ * pgstromArrowFdwRecheckTuple() calls)
+ */
+uint32_t
+pgstromArrowFdwBatchNrows(ArrowFdwState *arrow_state, Relation scan_rel, uint32_t rb_flat)
+{
+	return __arrowFdwRecheckLoad(arrow_state, scan_rel, rb_flat)->nitems;
 }
 
 /*

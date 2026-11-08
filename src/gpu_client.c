@@ -43,8 +43,17 @@ gpuClientOpenSession(pgstromTaskState *pts, const XpuCommand *session)
 	struct sockaddr_un addr;
 	pgsocket	sockfd;
 
+	char		reason[MAXPGPATH + 100];
+
 	if (!ctl || __atomic_load_n(&ctl->state, __ATOMIC_SEQ_CST) != GPUSERV_STATE_READY)
+	{
+		if (pts->cpu_fallback_ok)
+		{
+			pgstromCpuModeBegin(pts, "the GPU service is not ready");
+			return;
+		}
 		elog(ERROR, "the GPU service is not ready");
+	}
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sockfd < 0)
 		elog(ERROR, "failed on socket(2): %m");
@@ -53,7 +62,17 @@ gpuClientOpenSession(pgstromTaskState *pts, const XpuCommand *session)
 	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", ctl->socket_path);
 	if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
 	{
+		int		save_errno = errno;
+
 		close(sockfd);
+		errno = save_errno;
+		if (pts->cpu_fallback_ok)
+		{
+			snprintf(reason, sizeof(reason), "failed on connect('%s'): %s",
+					 ctl->socket_path, strerror(save_errno));
+			pgstromCpuModeBegin(pts, reason);
+			return;
+		}
 		elog(ERROR, "failed on connect('%s'): %m", ctl->socket_path);
 	}
 	__xpuClientOpenSession(pts, session, sockfd);
@@ -105,6 +124,42 @@ pgstrom_init_gpu_client(void)
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
 							NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.gpu_error_fallback",
+							 "A node continues on the CPU when the GPU service refuses or fails its program",
+							 "On: a program the GPU service refuses or cannot run, a lost device and a service that is "
+							 "not ready or goes away do not fail the query; the node reads its relation itself and "
+							 "returns the rows the CPU plan would.  Off: the error is raised.",
+							 &pgstrom_gpu_error_fallback,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomBoolVariable("pg_strom.debug_no_program_limits",
+							 "Test only: the planner does not keep programs that may exceed the GPU service's limits on the CPU",
+							 "The service then refuses such a program at run time, which exercises the CPU fallback.",
+							 &pgstrom_debug_no_limits,
+							 false,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							 NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.scan_chunk_blocks",
+							"Test only: heap blocks per GPU task (0: as many as fit into 64MB)",
+							NULL,
+							&pgstrom_scan_chunk_blocks,
+							0,
+							0,
+							1000000,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE | GUC_NO_SHOW_ALL,
+							NULL, NULL, NULL);
+	DefineCustomStringVariable("pg_strom.gpuserv_fault",
+							   "Fault injection for tests of the CPU fallback (see src/gpuserv/wire.c)",
+							   NULL,
+							   &pgstrom_gpuserv_fault,
+							   "",
+							   PGC_SUSET,
+							   GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.debug_level",
 							"Verbosity of PG-Strom's planner and executor debug messages",
 							NULL,
