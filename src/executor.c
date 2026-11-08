@@ -1947,10 +1947,12 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	 * host (pinned inner buffers, SELECT INTO direct) or GPU-Sort replaced the parent's Sort node.
 	 */
 	pts->cpu_fallback_ok = (pgstrom_gpu_error_fallback &&
-							pts->pp_info->kexp_gpusort_keydesc == NULL &&
-							(pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
-													DEVTASK__PINNED_ROW_RESULTS |
-													DEVTASK__SELECT_INTO_DIRECT)) == 0);
+							pts->pp_info->gpusort_keys_expr == NIL &&
+							(pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0 &&
+							/* GpuPreAgg always has the 'pinned' final buffer flags; its partial states come back as rows */
+							((pts->xpu_task_flags & DEVTASK__PREAGG) != 0 ||
+							 (pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
+													 DEVTASK__PINNED_ROW_RESULTS)) == 0));
 	for (int i=0; pts->cpu_fallback_ok && i < pts->num_inner_rels; i++)
 	{
 		if (pts->inners[i].inner_pinned_buffer)

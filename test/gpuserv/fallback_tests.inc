@@ -15,13 +15,13 @@ FBSET="set pg_strom.scan_chunk_blocks=16; set pg_strom.max_async_tasks=2;"
 FBJOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
 FBAGGSET="set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off;"
 
-sql "create table fb1 (id int4, a int2, b int4, c int8, f text, n numeric(12,2), g date, d float4, w text)"
+sql "create table fb1 (id int4, a int2, b int4, c int8, f text, n numeric(12,2), g date, d float4, k int4)"
 sql "insert into fb1 select i, ((i % 20000) - 10000)::int2,
 	case when i % 7 = 0 then null else ((i * 31) % 100000 - 50000)::int4 end,
 	((i::int8 * 1000003) % 1000000007 - 500000000),
 	case when i % 11 = 0 then null else repeat(chr(97 + i % 26), (i % 40)::int) end,
 	((i % 1000) / 8.0)::numeric(12,2), date '2000-01-01' + (i % 9000),
-	(((i * 17) % 10000) / 7.0)::float4, repeat('x', 20) from generate_series(1, $FBN) i"
+	(((i * 17) % 10000) / 7.0)::float4, ((i % 20000) - 10000)::int4 from generate_series(1, $FBN) i"
 sql "vacuum analyze fb1"
 # dead tuples and recently changed pages: some blocks are all-visible (read by the service itself), the others are copied
 sql "update fb1 set b = b + 1 where id % 5 = 0"
@@ -60,27 +60,27 @@ fbrun "scan: every row qualifies" "Custom Scan (GpuScan)" scan "lost=2 drop=3" "
 fbrun "scan: computed projection" "Custom Scan (GpuScan)" scan "refuse=2" "select id, a + b, c * 2 from fb1 where b is not null"
 
 echo "-- GpuJoin on a heap table"
-fbrun "join: inner" "Custom Scan (GpuJoin)" join "$FAULTS" "select fb1.id, sd.pay, sd.txt from fb1 join sd on fb1.a = sd.k where fb1.b > 0"
-fbrun "join: left outer" "Custom Scan (GpuJoin)" join "refuse=3 drop=2" "select fb1.id, sd.k, sd.pay from fb1 left join sd on fb1.a = sd.k and sd.grp < 5"
-fbrun "join: right outer (the unmatched inner rows)" "Custom Scan (GpuJoin)" join "refuse refuse=3 drop=2 final" "select fb1.id, sd.k, sd.pay from fb1 right join sd on fb1.a = sd.k and fb1.b > 40000"
-fbrun "join: full outer" "Custom Scan (GpuJoin)" join "refuse=3 lost=2 final" "select fb1.id, sd.k from fb1 full join sd on fb1.a = sd.k and fb1.b > 40000"
+fbrun "join: inner" "Custom Scan (GpuJoin)" join "$FAULTS" "select fb1.id, sd.pay, sd.txt from fb1 join sd on fb1.k = sd.k where fb1.b > 0"
+fbrun "join: left outer" "Custom Scan (GpuJoin)" join "refuse=3 drop=2" "select fb1.id, sd.k, sd.pay from fb1 left join sd on fb1.k = sd.k and sd.grp < 5"
+fbrun "join: right outer (the unmatched inner rows)" "Custom Scan (GpuJoin)" join "refuse refuse=3 drop=2 final" "select fb1.id, sd.k, sd.pay from fb1 right join sd on fb1.k = sd.k and fb1.b > 40000"
+fbrun "join: full outer" "Custom Scan (GpuJoin)" join "refuse=3 lost=2 final" "select fb1.id, sd.k from fb1 full join sd on fb1.k = sd.k and fb1.b > 40000"
 fbrun "join: semi" "Custom Scan (GpuJoin)" join "refuse=2" "select id, a from fb1 where a in (select k from sd where grp = 3)"
 fbrun "join: anti" "Custom Scan (GpuJoin)" join "drop=3" "select id, a from fb1 where a not in (select k from sd where grp < 16 and k is not null)"
-fbrun "join: two inner relations" "Custom Scan (GpuJoin)" join "refuse=3 open" "select fb1.id, sd.pay, fb2.b from fb1 join sd on fb1.a = sd.k join fb2 on fb1.id = fb2.id"
+fbrun "join: two inner relations" "Custom Scan (GpuJoin)" join "refuse=3 open" "select fb1.id, sd.pay, fb2.b from fb1 join sd on fb1.k = sd.k join fb2 on fb1.id = fb2.id"
 
 echo "-- GpuPreAgg on a heap table"
 fbrun "agg: without GROUP BY" "Custom Scan (GpuPreAgg)" agg "$FAULTS_AGG" "select count(*), sum(b), min(a), max(c), avg(b) from fb1 where a > -5000"
 fbrun "agg: GROUP BY" "Custom Scan (GpuPreAgg)" agg "$FAULTS_AGG" "select a % 7 as k, count(*), sum(b), max(c) from fb1 group by 1"
 fbrun "agg: two keys" "Custom Scan (GpuPreAgg)" agg "refuse=3 lost=2" "select a % 5, b % 3, count(*), sum(c) from fb1 group by 1, 2"
-fbrun "agg: over a join" "Custom Scan (GpuPreAgg)" agg "refuse refuse=3 drop=3 final" "select sd.grp, count(*), sum(fb1.b) from fb1 join sd on fb1.a = sd.k group by 1"
-fbrun "agg: over a right join" "Custom Scan (GpuPreAgg)" agg "refuse=3 final" "select sd.grp, count(*), count(fb1.id) from fb1 right join sd on fb1.a = sd.k and fb1.b > 40000 group by 1"
+fbrun "agg: over a join" "Custom Scan (GpuPreAgg)" agg "refuse refuse=3 drop=3 final" "select sd.grp, count(*), sum(fb1.b) from fb1 join sd on fb1.k = sd.k group by 1"
+fbrun "agg: over a right join" "Custom Scan (GpuPreAgg)" agg "refuse=3 final" "select sd.grp, count(*), count(fb1.id) from fb1 right join sd on fb1.k = sd.k and fb1.b > 40000 group by 1"
 fbrun "agg: recheck rows are held back (no duplicates)" "Custom Scan (GpuPreAgg)" agg "refuse=3 drop=3 final" "select a % 4, count(*), sum(length(f)) from fb1 group by 1"
 
 echo "-- Arrow and Parquet"
 for t in a1 p1; do
 	fbrun "$t: scan" "Custom Scan (GpuScan)" scan "refuse refuse=3 drop=2 open" "select i, a, b, f from $t where b > 100 and a < 5000"
 	fbrun "$t: aggregation" "Custom Scan (GpuPreAgg)" agg "refuse=3 drop=2 final" "select a % 7, count(*), sum(b), max(c) from $t group by 1"
-	fbrun "$t: join" "Custom Scan (GpuJoin)" join "refuse=2 lost=3" "select $t.i, sd.pay from $t join sd on $t.a = sd.k where $t.b > 0"
+	fbrun "$t: join" "Custom Scan (GpuJoin)" join "refuse=2 lost=3" "select $t.i, sd.pay from $t join sd on $t.b = sd.k where $t.b > 0"
 done
 
 echo "-- GPU-Cache"
@@ -106,13 +106,19 @@ n=$($PSQL -d scantest -c "$GPU $PAR set enable_seqscan=off; explain select id, a
 check "a parallel GpuScan plan is chosen" "$([ "$n" -ge 1 ]; echo $?)"
 fbrun "parallel scan" "Gather" scan "refuse refuse=3 drop=2" "select id, a, f from fb1 where b > 100" "$PAR"
 fbrun "parallel aggregation" "Gather" agg "refuse drop=3" "select a % 5, count(*), sum(b) from fb1 group by 1" "$PAR"
-fbrun "parallel join" "Gather" join "refuse=2" "select fb1.id, sd.pay from fb1 join sd on fb1.a = sd.k" "$PAR"
+fbrun "parallel join" "Gather" join "refuse=2" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k" "$PAR"
 
 echo "-- real refusals (the planner's limits switched off: the service rejects the program)"
 NL="set pg_strom.debug_no_program_limits=on;"
-# 40 computed columns: more registers than the VM has
-cols=$(i=1; while [ $i -le 40 ]; do printf 'a+%d, ' $i; i=$((i+1)); done)
-fbrun "refused: 40 computed columns" "Custom Scan (GpuScan)" scan "-" "select ${cols}id from fb1 where b > 100" "$NL"
+# 40 referenced columns: more kernel variables than the VM has registers
+wdef=$(i=1; while [ $i -le 40 ]; do printf 'c%d int4, ' $i; i=$((i+1)); done)
+wsel=$(i=1; while [ $i -le 40 ]; do printf 'i + %d, ' $i; i=$((i+1)); done)
+sql "create table fw (${wdef}id int4)"
+sql "insert into fw select ${wsel}i from generate_series(1, 20000) i"
+sql "analyze fw"
+wcols=$(i=1; while [ $i -le 40 ]; do printf 'c%d, ' $i; i=$((i+1)); done)
+fbrun "refused: 40 referenced columns (GpuScan)" "Custom Scan (GpuScan)" scan "-" "select ${wcols}id from fw where c1 + c40 > 100 and c2 < 30000" "$NL"
+fbrun "refused: 80 columns in a join (unsupported join session)" "Custom Scan (GpuJoin)" join "-" "select x.*, y.* from fw x join fw y on x.c1 = y.c1 where x.c2 > 10 and y.c3 > 10" "$NL"
 aggs=$(i=1; while [ $i -le 16 ]; do printf 'sum(b+%d), ' $i; i=$((i+1)); done)
 fbrun "refused: 16 aggregates" "Custom Scan (GpuPreAgg)" agg "-" "select ${aggs}count(*) from fb1" "$NL"
 
@@ -130,7 +136,7 @@ echo "$out" | grep -q "cpu-mode"; [ $? -ne 0 ]; check "no cpu-mode without a fau
 
 echo "-- a service that is killed in the middle of a query"
 b=$(fbcount)
-g=$(q "$GPU $FBJOINSET $FBSET set pg_strom.gpuserv_fault='exit=2';" "select fb1.id, sd.pay from fb1 join sd on fb1.a = sd.k"); c=$(q "$CPU" "select fb1.id, sd.pay from fb1 join sd on fb1.a = sd.k")
+g=$(q "$GPU $FBJOINSET $FBSET set pg_strom.gpuserv_fault='exit=2';" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k"); c=$(q "$CPU" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k")
 [ "$g" = "$c" ] && [ "$(fbcount)" -gt "$b" ]; check "service exits at task 2: the rows are the CPU's ($g)" $?
 n=0; while [ $n -lt 60 ]; do
 	[ "$($PSQL -d postgres -c 'select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
