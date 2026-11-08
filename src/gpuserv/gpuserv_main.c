@@ -423,6 +423,8 @@ main(int argc, char **argv)
 			lifeline = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--specialize") && i + 1 < argc)
 			setenv("PGSTROM_GPUSERV_SPECIALIZE", argv[++i], 1);		/* pg_strom.gpu_specialize */
+		else if (!strcmp(argv[i], "--group-memory") && i + 1 < argc)
+			setenv("PGSTROM_GPUSERV_GROUP_MEM_MB", argv[++i], 1);		/* pg_strom.gpuserv_group_memory */
 		else if (!strcmp(argv[i], "--kernel-cache-dir") && i + 1 < argc)
 			setenv("PGSTROM_GPUSERV_CACHE_DIR", argv[++i], 1);		/* pg_strom.gpu_kernel_cache_dir */
 		else

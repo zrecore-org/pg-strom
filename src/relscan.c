@@ -598,6 +598,8 @@ pgstromRelScanChunkDirect(pgstromTaskState *pts,
 	pts->xcmd_buf.len = sz;
 	kds_nrooms = (PGSTROM_CHUNK_SIZE -
 				  KDS_HEAD_LENGTH(kds)) / (sizeof(BlockNumber) + BLCKSZ);
+	if (pgstrom_scan_chunk_blocks > 0 && kds_nrooms > (uint32_t) pgstrom_scan_chunk_blocks)
+		kds_nrooms = pgstrom_scan_chunk_blocks;		/* tests: many small tasks */
 	kds->nitems = 0;
 	kds->usage = 0;
 	kds->block_offset = (KDS_HEAD_LENGTH(kds) +

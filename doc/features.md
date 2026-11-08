@@ -57,7 +57,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 | `float8` (double precision) | Comparison (PostgreSQL's order: NaN equals NaN and is the largest, -0 = +0), `+ - * /` with PostgreSQL's overflow, underflow and division-by-zero errors, unary `-`/`+`, `abs`, `sqrt`, `round`, `ceil`/`ceiling`, `floor`, `trunc`, `sign` (a negative `sqrt` raises PostgreSQL's error), casts to and from the integers (round half to even, range checked), `float4` and `float8` mixed, `IS [NOT] NULL`, the aggregates `min`, `max`, `sum`, `avg` of `float8` and `min`, `max`, `sum`, `avg` of `float4`, with and without GROUP BY (also over a join, Arrow doubles and the GPU-Cache; a sum adds in another order than a serial scan, so its last bits can differ from PostgreSQL's); also from Arrow double columns and the GPU-Cache. Computed in integer arithmetic (`kernels_vm/f64_soft.inc`, bit-identical to the CPU's double), so it runs on devices without fp64 | Group keys, join keys, sort keys and the other math functions (`exp`, `ln`, `pow`, trigonometry, ...) are not on the GPU yet |
 | `numeric` | Values that fit `{ unscaled int64, scale <= 255 }` (about 18 digits; the rest, NaN and Infinity are re-checked per row on the CPU): comparison, `+ - *`, `/` (PostgreSQL's `select_div_scale` result scale and rounding), `%`/`mod`, `div`, unary `-`/`+`, `abs`, `round`/`trunc` (also with a negative scale), `ceil`/`floor`/`sign`, `numeric(p,s)` coercion (a field overflow is raised by the CPU), casts to and from the integers, `sum`/`avg` of numerics of a statically known scale (`numeric(p,s)` columns and expressions of them), GROUP BY keys of a known scale | `min`/`max`, `sum`/`avg` of unconstrained numeric or of a quotient (scale depends on the row), float casts, numeric inside a GpuJoin program, numeric join keys |
 | `date`, `time`, `timestamp`, `timestamptz` | Comparison within a type, `date` against `timestamp`, `date + int4`, `date - int4`, `date - date`, `date <-> timestamp` casts, `min`/`max`, GROUP BY and join keys | `timestamptz` compared with `date`/`timestamp` (session time zone), `interval` anything, `timetz`, `extract`, `date_trunc`, `timestamptz::date`, `overlaps` |
-| `text`, `varchar`, `bpchar` | `=` and `<>` (bytewise; deterministic collations only), `<`, `<=`, `>`, `>=` in the C collation only, `LIKE`/`NOT LIKE` with a constant pattern of the shape `abc`, `abc%`, `%abc`, `%abc%` (UTF-8 or single-byte databases), `length()` in UTF-8, `IS NULL`, `count(col)` | `_` and inner `%` in `LIKE`, `ILIKE`, regular expressions, `upper`, `substr`, concatenation, `IN` lists, text GROUP BY keys and join keys, **any string expression inside a GpuJoin program (including the scan quals of the join's outer relation)** |
+| `text`, `varchar`, `bpchar` | `=` and `<>` (bytewise; deterministic collations only), `<`, `<=`, `>`, `>=` in the C collation only, `LIKE`/`NOT LIKE` with a constant pattern of the shape `abc`, `abc%`, `%abc`, `%abc%` (UTF-8 or single-byte databases), `length()` in UTF-8, `IS NULL`, `count(col)` | `_` and inner `%` in `LIKE`, `ILIKE`, regular expressions, `upper`, `substr`, concatenation, `IN` lists, text GROUP BY keys, **string functions other than `=` / `<>` inside a GpuJoin program** (text, varchar and bpchar *join keys* and their equality run on the GPU) |
 | Compressed or TOAST-ed text | Evaluated by the backend: the kernel flags the row and the backend re-runs the whole row on the CPU | (`client_min_messages = debug1` shows "CPU re-evaluation of N tuples") |
 | `jsonb` | Quals and aggregate arguments over constant paths: `->` / `->>` with a constant (or column) text key or an integer index (negative from the end), chains of them, `(x ->> 'k')::numeric / int2 / int4 / int8`, `?` (`jsonb_exists`), `jsonb_typeof`, `@>` against a constant object / array of scalars (nested objects, arrays of scalars, numbers compared by value), `IS [NOT] NULL` of any of these. Numbers that do not fit `{ int64, scale }`, the text of a number or of a container, a string cast to a number, and compressed or out-of-line documents are evaluated by the backend (per row, exactly) | A jsonb or text value *computed* from a document in the target list (`SELECT d->>'k'`, `d->'g'`: the column is read and the CPU evaluates it), float casts, `=` and ordering of jsonb, `#>`, `?|`, `?&`, `<@`, `@>` with a pattern containing arrays of arrays / raw scalars / the empty array, jsonb parameters, jsonb in a GpuJoin program (a jsonb column still passes through a join), jsonb in Arrow tables (a jsonb column of a GPU-Cache is read, see GPU-Cache) |
 | arrays, ranges, `inet`, `macaddr`, geometry, everything else | pass-through only | everything |
@@ -73,10 +73,13 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   into Vulkan on unified-memory devices; `PGSTROM_GPUSERV_NO_MAP=1` turns this off).
 - The result tuples are formed on the CPU by the service from the source tuple plus the GPU's
   computed values, in heap order.
-- **Errors are not recovered.** A kernel error (division by zero, integer overflow) fails the query,
-  with a message that names the function, block and line pointer. PostgreSQL evaluates quals in an
-  order the GPU does not follow, so a row PostgreSQL would have skipped can raise an error on the GPU.
-  `pg_strom.cpu_fallback` does not change this (see [parameters.md](parameters.md)).
+- **Errors and refusals fall back to the CPU (A14).** A program the service refuses, a kernel error (division by
+  zero, integer overflow), a lost device, a service that is not ready or disappears do not fail the query: the node
+  continues on the CPU and returns the rows of the plan with `pg_strom.enabled = off`, including its own error when the
+  CPU raises one too (PostgreSQL evaluates quals in an order the GPU does not follow, so a row it would have skipped can
+  raise an error on the GPU only; the CPU re-run does not). See `pg_strom.gpu_error_fallback` in
+  [parameters.md](parameters.md) for how it works and for what is not recoverable (GPU-Sort, pinned inner buffers,
+  SELECT INTO direct).
 - Arrow_Fdw (A5): one or several Arrow files (any number of record batches) and Parquet files (one task per
   row group; **the backend decodes the row group with libparquet on the CPU**, the GPU only filters).
   The planner offers a GpuScan only if every referenced column has a supported Arrow type: Int
@@ -96,7 +99,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   groups:** with the specialized kernels (plan A6) 5.7x faster than 8-process PostgreSQL at 7 groups and 3.9x at
   100 (dense integer keys; a direct-mapped table), 3.5x for a GROUP BY over a join; with the interpreter
   alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
-  queries with more than `pg_strom.gpupreagg_max_groups` (default 128) estimated groups on PostgreSQL.
+  queries with more than `pg_strom.gpupreagg_max_groups` (default 128; 2,000,000 as `pg_strom.gpupreagg_max_groups_heap` for a scan: heap, Arrow/Parquet, GPU-Cache) estimated groups on PostgreSQL.
 - Aggregation over a join runs on the device as well (`GpuPreAgg` on the join; plan A4): without GROUP BY
   4.8x faster than 8-process PostgreSQL with the specialized kernels (28 ms against 136 ms on 16.8M rows).
   This includes RIGHT and FULL joins: the matched rows are aggregated on the device and the inner rows
@@ -113,7 +116,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 - Hash joins only. `INNER`, `LEFT`, `RIGHT`, `FULL`, semi (`EXISTS`, `IN`) and anti (`NOT EXISTS`, and
   `NOT IN` where PostgreSQL 18+ plans an anti join) joins; up to **four inner relations in one GpuJoin**
   (shown as `[1]` to `[4]`).
-- Join keys: integers and the four temporal types (a `bool` key stays on the CPU: `booleq` has no device function; measured by `test/gpuserv/coverage_test.sh`). Any pushed-down join qualifier over the VM's
+- Join keys: integers, the four temporal types and `text` / `varchar` / `bpchar` (the kernel hashes the payload bytes with PostgreSQL's `hash_bytes` - bpchar without trailing blanks - and compares them bytewise, so any deterministic collation works; a value that is compressed or stored out of line makes the backend join that outer row; a nondeterministic collation stays on the CPU) (a `bool` key stays on the CPU: `booleq` has no device function; measured by `test/gpuserv/coverage_test.sh`). Any pushed-down join qualifier over the VM's
   types, scan quals on the outer side, projections mixing outer and inner columns (pass-through of
   any type included).
 - Stays on PostgreSQL: nest-loop joins; non-integer keys (float, numeric, text, varchar, bpchar, uuid, bool); an outer join with a qualifier coming from the WHERE clause; RIGHT and FULL

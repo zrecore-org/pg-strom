@@ -21,6 +21,7 @@ static bool					pgstrom_enable_gpupreagg = false;
 static bool					pgstrom_enable_partitionwise_gpupreagg = false;
 static bool					pgstrom_enable_numeric_aggfuncs;
 static int					pgstrom_gpupreagg_max_groups;	/* GUC */
+static int					pgstrom_gpupreagg_max_groups_heap;	/* GUC */
 bool						pgstrom_enable_gpusort = false;
 
 /*
@@ -1506,6 +1507,7 @@ typedef struct
 	RelOptInfo	   *input_rel;
 	ParamPathInfo  *param_info;
 	double			num_groups;
+	int				max_keys;			/* GROUP BY keys: SCAN_GROUP_KEYS for a heap scan, SCAN_GROUP_KEYS_SHARED otherwise */
 	bool			try_parallel;
 	bool			has_aggfuncs;
 	PathTarget	   *target_upper;
@@ -2008,7 +2010,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				   con->inner_target_list == NIL &&
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
 				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
-				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)
+				list_length(con->groupby_keys) >= con->max_keys)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
 					 nodeToString(expr));
@@ -2607,6 +2609,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	ListCell   *lc;
 	CustomPath *cpath;
 	double		num_groups = 1.0;
+	bool		heap_scan;
 
 	/*
 	 * GpuPreAgg on top of a GpuJoin: the join kernel aggregates the joined rows on the device
@@ -2662,14 +2665,21 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 										 NULL, NULL);
 	}
 	/*
-	 * The service keeps each workgroup's groups in shared memory; with many more groups than
-	 * fit, most rows would be aggregated on the CPU, so leave such queries to PostgreSQL.
+	 * A GROUP BY over a scan (heap, Arrow_Fdw, GPU-Cache) keeps its groups in one hash table in device memory for the whole query
+	 * (gtab.slang) and scales to many groups. A join below still uses the workgroups' tables in shared memory; with many more groups than fit, most rows would be aggregated on the CPU, so leave such queries to
+	 * PostgreSQL.
 	 */
-	if (parse->groupClause && num_groups > pgstrom_gpupreagg_max_groups)
+	heap_scan = (input_path->custom_paths == NIL);
 	{
-		elog(DEBUG2, "GpuPreAgg: estimated %.0f groups exceed pg_strom.gpupreagg_max_groups",
-			 num_groups);
-		return;
+		int			limit;
+
+		limit = heap_scan ? pgstrom_gpupreagg_max_groups_heap : pgstrom_gpupreagg_max_groups;
+		if (parse->groupClause && num_groups > limit)
+		{
+			elog(DEBUG2, "GpuPreAgg: estimated %.0f groups exceed pg_strom.gpupreagg_max_groups%s",
+				 num_groups, heap_scan ? "_heap" : "");
+			return;
+		}
 	}
 	/* setup inner_target_list */
 	foreach (lc, input_path->custom_paths)
@@ -2686,6 +2696,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	con.input_rel      = input_rel;
 	con.param_info     = input_path->path.param_info;
 	con.num_groups     = num_groups;
+	con.max_keys       = heap_scan ? SCAN_GROUP_KEYS : SCAN_GROUP_KEYS_SHARED;
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
@@ -2761,9 +2772,10 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		}
 		/* registers: the slots, one more per computed value (scan_prog.c keeps them above the slots), temporaries */
 		nslots += nexprs;
-		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
-			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
-			nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
+		if (!pgstrom_debug_no_limits &&
+			(list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
+			 list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
+			 nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS))
 		{
 			elog(DEBUG2, "GpuPreAgg: too many columns for the Vulkan service (%d output columns, %d kernel variables)",
 				 list_length(con.target_partial->exprs), nslots);
@@ -3787,6 +3799,17 @@ pgstrom_init_gpu_preagg(void)
 							"The GPU wins for up to about a hundred groups (the service keeps each workgroup's groups in shared memory, in a table sized for the groups it has seen); with more groups most rows are aggregated on the CPU",
 							&pgstrom_gpupreagg_max_groups,
 							128,
+							1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+	/* pg_strom.gpupreagg_max_groups_heap */
+	DefineCustomIntVariable("pg_strom.gpupreagg_max_groups_heap",
+							"Largest estimated number of groups for which GROUP BY over a scan (heap, Arrow_Fdw, GPU-Cache) runs on the GPU",
+							"A GROUP BY over a heap table keeps its groups in a hash table in device memory for the whole query; it beat 8-worker PostgreSQL from about a thousand groups up to a million. Other sources are limited by pg_strom.gpupreagg_max_groups",
+							&pgstrom_gpupreagg_max_groups_heap,
+							2000000,
 							1,
 							INT_MAX,
 							PGC_USERSET,

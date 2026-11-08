@@ -1834,6 +1834,171 @@ arrow_ensure_agg_pipeline(scan_engine *eng, int grouped, int variant, int avaria
 	return 0;
 }
 
+/*
+ * GROUP BY over many groups on an Arrow record batch (or a GPU-Cache): the session-wide hash table of scan_exec.c, with the
+ * kernel gtab.slang built with -DARROW_SRC (agtab). Per pass of rows, mode 0 looks up and adds, 1 inserts the missing keys,
+ * 2 adds them, and mode 3 writes the staged key and values of the rows no slot could take to an overflow list (an Arrow row
+ * has no heap tuple the CPU could evaluate again) that is merged into the session's groups.
+ */
+#define ARROW_GTAB_PASS_ROWS	(4U << 20)
+static int
+arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *prog, agg_state *st,
+					  const XpuCommand *task, char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	arrow_task	at;
+	gpu_vk_buffer bout;
+	gpu_vk_pipeline *gpipe;
+	int			have_out = 0, variant, rv = -1;
+	uint32_t	nrows, ppw = ARROW_AGG_PAGES_PER_WG;
+	uint64_t	n_overflow = 0;
+	uint32_t   *hdr;
+	double		t0 = arrow_now_ms(), t1 = 0, tg = 0;
+	const uint32_t ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * 12;
+
+	err[0] = '\0';
+	if (arrow_task_parse(task, &at, err, errlen) != 0)
+		return -1;
+	nrows = at.nrows;
+	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
+	if (scan_gtab_pipeline(eng, 1, variant, &gpipe, err, errlen) != 0)
+		goto done;
+	if (scan_gtab_open(vk, session, prog, st, err, errlen) != 0)
+		goto done;
+	if (nrows == 0)
+	{
+		rv = 0;
+		goto done;
+	}
+	if (arrow_task_setup(vk, &at, prog, err, errlen) != 0)
+		goto done;
+	t1 = arrow_now_ms();
+	st->nitems_raw += nrows;
+	hdr = (uint32_t *) scan_gtab_buffer(st)->map;
+	for (uint32_t first = 0; first < nrows; first += ARROW_GTAB_PASS_ROWS)
+	{
+		uint32_t	n = nrows - first, pages, ngroups, nmiss = 0, ncpu = 0, hits0;
+		uint32_t   *flags;
+		const uint32_t *out;
+		gpu_vk_buffer *bufs[6];
+		double		tp = arrow_now_ms();
+
+		if (n > ARROW_GTAB_PASS_ROWS)
+			n = ARROW_GTAB_PASS_ROWS;
+		pages = (n + ARROW_VP - 1) / ARROW_VP;
+		ngroups = (pages + ppw - 1) / ppw;
+		arrow_task_pass(&at, first, n);
+		/* the flags: one word per row of the pass (at page * ARROW_VP + row), after the 4 header words */
+		if (gpu_vk_buffer_create(vk, &bout, ((size_t) 4 + (size_t) pages * ARROW_VP) * 4, 0) != 0)
+		{
+			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
+			goto done;
+		}
+		have_out = 1;
+		out = (const uint32_t *) bout.map;
+		flags = (uint32_t *) bout.map + 4;
+		memset(bout.map, 0, 16);
+		bufs[0] = &at.bg;
+		bufs[1] = &bout;
+		bufs[2] = &at.bprog;
+		bufs[3] = &at.btab;
+		bufs[4] = &at.bdummy;
+		bufs[5] = scan_gtab_buffer(st);
+		hits0 = hdr[1] = 0;
+		for (uint32_t mode = 0; mode < 4; mode++)
+		{
+			if ((mode == 1 || mode == 2) && nmiss == 0)
+				continue;
+			if (mode == 3)
+			{
+				/* rows for the CPU: a bigger buffer (the flags are kept) with room for their records */
+				uint32_t	ovf_base = 4 + pages * ARROW_VP;
+				gpu_vk_buffer nb;
+
+				for (uint32_t i = 0; i < n; i++)
+					ncpu += (flags[i] == 1);
+				if (ncpu == 0)
+					break;
+				if (gpu_vk_buffer_create(vk, &nb, ((size_t) ovf_base + 1 + (size_t) ncpu * ov_rec) * 4, 0) != 0)
+				{
+					snprintf(err, errlen, "cannot allocate the overflow list: %s", vk->err);
+					goto done;
+				}
+				memset(nb.map, 0, ((size_t) ovf_base + 1 + (size_t) ncpu * ov_rec) * 4);
+				memcpy(nb.map, bout.map, ((size_t) 4 + (size_t) pages * ARROW_VP) * 4);
+				gpu_vk_buffer_destroy(vk, &bout);
+				bout = nb;
+				out = (const uint32_t *) bout.map;
+				flags = (uint32_t *) bout.map + 4;
+				bufs[1] = &bout;
+			}
+			for (uint32_t base = 0; base < ngroups; base += ARROW_WG_MAX)
+			{
+				uint32_t	groups = ngroups - base;
+				uint32_t	pc[5];
+
+				if (groups > ARROW_WG_MAX)
+					groups = ARROW_WG_MAX;
+				pc[0] = pages;
+				pc[1] = base | (mode << 28);
+				pc[2] = ppw;
+				pc[3] = 4;							/* flags_base */
+				pc[4] = 4 + pages * ARROW_VP;		/* mode 3: the overflow list */
+				if (gpu_vk_dispatch(vk, gpipe, bufs, pc, groups, 1, 1, NULL) != 0)
+				{
+					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
+					goto done;
+				}
+			}
+			if (out[1] != 0)
+			{
+				arrow_kernel_error(out[1], first + out[2] * ARROW_VP + out[3], err, errlen);
+				goto done;
+			}
+			if (mode == 0)
+				for (uint32_t i = 0; i < n; i++)
+					nmiss += (flags[i] == 4);
+		}
+		tg += arrow_now_ms() - tp;
+		st->nitems_in += hdr[1] - hits0;
+		/* the rows the kernel could not decide (an instruction that rechecks, a numeric of another scale) */
+		for (uint32_t i = 0; i < n; i++)
+			if (flags[i] == 2 && arrow_rck_row(&at, &st->rck, first + i, err, errlen) != 0)
+				goto done;
+		if (ncpu > 0)
+		{
+			uint32_t	ovf_base = 4 + pages * ARROW_VP;
+
+			if (out[ovf_base] != ncpu ||
+				scan_gtab_merge_overflow(prog, st, out + ovf_base + 1, ncpu) != 0)
+			{
+				snprintf(err, errlen, out[ovf_base] != ncpu ? "the group table overflow list is inconsistent"
+						 : "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
+				goto done;
+			}
+			n_overflow += ncpu;
+		}
+		gpu_vk_buffer_destroy(vk, &bout);
+		have_out = 0;
+	}
+	st->npages_vfs_read += (uint32_t)((at.kds_src->length > (uint64_t) at.ad.as.head
+									   ? at.kds_src->length - at.ad.as.head : 0) / BLCKSZ);
+	if (scan_gtab_task_done(vk, prog, st, err, errlen) != 0)
+		goto done;
+	if (eng->trace)
+		fprintf(stderr, "pgstrom-gpuserv: arrow group task: %u rows, setup %.1f ms, gpu %.1f ms, overflow rows %llu\n",
+				nrows, t1 - t0, tg, (unsigned long long) n_overflow);
+	rv = 0;
+done:
+	if (have_out)
+		gpu_vk_buffer_destroy(vk, &bout);
+	arrow_task_close(vk, &at);
+	if (rv != 0 && err[0] == '\0')
+		snprintf(err, errlen, "Arrow GROUP BY aggregation failed");
+	return rv;
+}
+
+
 int
 scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 						 agg_state *st, const XpuCommand *task, char *err, size_t errlen)
@@ -1844,7 +2009,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	const kern_session_info *session = &session_cmd->u.session;
 	arrow_task	at;
 	gpu_vk_buffer bout;
-	int			have_out = 0, variant, avariant, grouped, rv = -1;
+	int			have_out = 0, variant, avariant, grouped, rv = -1, redo = 0;
 	gpu_vk_pipeline *vmpipe;
 	spec_keystats ks;
 	uint32_t	nrows, nagg, ppw, pass_rows;
@@ -1866,6 +2031,11 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	nagg = prog->nagg;
 	grouped = (prog->nkeys > 0);
 	scan_agg_state_prepare(st, nagg);
+	if (grouped && scan_gtab_forced(st, prog))
+	{
+		arrow_task_close(vk, &at);
+		return arrow_group_task_gtab(eng, session, prog, st, task, err, errlen);
+	}
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
 	avariant = scan_agg_variant(nagg);
 	if (grouped)
@@ -1879,8 +2049,8 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&
@@ -1974,6 +2144,15 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 				goto done;
 			}
 			ovf_count = grouped ? out[ovf_base] : 0;
+			/* most rows found no slot (many groups): run the task again on the session-wide table (the first pass only: nothing
+			 * of this task is merged yet) */
+			if (grouped && first == 0 && ovf_count > ovf_cap && scan_gtab_switch_allowed())
+			{
+				st->nitems_raw -= nrows;
+				redo = 1;
+				rv = 0;
+				goto done;
+			}
 			if (ovf_count <= ovf_cap)
 				break;
 			ovf_cap = ovf_count + ovf_count / 2 + 1024;		/* the count may vary a little between runs */
@@ -2020,6 +2199,8 @@ done:
 	arrow_task_close(vk, &at);
 	if (rv != 0 && err[0] == '\0')
 		snprintf(err, errlen, "Arrow aggregation failed");
+	if (redo)
+		return arrow_group_task_gtab(eng, session, prog, st, task, err, errlen);
 	return rv;
 }
 
@@ -2482,8 +2663,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&

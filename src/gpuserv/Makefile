@@ -33,11 +33,13 @@ endif
 SLANG_SRCS := $(sort $(wildcard kernels/*.slang))
 AGG_SPV    := $(foreach r,8 16 32,$(foreach a,4 12,build/gpuagg$(r)_$(a).spv))
 GAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/gagg$(r)_$(a).spv))
+# GROUP BY over many groups: one global hash table per session (gtab.slang)
+GTAB_SPV   := $(foreach r,16 32,build/gtab$(r).spv)
 JOIN_SPV   := $(foreach r,8 16 32,build/gpujoin$(r).spv)
 # aggregation over a join: <regs>_<aggregates>
 JAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/jagg$(r)_$(a).spv))
 JGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/jgagg$(r)_$(a).spv))
-SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV)
+SPV_FILES  := $(patsubst kernels/%.slang,build/%.spv,$(SLANG_SRCS)) build/vm_main.spv build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(GTAB_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV)
 # per-kernel extra slangc flags (the memory model kernel must declare the Vulkan memory model)
 SLANGFLAGS_memmodel := -capability vk_mem_model
 
@@ -50,14 +52,15 @@ AAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/aagg$(r)_$(a).spv))
 AGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/agagg$(r)_$(a).spv))
 AJOIN_SPV  := $(foreach r,16 32,build/ajoin$(r).spv)
 AJAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/ajagg$(r)_$(a).spv))
+AGTAB_SPV  := $(foreach r,16 32,build/agtab$(r).spv)
 AJGAGG_SPV := $(foreach r,16 32,$(foreach a,4 12,build/ajgagg$(r)_$(a).spv))
-SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
+SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AGTAB_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 LIB_OBJS   += arrow_exec.o
 # GPU-Cache (A7 part 2)
 LIB_OBJS   += gcache.o
 # GPU-Sort (A7): the bitonic sort kernel and the host side
 # the lite and nogeom variants of every VM kernel (see LITE_FLAGS / NOGEOM_FLAGS)
-SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
+SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(GTAB_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AGTAB_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 SPV_LITE   := $(patsubst build/%.spv,build/%_lite.spv,$(SPV_VMBASE))
 SPV_NOGEOM := $(patsubst build/%.spv,build/%_nogeom.spv,$(SPV_VMBASE))
 SPV_FILES  += $(SPV_LITE) $(SPV_NOGEOM)
@@ -113,7 +116,7 @@ NOGEOM_FLAGS := -DVM_NO_GEOM
 LITE_OF = $(if $(findstring _lite,$*),$(LITE_FLAGS),$(if $(findstring _nogeom,$*),$(NOGEOM_FLAGS)))
 # the GpuScan kernel (heap pages -> VM -> matches); its instruction numbers are shared with scan_prog.c
 # one variant per register-file size: the register count dominates the kernel's speed
-build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/scan.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry scan_main -stage compute -o $@
 
@@ -122,7 +125,7 @@ scan_caps.o: scan_caps.c scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h 
 
 # the aggregation kernel: variants by register count and by number of aggregates (the size of the
 # per-thread accumulator arrays matters a lot); the stem is <regs>_<aggs>
-build/gpuagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+build/gpuagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/agg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) -DSCAN_WG=128 $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry agg_main -stage compute -o $@
 
@@ -131,28 +134,33 @@ cpu_vm.o: cpu_vm.c cpu_vm.h scan_prog.h scan_caps.h kernels_vm/scan_vm_ops.inc .
 
 # the GROUP BY kernel: <regs>_<aggregates>; the capacity of the per-workgroup table shrinks as the
 # accumulators grow, to fit shared memory (the host has the same table in scan_exec.c)
-build/gagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc | build
+build/gagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/gagg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
 
+# the GROUP BY kernel with one global hash table per session (many groups): one variant per register count
+build/gtab%.spv: kernels_vm/gtab.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/gtab.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
+
 # the join kernel: one variant per register count
 JOIN_INCS := kernels_vm/join_common.inc kernels_vm/join_walk.inc
-build/gpujoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) | build
+build/gpujoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(JOIN_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/join.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry join_main -stage compute -o $@
 
 # aggregation over a join, without GROUP BY: <regs>_<aggregates>
-build/jagg%.spv: kernels_vm/jagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) | build
+build/jagg%.spv: kernels_vm/jagg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(JOIN_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/jagg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry jagg_main -stage compute -o $@
 
 # GROUP BY over a join: <regs>_<aggregates>; the table capacity as for gagg
-build/jgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) | build
+build/jgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(JOIN_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/jgagg.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry jgagg_main -stage compute -o $@
 
 # the Arrow scan kernel: one variant per register count
-build/gpuarrow%.spv: kernels_vm/arrow.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc kernels_vm/arrow_load.inc | build
+build/gpuarrow%.spv: kernels_vm/arrow.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc kernels_vm/arrow_load.inc | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/arrow.slang -I kernels_vm -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry arrow_main -stage compute -o $@
 
@@ -203,24 +211,39 @@ f64soft_check.o: f64soft_check.c kernels_vm/f64_soft.inc gpu_vk.h
 f64soft_check: f64soft_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ f64soft_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
+# self-check of the string hash of the join kernels (kernels_vm/hash_bytes.inc) against PostgreSQL's hashtext() (test/gpuserv/hash_check.sh)
+build/hash_check.spv: kernels_check/hash_check.slang kernels_vm/hash_bytes.inc | build
+	$(SLANGC) kernels_check/hash_check.slang -I kernels_vm -target spirv -entry main -stage compute -o $@
+
+hash_check.o: hash_check.c gpu_vk.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+hash_check: hash_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ hash_check.o libgpuserv.a $(VK_LIBS) -lpthread
+
 ARROW_INCS := kernels_vm/arrow_load.inc
-build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
+build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/agg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) -DSCAN_WG=128 $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry agg_main -stage compute -o $@
 
-build/agagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
+build/agagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/gagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
 
-build/ajoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
+# GROUP BY over many groups on an Arrow record batch (and the GPU-Cache): gtab.slang with -DARROW_SRC
+build/agtab%.spv: kernels_vm/gtab.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/gtab.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
+
+build/ajoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/join.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry join_main -stage compute -o $@
 
-build/ajagg%.spv: kernels_vm/jagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
+build/ajagg%.spv: kernels_vm/jagg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/jagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DAGG_MAX=$(word 2,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry jagg_main -stage compute -o $@
 
-build/ajgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
+build/ajgagg%.spv: kernels_vm/jgagg.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/jgagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry jgagg_main -stage compute -o $@
 

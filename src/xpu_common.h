@@ -2884,6 +2884,9 @@ typedef struct kern_session_info
 	uint32_t	fallback_desc_defs;		/* offset to kern_fallback_desc array */
 	uint32_t	fallback_desc_nitems;	/* number of kern_fallback_desc items */
 
+	/* fault injection for tests (pg_strom.gpuserv_fault; offset to a C string, 0: none) */
+	uint32_t	fault_spec;
+
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */

@@ -514,7 +514,7 @@ __gpuScanAddCustomPath(PlannerInfo *root,
 	 * needs more than SCAN_VM_SLOT_BUDGET of them (wide select list) cannot run device expressions:
 	 * the quals stay on the CPU, as the service would refuse the program.
 	 */
-	if (dev_quals != NIL &&
+	if (dev_quals != NIL && !pgstrom_debug_no_limits &&
 		gpuscan_slots_upperbound(baserel, outer_refs) > SCAN_VM_SLOT_BUDGET)
 	{
 		host_quals = list_concat(host_quals, dev_quals);
@@ -798,7 +798,8 @@ gpuscan_build_projection(RelOptInfo *baserel,
 	 * columns are projected then.
 	 */
 	gpuscan_computed_ok = (pp_info->host_quals == NIL &&
-						   gpuscan_slots_upperbound(baserel, pp_info->outer_refs) <= SCAN_VM_SLOT_BUDGET);
+						   (pgstrom_debug_no_limits ||
+							gpuscan_slots_upperbound(baserel, pp_info->outer_refs) <= SCAN_VM_SLOT_BUDGET));
 	if (tlist != NIL)
 	{
 		foreach (lc, tlist)
