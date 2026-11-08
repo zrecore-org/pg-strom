@@ -632,8 +632,16 @@ pgstrom_fsum_trans_fp(PG_FUNCTION_ARGS)
 		if (!PG_ARGISNULL(1))
 		{
 			arg = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(1);
+			double		r = state->sum + arg->sum;
+
+			/* as float8pl(): an infinite sum of finite values is an overflow (the CPU replay of a failed
+			 * GPU node (A14) must raise the error that PostgreSQL's own plan raises) */
+			if (isinf(r) && !isinf(state->sum) && !isinf(arg->sum))
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("value out of range: overflow")));
 			state->nitems += arg->nitems;
-			state->sum    += arg->sum;
+			state->sum    = r;
 		}
 	}
 	PG_RETURN_POINTER(state);
