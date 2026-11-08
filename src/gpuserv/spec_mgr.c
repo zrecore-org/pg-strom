@@ -1211,6 +1211,13 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, co
 	in.ga_c = ga_c;
 	if (out_shape)
 		*out_shape = in;
+	if (prog->spec && (((spec_entry *) prog->spec)->kind != kind || ((spec_entry *) prog->spec)->arrow != arrow))
+	{
+		/* the session changed kernel family (a GROUP BY that moved to the session-wide table): the old kernel is not this one's */
+		spec_release(prog);
+		prog->spec_state = 0;
+		prog->spec_grow_failed = 0;
+	}
 	if (!m || m->mode == SPECM_OFF || !m->thr_started || prog->spec_state == 2)
 		return vm_pipe;
 	if (!prog->spec)
