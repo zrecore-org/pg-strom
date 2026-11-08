@@ -2782,6 +2782,40 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 			return;
 		}
 	}
+	/*
+	 * float aggregates with GROUP BY (A10) run in the shared-memory kernels (the slot owners add the rows in order): at most
+	 * SCAN_GROUP_KEYS_SHARED keys, and the groups must fit the workgroups' tables; the session-wide table of gtab.slang
+	 * (many groups, three or four keys) has no float accumulators
+	 */
+	if (parse->groupClause)
+	{
+		ListCell   *lcf;
+		bool		has_float = false;
+
+		foreach (lcf, con.pp_info->groupby_actions)
+		{
+			switch (lfirst_int(lcf))
+			{
+				case KAGG_ACTION__PMIN_FP64:
+				case KAGG_ACTION__PMAX_FP64:
+				case KAGG_ACTION__PSUM_FP:
+				case KAGG_ACTION__PAVG_FP:
+				case KAGG_ACTION__PSUM_FP32:
+					has_float = true;
+					break;
+				default:
+					break;
+			}
+		}
+		if (has_float &&
+			(num_groups > pgstrom_gpupreagg_max_groups ||
+			 list_length(con.groupby_keys) > SCAN_GROUP_KEYS_SHARED))
+		{
+			elog(DEBUG2, "GpuPreAgg: float aggregates with GROUP BY need at most %d keys and %d estimated groups (%.0f groups, %d keys)",
+				 SCAN_GROUP_KEYS_SHARED, pgstrom_gpupreagg_max_groups, num_groups, list_length(con.groupby_keys));
+			return;
+		}
+	}
 	/* build GpuPreAgg path */
 	cpath = __buildXpuPreAggCustomPath(&con);
 	elog(DEBUG2, "GpuPreAgg: path built, startup %.2f total %.2f rows %.0f",

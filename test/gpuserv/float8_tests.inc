@@ -1,6 +1,8 @@
 # A10: float8 on the GPU (the kernel computes it in integer arithmetic, kernels_vm/f64_soft.inc). Sourced by
 # scan_test.sh and float8_dev.sh (they provide run, run_any, q, check, sql, $PSQL, $GPU, $CPU, $fail). New tables only (f8_*).
 echo "float8 (A10)"
+# the installed module is shared by every checkout: say so if it is not this tree's (it has the sum(float4) action)
+strings "$($PGBIN/pg_config --pkglibdir)/pg_strom.dylib" 2>/dev/null | grep -q "psum::fp32" || echo "  NOTE: the installed pg_strom module lacks psum::fp32 (stale install?)"
 # F8PARTS (default: all) picks the sections that run: scan (heap scans, casts, errors, math functions), join, agg, joinagg. The CI job
 # runs "scan" only: on lavapipe every join and aggregate kernel is compiled by the CPU's JIT and the other sections need over an hour.
 f8part() { case " ${F8PARTS:-scan join agg joinagg} " in *" $1 "*) echo f8_1 f8_2;; esac; }

@@ -2289,9 +2289,21 @@ gt_stride(const scan_prog *prog)
  * its rows overflow (scan_exec_group_task), the session uses the table. The planner's estimate is no guide (PostgreSQL
  * estimates an expression such as a % 10 by the distinct values of a), it only sizes the table.
  */
+/* float aggregates (A10) are accumulated in order by the slot owners of gagg.slang / jgagg.slang, not with the atomics of gtab.slang */
+int
+scan_prog_has_float_agg(const scan_prog *prog)
+{
+	for (uint32_t a = 0; a < prog->nagg; a++)
+		if (prog->words[prog->words[11] + 4 * a] >= 6)
+			return 1;
+	return 0;
+}
+
 int
 scan_gtab_forced(const agg_state *st, const scan_prog *prog)
 {
+	if (scan_prog_has_float_agg(prog))
+		return 0;				/* (the planner offers float aggregates with at most SCAN_GROUP_KEYS_SHARED keys) */
 	static int	mode = -1;
 
 	if (mode < 0)
@@ -2900,7 +2912,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	 * Most rows found no slot in the workgroups' tables (many groups): the CPU would aggregate them one by one. Run the task
 	 * again on the session-wide table (gtab.slang) and keep using it. (The groups so far, if any, stay in the session's groups.)
 	 */
-	if (scan_gtab_switch_allowed())
+	if (scan_gtab_switch_allowed() && !scan_prog_has_float_agg(prog))
 	{
 		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
 		uint64_t	nov = 0, nhits = 0;
