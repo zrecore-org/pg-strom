@@ -1524,6 +1524,26 @@ scan_vm_groupkey_type_supported(int type_code)
 	return false;
 }
 
+/*
+ * A6: types of a hash-join key. The integer and date/time types of a GROUP BY key, and the strings
+ * (text, varchar through its RelabelType, bpchar): the kernel hashes the payload bytes (bpchar without
+ * the trailing blanks) with PostgreSQL's hash_bytes() and compares them bytewise, which is what
+ * texteq / bpchareq do under every deterministic collation (the planner checks that).
+ */
+bool
+scan_vm_joinkey_type_supported(int type_code)
+{
+	switch (type_code)
+	{
+		case TypeOpCode__text:
+		case TypeOpCode__bpchar:
+			return true;
+		default:
+			break;
+	}
+	return scan_vm_groupkey_type_supported(type_code);
+}
+
 bool
 scan_vm_gpusort_key_supported(int kind, int action, int type_code)
 {
