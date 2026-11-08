@@ -18,6 +18,34 @@ LOCK=${PGSTROM_TEST_LOCK:-/tmp/pgstrom_test.lock}
 # agent can wait for hours behind others' repeated runs. The lock itself is the same directory as before, so scripts
 # that do not queue still exclude each other and this one.
 QUEUE=$LOCK.queue
+# A process is alive when it exists AND is the same one that recorded itself (pid + start time: a recycled pid of an
+# unrelated process must not keep a dead waiter's ticket or a dead holder's lock).
+lstart_of() { ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//'; }
+alive() { # <pid> <recorded start time>
+	[ -n "$1" ] || return 1
+	kill -0 "$1" 2>/dev/null || return 1
+	[ -z "$2" ] || [ "$(lstart_of "$1")" = "$2" ]
+}
+age_of() { # seconds since the modification of a file (empty when it does not exist)
+	m=$(stat -f %m "$1" 2>/dev/null) || return 0
+	echo $(( $(date +%s) - m ))
+}
+# Said at most every 10 minutes while waiting: how long the holder has had the lock, whether its heartbeat is fresh
+# (the holder touches $LOCK/beat every minute; a stale beat of a live process means it is stopped or wedged) and how long
+# ago its cluster directory changed (a hold of an hour with a cluster that has been quiet for 30 minutes is stuck).
+holder_report() {
+	hs=$(cat "$LOCK/start" 2>/dev/null); [ -n "$hs" ] || return 0
+	held=$(( ($(date +%s) - hs) / 60 )); b=$(age_of "$LOCK/beat")
+	r=$(cat "$LOCK/root" 2>/dev/null); q=
+	if [ -n "$r" ] && [ -d "$r" ]; then
+		nf=$(find "$r" -type f -newermt '-30 minutes' 2>/dev/null | head -1)
+		[ -n "$nf" ] && q="; its cluster directory changed in the last 30 minutes" || q="; its cluster directory has been quiet for 30 minutes or more"
+	fi
+	msg="locked_test: the lock has been held for $held min by $(cat "$LOCK/tree" 2>/dev/null)"
+	[ -n "$b" ] && [ "$b" -gt 180 ] && msg="$msg; WARNING: no heartbeat for $((b / 60)) min (the holder is stopped or wedged)"
+	[ "$held" -ge 60 ] && msg="$msg; WARNING: held over 60 min"
+	echo "$msg$q"
+}
 mkdir -p "$QUEUE" 2>/dev/null
 seq=$(ls "$QUEUE" 2>/dev/null | tail -1 | sed 's/^0*//'); seq=$(( ${seq:-0} + 1 ))
 while :; do
@@ -25,31 +53,36 @@ while :; do
 	mkdir "$TICKET" 2>/dev/null && break
 	seq=$((seq + 1))
 done
-echo $$ > "$TICKET/pid"; echo "$TREE $TEST" > "$TICKET/tree"
+echo $$ > "$TICKET/pid"; lstart_of $$ > "$TICKET/lstart"; echo "$TREE $TEST" > "$TICKET/tree"
 trap 'rm -rf "$TICKET"' EXIT INT TERM
-waited=0
+waited=0; n=0
 while :; do
 	ahead=0
 	for t in $(ls "$QUEUE" 2>/dev/null); do
 		[ "$QUEUE/$t" = "$TICKET" ] && break
 		tp=$(cat "$QUEUE/$t/pid" 2>/dev/null)
-		if [ -n "$tp" ] && ! kill -0 "$tp" 2>/dev/null; then rm -rf "$QUEUE/$t"; continue; fi
+		if [ -n "$tp" ] && ! alive "$tp" "$(cat "$QUEUE/$t/lstart" 2>/dev/null)"; then rm -rf "$QUEUE/$t"; continue; fi
 		ahead=$((ahead + 1))
 	done
 	[ $ahead -eq 0 ] && break
 	[ $waited -eq 0 ] && echo "locked_test: $ahead run(s) ahead in the queue ($(cat "$LOCK/tree" 2>/dev/null))"
 	waited=1; sleep 5
+	n=$((n + 1)); [ $((n % ${LOCKED_TEST_REPORT_EVERY:-120})) -eq 0 ] && holder_report
 done
-waited=0
+waited=0; n=0
 while ! mkdir "$LOCK" 2>/dev/null; do
 	owner=$(cat "$LOCK/pid" 2>/dev/null)
-	if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "$LOCK"; continue; fi
+	if [ -n "$owner" ] && ! alive "$owner" "$(cat "$LOCK/lstart" 2>/dev/null)"; then rm -rf "$LOCK"; continue; fi
 	[ $waited -eq 0 ] && echo "locked_test: waiting for the test lock held by pid ${owner:-?} ($(cat "$LOCK/tree" 2>/dev/null))"
 	waited=1; sleep 5
+	n=$((n + 1)); [ $((n % ${LOCKED_TEST_REPORT_EVERY:-120})) -eq 0 ] && holder_report
 done
-echo $$ > "$LOCK/pid"; echo "$TREE" > "$LOCK/tree"
+echo $$ > "$LOCK/pid"; lstart_of $$ > "$LOCK/lstart"; echo "$TREE" > "$LOCK/tree"; date +%s > "$LOCK/start"; touch "$LOCK/beat"
 rm -rf "$TICKET"
-trap 'rm -rf "$LOCK"' EXIT INT TERM
+# heartbeat: touched every minute for as long as this wrapper lives (it ends with it)
+( me=$$; while kill -0 "$me" 2>/dev/null; do touch "$LOCK/beat" 2>/dev/null; sleep "${LOCKED_TEST_BEAT:-60}"; done ) >/dev/null 2>&1 &
+HB=$!
+trap 'kill $HB 2>/dev/null; rm -rf "$LOCK"' EXIT INT TERM
 # LOCKED_TEST_LOCK_ONLY=<seconds>: take the lock, say so, hold it and leave (test of the queue itself)
 if [ -n "$LOCKED_TEST_LOCK_ONLY" ]; then echo "locked_test: got the lock ($TEST)"; sleep "$LOCKED_TEST_LOCK_ONLY"; exit 0; fi
 # A tree that is behind vulkan-gpu compiles kernels nobody else has compiled (every distinct SPIR-V is a cold compile of
@@ -101,6 +134,7 @@ if [ -z "$ROOT" ]; then
 	esac
 	ROOT=$OWN_ROOT; export ROOT
 fi
+[ -n "$ROOT" ] && echo "$ROOT" > "$LOCK/root"
 GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} $LOWPRI sh "$SCRIPT"
 rc=$?
 
