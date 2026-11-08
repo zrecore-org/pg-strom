@@ -6465,6 +6465,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__PSUM_FP32:
+				appendStringInfo(buf, "psum::fp32[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
 			case KAGG_ACTION__PSUM_NUMERIC:
 				appendStringInfo(buf, "psum::numeric(%d)[slot=%d, expr='%s'",
 								 __numeric_typmod_weight(desc->typmod),

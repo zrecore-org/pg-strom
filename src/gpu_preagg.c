@@ -403,7 +403,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:sum_fp32(bytea)",
 	 "s:psum(float8)",
 	 "s:fsum_fp32(bytea)",
-	 KAGG_ACTION__PSUM_FP,
+	 KAGG_ACTION__PSUM_FP32,
 	 KAGG_FINAL__FSUM_FP32,
 	 false,
 	 KSORT_KEY_KIND__PSUM_FP64
@@ -1233,6 +1233,7 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 
 		case KAGG_ACTION__PAVG_FP:
 		case KAGG_ACTION__PSUM_FP:
+		case KAGG_ACTION__PSUM_FP32:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__psum_fp_packed);
@@ -1387,11 +1388,10 @@ aggfunc_catalog_lookup_by_oid(Oid aggfn_oid)
 						if (strstr(cat->aggfn_signature, "(money)") != NULL)
 							break;
 						/*
-						 * sum(float4) adds in float4 on the CPU: the device adds the values as float8, which gives
-						 * another result. float2 has no device type.
+						 * float2 has no device type. (sum(float4) adds in float4 on the CPU: it has its own action,
+						 * KAGG_ACTION__PSUM_FP32, which rounds every device addition to float4.)
 						 */
-						if (strcmp(cat->aggfn_signature, "sum(float4)") == 0 ||
-							strstr(cat->aggfn_signature, "(float2)") != NULL)
+						if (strstr(cat->aggfn_signature, "(float2)") != NULL)
 							break;
 						__setup_aggfunc_catalog_entry(entry, cat, proc);
 						break;
@@ -1621,13 +1621,6 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	if (!aggfn_cat)
 	{
 		elog(DEBUG2, "Aggregate function '%s' is not device executable",
-			 format_procedure(aggref->aggfnoid));
-		return NULL;
-	}
-	/* the float8 aggregates run in the kernels without GROUP BY only */
-	if (con->groupby_keys != NIL && scan_vm_agg_action_nogroup(aggfn_cat->partial_func_action))
-	{
-		elog(DEBUG2, "Aggregate function '%s' is not device executable with GROUP BY",
 			 format_procedure(aggref->aggfnoid));
 		return NULL;
 	}

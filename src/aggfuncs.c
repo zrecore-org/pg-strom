@@ -749,6 +749,11 @@ pgstrom_fsum_final_fp32(PG_FUNCTION_ARGS)
 		= (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
+	/* float4pl raises an error for an infinite sum of finite values; the partials are float4 values (Vulkan service) */
+	if (!isinf(state->sum) && !isnan(state->sum) && isinf((float) state->sum))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("value out of range: overflow")));
 	PG_RETURN_FLOAT4(state->sum);
 }
 
@@ -825,7 +830,11 @@ pgstrom_favg_final_fp(PG_FUNCTION_ARGS)
 	state = (kagg_state__psum_fp_packed *)PG_GETARG_BYTEA_P(0);
 	if (state->nitems == 0)
 		PG_RETURN_NULL();
-	PG_RETURN_FLOAT8((double)state->sum / (double)state->nitems);
+	/*
+	 * avg(float8) starts from +0 (initcond '{0,0,0}'), sum(float8) from the first value: the sum of a -0 alone is -0 for
+	 * sum, +0 for avg. "+ 0.0" turns a -0 into +0 and changes nothing else.
+	 */
+	PG_RETURN_FLOAT8(((double)state->sum + 0.0) / (double)state->nitems);
 }
 
 PUBLIC_FUNCTION(Datum)

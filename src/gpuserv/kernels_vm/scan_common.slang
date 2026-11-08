@@ -1350,20 +1350,22 @@ uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs
     return 0;
 }
 
-// float8 aggregates without GROUP BY (A10). Classes 6 (sum, avg), 7 (min) and 8 (max); a partial is (n, a): a the bits of the
-// double, n the number of values (sum) or 1 (min, max), n == 0 when there is no value yet. The order of additions is fixed
-// (per thread, then the tree of the workgroup, then the service), so the result is deterministic, but not the order of a
-// serial scan: the sum can differ from PostgreSQL's in the last bits. Returns 0, or SOP_ERR_FLTOVER << 16 when a sum of
-// finite values overflows (float8pl raises an error for it).
+// float8 aggregates (A10). Classes 6 (sum, avg), 7 (min), 8 (max) and 9 (sum of float4: every addition is rounded to binary32, as
+// float4pl does); a partial is (n, a): a the bits of the double, n the number of values (sum) or 1 (min, max), n == 0 when there
+// is no value yet. Without GROUP BY the order of additions is fixed (per thread, then the tree of the workgroup, then the
+// service); with GROUP BY it is the row order inside a workgroup (gagg.slang, jgagg.slang: the owner of a slot adds the staged
+// rows in thread order), then the workgroups in order at the service. Either way the result is deterministic, but not the order
+// of a serial scan: the sum can differ from PostgreSQL's in the last bits. Returns 0, or SOP_ERR_FLTOVER << 16 when a sum of
+// finite values overflows (float8pl / float4pl raise an error for it).
 uint fagg_acc(uint cls, uint64_t v, inout uint n, inout int64_t a)
 {
-    if (cls == 6u)
+    if (cls == 6u || cls == 9u)
     {
         if (n == 0u)
             a = int64_t(v);
         else
         {
-            uint64_t s = f64_add(uint64_t(a), v);
+            uint64_t s = (cls == 9u) ? f64_addf4(uint64_t(a), v) : f64_add(uint64_t(a), v);
             if (f64_arith_err(0u, uint64_t(a), v, s) != 0u)
                 return SOP_ERR_FLTOVER << 16;
             a = int64_t(s);
@@ -1390,9 +1392,9 @@ uint fagg_merge(uint cls, uint n2, int64_t a2, inout uint n, inout int64_t a)
         a = a2;
         return 0u;
     }
-    if (cls == 6u)
+    if (cls == 6u || cls == 9u)
     {
-        uint64_t s = f64_add(uint64_t(a), uint64_t(a2));
+        uint64_t s = (cls == 9u) ? f64_addf4(uint64_t(a), uint64_t(a2)) : f64_add(uint64_t(a), uint64_t(a2));
         if (f64_arith_err(0u, uint64_t(a), uint64_t(a2), s) != 0u)
             return SOP_ERR_FLTOVER << 16;
         a = int64_t(s);

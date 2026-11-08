@@ -1244,6 +1244,56 @@ ensure_agg_pipeline(scan_engine *eng, int variant, int avariant, char *err, size
 }
 
 /*
+ * float8 aggregates (A10): classes 6 (sum, avg), 7 (min), 8 (max), 9 (sum of float4) of scan_common.slang's fagg_merge(), on the
+ * host: add the partial (n2, a2) (the bits of a double) into (n, val). A sum of finite values that overflows sets *ovf (PostgreSQL
+ * raises "value out of range: overflow" for it).
+ */
+static void
+fagg_host_merge(uint32_t cls, uint64_t *n, int64_t *val, uint8_t *ovf, uint64_t n2, int64_t a2)
+{
+	if (n2 == 0)
+		return;
+	if (*n == 0)
+	{
+		*n = n2;
+		*val = a2;
+		return;
+	}
+	if (cls == 6 || cls == 9)
+	{
+		uint64_t	r = (cls == 9) ? f64_addf4((uint64_t) *val, (uint64_t) a2) : f64_add((uint64_t) *val, (uint64_t) a2);
+
+		if (f64_arith_err(0, (uint64_t) *val, (uint64_t) a2, r) != 0)
+			*ovf = 1;
+		*val = (int64_t) r;
+		*n += n2;
+		return;
+	}
+	{
+		uint64_t	kn = f64_key((uint64_t) a2), ko = f64_key((uint64_t) *val);
+
+		if (cls == 7 ? kn < ko : kn > ko)
+			*val = a2;
+		*n = 1;
+	}
+}
+
+/* the class of a float8 aggregate action (0: not one) */
+static uint32_t
+fagg_class_of_action(uint32_t action)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__PSUM_FP:
+		case KAGG_ACTION__PAVG_FP:		return 6;
+		case KAGG_ACTION__PMIN_FP64:	return 7;
+		case KAGG_ACTION__PMAX_FP64:	return 8;
+		case KAGG_ACTION__PSUM_FP32:	return 9;
+		default:						return 0;
+	}
+}
+
+/*
  * Add the per-workgroup records of an aggregation kernel without GROUP BY (agg.slang, jagg.slang) to
  * the session's aggregates: 6 words per aggregate and workgroup, from word 4 of the output.
  */
@@ -1285,32 +1335,10 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 					break;
 				case KAGG_ACTION__PSUM_FP:		/* A10: float8, the partial of a workgroup is the bits of a double */
 				case KAGG_ACTION__PAVG_FP:
-					if (rec[0])
-					{
-						if (st->n[k])
-						{
-							uint64_t	r = f64_add((uint64_t) st->val[k], (uint64_t) a);
-
-							if (f64_arith_err(0, (uint64_t) st->val[k], (uint64_t) a, r) != 0)
-								st->fovf[k] = 1;
-							st->val[k] = (int64_t) r;
-						}
-						else
-							st->val[k] = a;
-						st->n[k] += rec[0];
-					}
-					break;
+				case KAGG_ACTION__PSUM_FP32:
 				case KAGG_ACTION__PMIN_FP64:
 				case KAGG_ACTION__PMAX_FP64:
-					if (rec[0])
-					{
-						uint64_t	kn = f64_key((uint64_t) a), ko = f64_key((uint64_t) st->val[k]);
-
-						if (!st->n[k] ||
-							(prog->agg_action[k] == KAGG_ACTION__PMIN_FP64 ? kn < ko : kn > ko))
-							st->val[k] = a;
-						st->n[k] = 1;
-					}
+					fagg_host_merge(fagg_class_of_action(prog->agg_action[k]), &st->n[k], &st->val[k], &st->fovf[k], rec[0], a);
 					break;
 				default:		/* PMAX_* */
 					if (rec[0] && (!st->n[k] || a > st->val[k]))
@@ -1586,6 +1614,19 @@ acc_merge_group_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
 			acc->sum += u - ((__int128) rec[0] << 63);
 			break;
 		}
+		case KAGG_ACTION__PSUM_FP:		/* A10: the slot holds the bits of a double (words 2, 3), see gagg.slang */
+		case KAGG_ACTION__PAVG_FP:
+		case KAGG_ACTION__PSUM_FP32:
+		case KAGG_ACTION__PMIN_FP64:
+		case KAGG_ACTION__PMAX_FP64:
+		{
+			uint8_t		ovf = (uint8_t) acc->fovf;
+
+			fagg_host_merge(fagg_class_of_action(action), &acc->n, &acc->val, &ovf, rec[0],
+							(int64_t)((uint64_t) rec[2] | ((uint64_t) rec[3] << 32)));
+			acc->fovf = ovf;
+			break;
+		}
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
 		{
@@ -1656,6 +1697,17 @@ acc_add_value(agg_acc *acc, uint32_t cls, int64_t v)
 				acc->val = v;
 			acc->n = 1;
 			break;
+		case 6:			/* float8 sum, avg; 7 min, 8 max; 9 sum(float4) (A10) */
+		case 7:
+		case 8:
+		case 9:
+		{
+			uint8_t		ovf = (uint8_t) acc->fovf;
+
+			fagg_host_merge(cls, &acc->n, &acc->val, &ovf, 1, v);
+			acc->fovf = ovf;
+			break;
+		}
 		default:		/* max */
 			if (!acc->n || v > acc->val)
 				acc->val = v;
@@ -1748,6 +1800,7 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 
 		case KAGG_ACTION__PSUM_FP:
 		case KAGG_ACTION__PAVG_FP:
+		case KAGG_ACTION__PSUM_FP32:
 		{
 			kagg_state__psum_fp_packed *r = (kagg_state__psum_fp_packed *) cv->data;
 

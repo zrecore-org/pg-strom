@@ -50,6 +50,7 @@ static const uint AC_COUNT_COND = 2;
 static const uint AC_SUM        = 3;
 static const uint AC_MIN        = 4;
 static const uint AC_MAX        = 5;
+static const uint AC_FSUM       = 6;            // 6 float8 sum / avg, 7 min, 8 max, 9 sum(float4): fagg_acc()
 static const uint NONE_REG      = 0xffffffffu;
 static const uint COMMITTED     = 0x8000u;
 static const uint NO_SLOT       = 0xffffffffu;
@@ -112,6 +113,10 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint a_cls[GA_NA];
     for (uint k = 0; k < GA_NA; k++)
         a_cls[k] = (k < naggs) ? prog[aggoff + 4 * k] : 0;
+    bool has_f = false;                             // some aggregate is a float8 sum, min or max (class >= AC_FSUM)
+    for (uint k = 0; k < GA_NA; k++)
+        if (a_cls[k] >= AC_FSUM)
+            has_f = true;
 
     // empty table
     for (uint s = tid; s < GA_C; s += SCAN_WG)
@@ -318,6 +323,8 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     if (st_ok[tid * GA_NA + k] == 0)
                         continue;
                     uint cls = a_cls[k];
+                    if (cls >= AC_FSUM)
+                        continue;                           // float aggregates: the slot's owner adds them below
                     uint a = slot * GA_NA + k;
                     int64_t v = st_val[tid * GA_NA + k];
                     uint prev;
@@ -343,6 +350,36 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     }
                 }
             }
+#ifndef VM_NO_F8
+            // float8 (A10): the soft-float sums and min/max cannot use shared atomics, and their result depends on the order. Each
+            // slot is owned by one thread (s = tid, tid + SCAN_WG, ...), which folds the staged rows of the round that went to
+            // its slot in thread order: the order of a serial scan of the workgroup's rows, whatever the scheduling.
+            if (has_f)
+            {
+                for (uint s = tid; s < GA_C; s += SCAN_WG)
+                {
+                    for (uint j = 0; j < SCAN_WG; j++)
+                    {
+                        if (st_slot[j] != s)
+                            continue;
+                        for (uint k = 0; k < GA_NA; k++)
+                        {
+                            if (a_cls[k] < AC_FSUM || st_ok[j * GA_NA + k] == 0)
+                                continue;
+                            uint a = s * GA_NA + k;
+                            uint n = sh_an[a];
+                            int64_t acc = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
+                            uint ae = fagg_acc(a_cls[k], uint64_t(st_val[j * GA_NA + k]), n, acc);
+                            if (ae != 0u)
+                                report_error(page, base + j, ae);
+                            sh_an[a] = n;
+                            sh_l0[a] = uint(uint64_t(acc) & 0xffffffffu);
+                            sh_l1[a] = uint(uint64_t(acc) >> 32);
+                        }
+                    }
+                }
+            }
+#endif
             for (uint s = tid; s < GA_C; s += SCAN_WG)
             {
                 uint o = sh_owner[s];
