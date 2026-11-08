@@ -26,13 +26,15 @@
 //            its wraps (a wrap is seen by the add that causes it: the add returns the old value), so the total of a pair is
 //            L + C * 2^32. sum = (Pos) - (Neg) + (Lxl + 2^32 Lxh - nbig * 2^63).
 //   min/max: { flag, ~b (min) or b (max) } with b = value + 2^31 as unsigned (values outside 32 bits overflow to the CPU)
-// Flags (as gagg.slang): outb[4 + total_lps ...] one word per line pointer, 0 done, 1 CPU, 2 backend, 4 insert.
+// Flags (as gagg.slang): outb[flags_base + ...] one word per line pointer (ARROW_SRC: one per row of the pass, at page * AR_VP + lp),
+// 0 done, 1 CPU, 2 backend, 4 insert. ARROW_SRC has no heap tuple to aggregate on the CPU, so a mode 3 dispatch writes
+// the rows flagged 1 (staged key and argument values) to an overflow list { count, records of OV_REC words } at kparam.total_lps - ...:
+// its position is outb[ovf_base] with ovf_base = kparam.extra (mode 3 only; the flags start at 4).
 // Program header as gagg.slang: [10] aggregates, [11] aggregate table, [12] keys, [13] key registers.
 #define GTAB 1
 #include "scan_common.slang"
-
 #ifdef ARROW_SRC
-#error "gtab.slang: the heap source only"
+#include "arrow_load.inc"       // the outer relation is an Arrow record batch (see arrow_load.inc)
 #endif
 
 #ifndef GA_NA
@@ -42,6 +44,7 @@
 #define GT_MAXPROBE 64
 #define GT_HDR 8
 #define GT_KEYW (2 + 2 * GA_NK)
+#define OV_REC (1 + 2 * GA_NK + 3 * GA_NA)
 
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint> gtab;
 
@@ -243,22 +246,33 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
     for (uint page = first_page; page < last_page; page++)
     {
+#ifdef ARROW_SRC
+        uint nlp      = arrow_page_rows(page, ncols);
+        uint row0     = arrow_page_row0(page, ncols);
+#else
         uint pte      = ptab[2 * page];
         uint lp_base  = ptab[2 * page + 1];
         g_src         = (pte & 0x80000000u) != 0 ? 1u : 0u;
         uint pbase    = pte & 0x7fffffffu;
         uint pd_lower = ld16(pbase + 12);
         uint nlp      = (pd_lower <= 24) ? 0 : ((pd_lower - 24) >> 2);
+#endif
 
         for (uint lp = tid; lp < nlp; lp += SCAN_WG)
         {
+#ifdef ARROW_SRC
+            uint fidx = flags_base + page * AR_VP + lp;
+#else
             uint fidx = flags_base + lp_base + lp;
-            if (mode != 0 && outb[fidx] != 4u)
-                continue;                           // only the rows that found no slot
+#endif
+            if (mode != 0 && outb[fidx] != (mode == 3 ? 1u : 4u))
+                continue;                           // only the rows that found no slot (mode 3: the ones the CPU takes)
 
             Reg  regs[VM_MAX_REGS];
             bool hit = false;
-#ifdef SPEC_PROG
+#if defined(ARROW_SRC)
+            hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
+#elif defined(SPEC_PROG)
             hit = spec_eval_row(pbase, page, lp, false, regs);
 #else
             hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
@@ -316,6 +330,30 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint prev;
                 InterlockedAdd(sh_hits, 1, prev);
             }
+#ifdef ARROW_SRC
+            if (mode == 3)
+            {
+                // this row goes to the CPU: its staged key and values to the overflow list
+                uint idx;
+                InterlockedAdd(outb[kparam.extra], 1, idx);
+                uint rb = kparam.extra + 1 + idx * OV_REC;
+                outb[rb + 0] = st_kn[tid] & 15u;
+                for (uint i = 0; i < GA_NK; i++)
+                {
+                    uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                    outb[rb + 1 + 2 * i] = uint(kv & 0xffffffffu);
+                    outb[rb + 2 + 2 * i] = uint(kv >> 32);
+                }
+                for (uint k = 0; k < naggs; k++)
+                {
+                    uint64_t vv = uint64_t(st_val[tid * GA_NA + k]);
+                    outb[rb + 1 + 2 * GA_NK + 3 * k + 0] = st_ok[tid * GA_NA + k];
+                    outb[rb + 1 + 2 * GA_NK + 3 * k + 1] = uint(vv & 0xffffffffu);
+                    outb[rb + 1 + 2 * GA_NK + 3 * k + 2] = uint(vv >> 32);
+                }
+                continue;
+            }
+#endif
             // min/max arguments must fit 32 bits
             bool fits = true;
             for (uint k = 0; k < naggs; k++)

@@ -1403,11 +1403,11 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				((const char *) session + session->xpucode_groupby_keyhash);
 			const kern_expression *kk = KEXP_FIRST_ARG(khash);
 
-			int		maxkeys = (kds_src && kds_src->format == KDS_FORMAT_BLOCK) ? SCAN_GROUP_KEYS : SCAN_GROUP_KEYS_SHARED;
+			int		maxkeys = SCAN_GROUP_KEYS;		/* (a join has its own builder: join_build_agg) */
 
 			if (khash->nr_args < 1 || khash->nr_args > (uint32_t) maxkeys)
 			{
-				fail(&b, "%u GROUP BY keys (up to %d are supported for this source)", khash->nr_args, maxkeys);
+				fail(&b, "%u GROUP BY keys (up to %d are supported)", khash->nr_args, maxkeys);
 				goto error;
 			}
 			for (uint32_t j = 0; j < khash->nr_args; j++, kk = KEXP_NEXT_ARG(kk))

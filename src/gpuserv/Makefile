@@ -52,14 +52,15 @@ AAGG_SPV   := $(foreach r,16 32,$(foreach a,4 12,build/aagg$(r)_$(a).spv))
 AGAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/agagg$(r)_$(a).spv))
 AJOIN_SPV  := $(foreach r,16 32,build/ajoin$(r).spv)
 AJAGG_SPV  := $(foreach r,16 32,$(foreach a,4 12,build/ajagg$(r)_$(a).spv))
+AGTAB_SPV  := $(foreach r,16 32,build/agtab$(r).spv)
 AJGAGG_SPV := $(foreach r,16 32,$(foreach a,4 12,build/ajgagg$(r)_$(a).spv))
-SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
+SPV_FILES  += $(AAGG_SPV) $(AGAGG_SPV) $(AGTAB_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 LIB_OBJS   += arrow_exec.o
 # GPU-Cache (A7 part 2)
 LIB_OBJS   += gcache.o
 # GPU-Sort (A7): the bitonic sort kernel and the host side
 # the lite and nogeom variants of every VM kernel (see LITE_FLAGS / NOGEOM_FLAGS)
-SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(GTAB_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
+SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(GTAB_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AGTAB_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 SPV_LITE   := $(patsubst build/%.spv,build/%_lite.spv,$(SPV_VMBASE))
 SPV_NOGEOM := $(patsubst build/%.spv,build/%_nogeom.spv,$(SPV_VMBASE))
 SPV_FILES  += $(SPV_LITE) $(SPV_NOGEOM)
@@ -218,6 +219,11 @@ build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/sc
 build/agagg%.spv: kernels_vm/gagg.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/gagg.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) -DGA_NA=$(word 2,$(subst _, ,$*)) -DGA_C=$(if $(filter 4,$(word 2,$(subst _, ,$*))),128,64) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
+
+# GROUP BY over many groups on an Arrow record batch (and the GPU-Cache): gtab.slang with -DARROW_SRC
+build/agtab%.spv: kernels_vm/gtab.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/gtab.slang -I kernels_vm -DARROW_SRC=1 -DVM_MAX_REGS=$(word 1,$(subst _, ,$*)) $(LITE_OF) $(SCAN_SLANGFLAGS) -target spirv -entry gagg_main -stage compute -o $@
 
 build/ajoin%.spv: kernels_vm/join.slang kernels_vm/scan_common.slang kernels_vm/scan_vm_ops.inc $(JOIN_INCS) $(ARROW_INCS) | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }

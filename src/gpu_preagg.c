@@ -2672,31 +2672,14 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 										 NULL, NULL);
 	}
 	/*
-	 * A GROUP BY over a heap table keeps its groups in one hash table in device memory for the whole query (gtab.slang) and
-	 * scales to many groups. The other sources (Arrow_Fdw, GPU-Cache, a join below) still use the workgroups' tables in
-	 * shared memory; with many more groups than fit, most rows would be aggregated on the CPU, so leave such queries to
+	 * A GROUP BY over a scan (heap, Arrow_Fdw, GPU-Cache) keeps its groups in one hash table in device memory for the whole query
+	 * (gtab.slang) and scales to many groups. A join below still uses the workgroups' tables in shared memory; with many more groups than fit, most rows would be aggregated on the CPU, so leave such queries to
 	 * PostgreSQL.
 	 */
 	heap_scan = (input_path->custom_paths == NIL);
 	{
 		int			limit;
 
-		if (heap_scan)
-		{
-			ListCell   *lc2;
-
-			foreach (lc2, pp_input->scan_rels_list)
-			{
-				pgstromPlanScanInfo *pp_scan = lfirst(lc2);
-				RelOptInfo *rel;
-
-				if (pp_scan->scan_relid >= (Index) root->simple_rel_array_size)
-					continue;
-				rel = root->simple_rel_array[pp_scan->scan_relid];
-				if (rel && (baseRelIsArrowFdw(rel) || baseRelHasGpuCache(root, rel)))
-					heap_scan = false;
-			}
-		}
 		limit = heap_scan ? pgstrom_gpupreagg_max_groups_heap : pgstrom_gpupreagg_max_groups;
 		if (parse->groupClause && num_groups > limit)
 		{
@@ -3829,7 +3812,7 @@ pgstrom_init_gpu_preagg(void)
 							NULL, NULL, NULL);
 	/* pg_strom.gpupreagg_max_groups_heap */
 	DefineCustomIntVariable("pg_strom.gpupreagg_max_groups_heap",
-							"Largest estimated number of groups for which GROUP BY over a heap table runs on the GPU",
+							"Largest estimated number of groups for which GROUP BY over a scan (heap, Arrow_Fdw, GPU-Cache) runs on the GPU",
 							"A GROUP BY over a heap table keeps its groups in a hash table in device memory for the whole query; it beat 8-worker PostgreSQL from about a thousand groups up to a million. Other sources are limited by pg_strom.gpupreagg_max_groups",
 							&pgstrom_gpupreagg_max_groups_heap,
 							2000000,
