@@ -1219,14 +1219,21 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, co
 		prog->spec_grow_failed = 0;
 	}
 	if (!m || m->mode == SPECM_OFF || !m->thr_started || prog->spec_state == 2)
+	{
+		if (m && m->mode != SPECM_OFF)
+			spec_log(m, 0, "%s: no specialization (thread %d, state %d)", kind_name(kind), m->thr_started, prog->spec_state);
 		return vm_pipe;
+	}
 	if (!prog->spec)
 	{
 		char	   *defs = NULL, *body = NULL, err[256];
 
 		prog->spec_tasks++;
 		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold && prog->spec_state == 1)
-			return vm_pipe;				/* looked at in the first task: not on the disk */
+			{
+				spec_log(m, 0, "%s: task %d of the session stays on the VM (auto: the compilation starts with task %d)", kind_name(kind), prog->spec_tasks, m->threshold);
+				return vm_pipe;				/* looked at in the first task: not on the disk */
+			}
 		pick_shape(m, prog, kind, &in, ks, &sh);
 		if (spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) != 0)
 		{
