@@ -36,6 +36,7 @@ static bool		gpu_allow_cpu_device = false;
 static char	   *gpu_specialize = NULL;			/* "", off, auto, force, check */
 static char	   *gpu_kernel_cache_dir = NULL;
 static int		gpuserv_probe_timeout = 60000;		/* ms */
+static int		gpuserv_group_memory = 1024;		/* MB */
 
 static char	   *gpu_visible_devices = NULL;		/* GUC */
 static gpuserv_control *gpuserv_ctl = NULL;
@@ -258,7 +259,7 @@ launcher_sigterm(SIGNAL_ARGS)
 static pid_t
 launcher_spawn_service(int *p_lifeline_write)
 {
-	char		devbuf[32];
+	char		devbuf[32], grpbuf[32];
 	char		fdbuf[16];
 	char	   *argv[16];
 	int			argc = 0;
@@ -287,6 +288,9 @@ launcher_spawn_service(int *p_lifeline_write)
 		argv[argc++] = "--specialize";
 		argv[argc++] = gpu_specialize;
 	}
+	snprintf(grpbuf, sizeof(grpbuf), "%d", gpuserv_group_memory);
+	argv[argc++] = "--group-memory";
+	argv[argc++] = grpbuf;
 	if (gpu_kernel_cache_dir && gpu_kernel_cache_dir[0])
 	{
 		argv[argc++] = "--kernel-cache-dir";
@@ -524,6 +528,16 @@ pgstrom_init_gpu_launcher(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.gpuserv_group_memory",
+							"Memory (MB) one GpuPreAgg session may use for its GROUP BY groups on the GPU service",
+							"Half bounds the hash table in device memory (rows that find no slot are aggregated on the CPU), the whole bounds the groups the service keeps for the session; a query that needs more fails with an error",
+							&gpuserv_group_memory,
+							1024,
+							64,
+							65536,
+							PGC_POSTMASTER,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_MB,
+							NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.gpuserv_probe_timeout",
 							"Time limit of the GPU capability probe at startup",
 							NULL,
