@@ -549,7 +549,13 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			/* hash-join key must support device hash function (the Vulkan kernel hashes integers and bool) */
 			dtype = pgstrom_devtype_lookup(exprType(arg1));
 			if (!dtype || !dtype->type_hashfunc ||
-				!scan_vm_groupkey_type_supported(dtype->type_code))
+				!scan_vm_joinkey_type_supported(dtype->type_code))
+				continue;
+			/* a string key is hashed and compared bytewise: only for a deterministic collation */
+			if ((dtype->type_code == TypeOpCode__text ||
+				 dtype->type_code == TypeOpCode__bpchar) &&
+				(!OidIsValid(op->inputcollid) ||
+				 !get_collation_isdeterministic(op->inputcollid)))
 				continue;
 			{
 				/*
@@ -560,7 +566,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 				devtype_info *dtype2 = pgstrom_devtype_lookup(exprType(arg2));
 
 				if (!dtype2 || !dtype2->type_hashfunc ||
-					!scan_vm_groupkey_type_supported(dtype2->type_code) ||
+					!scan_vm_joinkey_type_supported(dtype2->type_code) ||
 					dtype2->type_code != dtype->type_code)
 					continue;
 			}

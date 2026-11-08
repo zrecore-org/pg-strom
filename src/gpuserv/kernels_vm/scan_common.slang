@@ -241,6 +241,8 @@ int str_memcmp(uint sa, uint oa, uint sb, uint ob, uint n)
     return 0;
 }
 
+#include "hash_bytes.inc"      // A6: hash_bytes() of a string register (text / bpchar join keys)
+
 // ---------------------------------------------------------------------------------------------
 // A6: numeric. A register holds { unscaled value v, scale sc } with |v| <= INT64_MAX and sc <= 255.
 // Everything that does not fit (NaN, Infinity, more than 18-19 digits, an overflowing intermediate
@@ -3523,7 +3525,20 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
             regs[dst].isnull = 0;
             return 0;
         case SOP_HASHMERGE:
-            if (regs[ra].isnull == 0)
+            if (regs[ra].isnull == 0 && k1 != 0)
+            {
+                // a string key (k1 = 1 text / varchar, 2 bpchar: trailing blanks do not count)
+                Reg x = regs[ra];
+                uint ss = str_src(x);
+                uint so = str_off(x);
+                uint sl = str_len(x);
+                if (k1 == 2)
+                    sl = str_truelen(ss, so, sl);
+                uint h = hash_bytes_src(ss, so, sl);
+                uint acc = uint(regs[dst].v);
+                regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
+            }
+            else if (regs[ra].isnull == 0)
             {
                 uint64_t uv = uint64_t(regs[ra].v);
                 uint h = hash_any_value(uint(uv & 0xffffffffu), uint(uv >> 32), k0);
