@@ -178,6 +178,47 @@ runjagg s1 "RIGHT join, then LEFT join on the inner side's column" "select count
 runjagg s1 "RIGHT join, then inner join on the inner side's column, GROUP BY" "select e.g2, count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 join sd2 e on d.grp = e.k2 group by 1 order by 1"
 # a parallel plan does not offer RIGHT/FULL joins: the aggregate must still be right
 runjagg s1 "RIGHT JOIN, parallel workers wanted (not offered for the join: a serial GpuPreAgg or the CPU aggregate, same result)" "select count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000" "$PAR"
+# A14: the aggregating kernels used to drop an outer row whose scan quals the device cannot decide (float4 results that
+# are denormal or may underflow, numerics beyond 64 bits, ...) without a word, and to stop with a kernel error when the
+# projection could not be computed. Now a qual-only recheck is flagged in a bitmap behind the results (no extra pass) and
+# a program whose walk or projection can recheck runs a scout pass first (scan_prog.h rck_outer / rck_walk, join_walk.inc);
+# the backend joins and aggregates those rows on the CPU. The table has denormal float4 values, numerics that overflow
+# 64 bits and compressed / out-of-line strings (the strings take part through NULL tests and a text qual below the join).
+echo "aggregation over a join: rows the device cannot decide (recheck)"
+sql "create table rkt as select s1.*, (i % 13)::numeric as n, (i % 7)::int4 as g7, (i % 2)::int4 as g2,
+	case when i % 101 = 0 then (select string_agg(md5(i::text || j::text), '') from generate_series(1, 100) j)
+	     when i % 53 = 0 then repeat(md5(i::text), 100) else f end as f2
+	from s1 where i % 3 = 0"
+sql "update rkt set d = 1e-40::float4 where i % 997 = 5"
+sql "vacuum analyze rkt"
+runjagg_res() { # only the results must equal the CPU's (the planner may keep the aggregate or the join on the CPU)
+	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g; s/%D/sd/g")
+	g=$(q "$GPU $JOINSET $JAGGBIG" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
+	else echo "  FAIL  $tbl: $label"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+RKF="t.d < 'Infinity'::float4 and t.d > '-Infinity'::float4"
+JAGGPAT='GPU Join Quals \[1\]'
+runjagg rkt "recheck: float4 qual, denormal operands, ungrouped" "select count(*), sum(d.grp), sum(t.a), max(t.i) from %T t join %D d on t.b = d.k where t.d * 2::float4 > 0::float4"
+runjagg rkt "recheck: float4 qual, GROUP BY an inner key" "select d.grp, count(*), sum(d.k), min(t.i) from %T t join %D d on t.b = d.k where t.d * 2::float4 > 0::float4 group by 1 order by 1"
+runjagg rkt "recheck: float4 qual, key from the outer side" "select t.g7, count(*), sum(d.grp) from %T t join %D d on t.b = d.k where t.d * 2::float4 > 0::float4 group by 1 order by 1"
+runjagg rkt "recheck: float4 in the projection (scout pass), ungrouped" "select count(*), sum((t.d * 2::float4)::int), max(d.grp) from %T t join %D d on t.b = d.k where $RKF"
+runjagg rkt "recheck: float4 in the projection (scout pass), GROUP BY" "select d.grp, count(*), sum((t.d * 2::float4)::int) from %T t join %D d on t.b = d.k where $RKF group by 1 order by 1"
+runjagg rkt "recheck: float4 in a FILTER, two keys" "select d.grp, t.g2, count(*) filter (where t.d * 2::float4 > 1::float4), sum(d.k) from %T t join %D d on t.b = d.k where $RKF group by 1, 2 order by 1, 2"
+runjagg rkt "recheck: text qual below the join, compressed and out-of-line strings" "select count(*), sum(d.grp), sum(t.a) from %T t join %D d on t.b = d.k where length(t.f2) > 100"
+runjagg rkt "recheck: NULL test of the toasted string, float4 qual" "select count(*), sum(d.grp) from %T t join %D d on t.b = d.k where t.f2 is not null and t.d * 2::float4 > 0::float4"
+JAGGPAT='Left Outer Join Quals \[1\]'
+runjagg rkt "recheck: LEFT JOIN, float4 ON qual" "select count(*), count(d.k), sum(d.grp), sum(t.a) from %T t left join %D d on t.b = d.k and t.d * 2::float4 > 0::float4"
+runjagg rkt "recheck: LEFT JOIN, GROUP BY" "select t.a % 5, count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and t.d * 2::float4 > 0::float4 group by 1 order by 1"
+runjagg_res rkt "recheck: LEFT JOIN, numeric division by zero in the ON qual" "select count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and t.i % 50 <> 0 and t.b::numeric / (t.i % 50)::numeric > 3"
+runjagg_res rkt "recheck: LEFT JOIN, numeric beyond 64 bits in the ON qual, GROUP BY" "select t.a % 4, count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and (case when t.i % 50 = 0 then t.c::numeric * 100000000000000000000::numeric else t.a::numeric end) > 5 group by 1 order by 1"
+JAGGPAT='Right Outer Join Quals \[1\]'
+runjagg rkt "recheck: RIGHT JOIN" "select count(*), count(t.i), sum(d.grp), sum(t.a) from %T t right join %D d on t.b = d.k and t.d * 2::float4 > 0::float4"
+runjagg rkt "recheck: RIGHT JOIN, GROUP BY" "select d.grp % 5, count(*), count(t.i), sum(t.a) from %T t right join %D d on t.b = d.k and t.d * 2::float4 > 0::float4 group by 1 order by 1"
+JAGGPAT='Full Outer Join Quals \[1\]'
+runjagg rkt "recheck: FULL JOIN" "select count(*), count(t.i), count(d.k), sum(d.grp) from %T t full join %D d on t.b = d.k and t.d * 2::float4 > 0::float4"
+runjagg rkt "recheck: FULL JOIN, GROUP BY" "select d.grp % 4, count(*), count(t.i), count(d.k) from %T t full join %D d on t.b = d.k and t.d * 2::float4 > 0::float4 group by 1 order by 1"
+JAGGPAT='GPU Join Quals \[1\]'
 runjagg_cpu s1 "float aggregate over a join" "select count(*), sum(t.d), max(d.grp) from %T t join %D d on t.b = d.k where t.a > 9000"
 runjagg_cpu s1 "text key" "select d.txt, count(*) from %T t join %D d on t.b = d.k group by 1 order by 1 limit 20"
 runjagg_cpu s1 "too many estimated groups" "select t.i, count(*) from %T t join %D d on t.b = d.k where t.i < 50000 group by 1 order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"

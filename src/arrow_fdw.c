@@ -3290,33 +3290,6 @@ __arrowFieldGpuScanSupported(const RecordBatchFieldState *field)
 	}
 }
 
-/*
- * The Arrow loader of the Vulkan service reads integer, float4, bool, date, time, timestamp and string
- * values (utf8, char(n)). A numeric value (Decimal is not a supported Arrow type, but an expression can
- * produce one) may need the backend to evaluate the row again, which an Arrow record batch cannot do:
- * a qual that reads or produces one stays on the CPU.
- */
-static bool
-__arrowQualNeedsUnsupportedValue(Node *node, void *context)
-{
-	if (node == NULL)
-		return false;
-	if (IsA(node, NullTest) && IsA(((NullTest *) node)->arg, Var))
-		return false;			/* only the NULL-ness of the column is needed */
-	if (IsA(node, RestrictInfo))
-		return __arrowQualNeedsUnsupportedValue((Node *)((RestrictInfo *) node)->clause, context);
-	if (IsA(node, List))
-		return expression_tree_walker(node, __arrowQualNeedsUnsupportedValue, context);
-	switch (exprType(node))
-	{
-		case NUMERICOID:
-			return true;
-		default:
-			break;
-	}
-	return expression_tree_walker(node, __arrowQualNeedsUnsupportedValue, context);
-}
-
 bool
 arrowFdwGpuScanSupported(RelOptInfo *baserel)
 {
@@ -3327,8 +3300,6 @@ arrowFdwGpuScanSupported(RelOptInfo *baserel)
 
 	if (!baseRelIsArrowFdw(baserel) ||
 		list_length(baserel->fdw_private) != 2)
-		return false;
-	if (__arrowQualNeedsUnsupportedValue((Node *) baserel->baserestrictinfo, NULL))
 		return false;
 	af_states = linitial(baserel->fdw_private);
 	referenced = lsecond(baserel->fdw_private);

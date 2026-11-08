@@ -37,6 +37,13 @@ gcrun_any() { # the same, but the plan need not use the cache
 	if [ "$g" = "$c" ] && [ "${g#*|}" != "" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
 	else echo "  FAIL  $tbl: $label"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
+gcserved() { # table, label, query-with-%T [, settings]: the cache served the query (its scan counter grew), the executor did not read the table
+	tbl=$1; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g"); set_extra=${4:-}
+	b=$(gcinfo $tbl scans)
+	$PSQL -d scantest -c "$GPU set enable_seqscan=off; $set_extra $qry" >/dev/null 2>&1
+	a=$(gcinfo $tbl scans)
+	[ -n "$b" ] && [ -n "$a" ] && [ "$a" -gt "$b" ]; check "$tbl: read from the cache, not from the table ($b -> $a scans): $2" $?
+}
 GCAGGSET="set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off;"
 gcagg() { # table, label, query-with-%T; the plan must use GpuPreAgg over the cache
 	tbl=$1; label=$2; qry=$(printf '%s' "$3" | sed "s/%T/$tbl/g")
@@ -117,9 +124,11 @@ for t in gc1 gc2; do
 	gcrun $t "24 computed columns (32 registers)" "select a+1,a+2,a+3,a+4,a+5,a+6,a+7,a+8,a+9,a+10,a+11,a+12, b-1,b-2,b-3,b-4,b-5,b-6,b-7,b-8,b-9,b-10,b-11,b-12 from %T where a > 9500"
 	gcrun $t "no row qualifies" "select id from %T where a > 30000"
 	gcrun $t "every row qualifies" "select id, a from %T where id > 0 or id <= 0"
-	echo "  -- expressions the GPU cannot take from the cache read the table"
-	gcrun_any $t "numeric in a qual" "select id, n from %T where n > 50"
-	gcrun_any $t "numeric in the projection" "select id, n * 2 from %T where a = 5"
+	echo "  -- A12: numerics are read from the cache (they used to make the executor read the table)"
+	gcrun $t "numeric in a qual" "select id, n from %T where n > 50"
+	gcserved $t "numeric in a qual" "select id, n from %T where n > 50"
+	gcrun $t "numeric in the projection" "select id, n * 2 from %T where a = 5"
+	gcserved $t "numeric in the projection" "select id, n * 2 from %T where a = 5"
 	gcrun $t "float8 qual" "select id, x from %T where x > 1000"
 	gcrun $t "float8 arithmetic and a cast" "select id, x * 2 + 1, x::int8 from %T where x < 500 and a = 7"
 	gcrun $t "float8 math functions (round, ceil, floor, trunc, sign, sqrt of abs)" "select id, round(x), ceil(x), floor(x), trunc(x), sign(x), sqrt(abs(x)) from %T where a = 7"
@@ -390,6 +399,60 @@ sql "create trigger gc_sync after insert or update or delete on gcw for each row
 sql "insert into gcw select i, i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i,i, repeat('t', i % 300) from generate_series(1, 5000) i"
 sql "analyze gcw"
 gcrun gcw "36 columns, a text column and quals on the last ones" "select id, a35, t from %T where a35 > 4990 or length(t) = 0"
+
+# A12: numeric and jsonb columns are read from the cache, and a value the kernel cannot decide (a numeric beyond 64 bits,
+# NaN, a number in a jsonb document that is no int64, a float4 result that underflows) makes the backend re-evaluate the row
+# from a heap tuple built from the cache slot. The plan reads the cache ("GPU Cache:"), the executor must not fall back to
+# the table, and the answer is the heap's.
+echo "GPU-Cache: numeric, jsonb and float4 values the device cannot decide (A12)"
+GC9N=${GC9N:-30000}
+sql "create table gc9 (id int4, b int4, d float4, n numeric(18,3), nn numeric, j jsonb, f text)"
+sql "create trigger gc_sync after insert or update or delete on gc9 for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=$((GC9N * 3))')"
+sql "insert into gc9 select i, (i * 31) % 1000,
+	case when i % 7 = 0 then 1e-40::float4 when i % 11 = 0 then 1e-30::float4 else (((i * 17) % 10000) / 7.0)::float4 end,
+	case when i % 9 = 0 then null else ((i % 5000) / 8.0)::numeric(18,3) end,
+	case when i % 101 = 0 then 'NaN'::numeric when i % 53 = 0 then 1e30::numeric + i when i % 47 = 0 then null else (i / 8.0)::numeric end,
+	case when i % 61 = 0 then null when i % 29 = 0 then jsonb_build_object('a', 1e30::numeric + i, 'k', 'x' || (i % 5))
+	     else jsonb_build_object('a', i, 'k', 'x' || (i % 5), 'o', jsonb_build_object('z', i % 3)) end,
+	repeat(chr(97 + i % 26), (i % 40)::int)
+	from generate_series(1, $GC9N) i"
+sql "update gc9 set nn = nn * 3 where id % 5 = 0 and nn is not null"
+sql "delete from gc9 where id % 997 = 0"
+sql "analyze gc9"
+gck_rows() { # table, query-with-%T -> rows the backend re-evaluated (EXPLAIN ANALYZE: "Fallback-stats: depth[0]=N")
+	r=$($PSQL -d scantest -c "$GPU set enable_seqscan=off; explain (analyze, costs off) $(printf '%s' "$2" | sed "s/%T/$1/g")" | sed -n 's/.*depth\[0\]=\([0-9]*\).*/\1/p' | head -1)
+	echo "${r:-0}"
+}
+gck() { # table, label, query-with-%T: scan through the cache, served by it, rows handed back to the backend
+	gcrun "$1" "$2" "$3"; gcserved "$1" "$2" "$3"
+	n=$(gck_rows "$1" "$3")
+	[ "$n" -gt 0 ]; check "$1: the GPU handed rows back to the backend ($n rechecked): $2" $?
+}
+gck gc9 "numeric qual (NaN, beyond 64 bits)" "select id, nn from %T where nn > 100"
+gck gc9 "numeric arithmetic in a qual" "select id from %T where nn * 2 > 1000 and nn / 3 < 1000000"
+gck gc9 "numeric arithmetic in the projection" "select id, nn * 2, nn / 3 from %T where id % 3 = 0"
+gcrun gc9 "numeric(18,3) qual, NULLs" "select id, n from %T where n > 100 or n is null"
+gcserved gc9 "numeric(18,3) qual, NULLs" "select id, n from %T where n > 100 or n is null"
+gck gc9 "jsonb: number of a document that is no int64" "select id from %T where (j->>'a')::numeric > 100"
+gcrun gc9 "jsonb: key, containment and path" "select id, j from %T where j ? 'o' and j @> '{\"k\": \"x2\"}' and (j->'o'->>'z')::int = 1"
+gcserved gc9 "jsonb: key, containment and path" "select id, j from %T where j ? 'o' and j @> '{\"k\": \"x2\"}' and (j->'o'->>'z')::int = 1"
+gck gc9 "float4 underflow in a qual" "select id, d from %T where d > 0.1::float4 and d / 1e38::float4 > 0::float4"
+gck gc9 "float4 denormal operands in a qual" "select id from %T where d * 2::float4 > 0::float4 and d < 1::float4"
+gcrun gc9 "text qual next to a numeric one" "select id, f from %T where f like 'a%' and nn > 1000"
+gcagg gc9 "aggregate over a numeric qual" "select count(*), sum(n), max(id) from %T where nn > 100"
+gcserved gc9 "aggregate over a numeric qual" "select count(*), sum(n), max(id) from %T where nn > 100" "$GCAGGSET"
+gcagg gc9 "GROUP BY, numeric qual" "select b % 7 as k, count(*), sum(n) from %T where nn > 100 group by 1 order by 1"
+gcagg gc9 "float4 underflow qual" "select count(*), sum(b), min(id) from %T where d > 0.1::float4 and d / 1e38::float4 > 0::float4"
+gcagg gc9 "jsonb qual and numeric qual" "select count(*), sum(b) from %T where (j->>'a')::numeric > 100 and nn > 100"
+# a numeric is not computed inside a join program (plan A6 "known gaps"): the plan may stay on the CPU, the answer must not change
+gcrun_any gc9 "join with a numeric qual on the cached side" "select t.id, d.grp from gc9 t join sd d on t.b = d.k where t.nn > 100" "$JOINSET"
+gcrun_any gc9 "join aggregate with a numeric qual on the cached side" "select count(*), sum(d.grp), sum(t.b) from gc9 t join sd d on t.b = d.k where t.nn > 100" "$JOINSET"
+gcrun_any gc9 "GROUP BY with many groups, numeric qual" "select id % 4000 as k, count(*), sum(b) from %T where nn > 100 group by 1 order by 1" "$GCAGGSET" 
+gcjoin gc9 "LEFT join, float4 underflow in the ON qual" "select count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and t.d > 0.1::float4 and t.d / 1e38::float4 > 0::float4"
+# a session's own changes: huge numerics and NaN written in the transaction
+txncmp "gc9: huge numerics inserted and updated in a transaction (rollback)" rollback "update gc9 set nn = 1e40::numeric where id between 1 and 50; insert into gc9 values (900001, 5, 1e-40, 1.5, 'Infinity'::numeric, '{\"a\": 1e30}', 'z');" "select id, nn from gc9 where nn > 99999999 or id = 900001"
+txncmp "gc9: huge numerics inserted and updated in a transaction (commit)" commit "update gc9 set nn = 1e40::numeric where id between 1 and 50; insert into gc9 values (900001, 5, 1e-40, 1.5, 'Infinity'::numeric, '{\"a\": 1e30}', 'z');" "select id, nn from gc9 where nn > 99999999 or id = 900001"
+gck gc9 "after the commit" "select id, nn from %T where nn > 99999999 or nn > 5000000"
 
 echo "GPU-Cache: a large table"
 sql "create table gcbig ($GCDEF)"

@@ -170,6 +170,11 @@ for t in a1 a2 a3 p1; do
 	ajagg $t "RIGHT JOIN, nothing matches" "select count(*), count(t.i), sum(d.grp), min(d.pay) from %T t right join %D d on t.b = d.k + 1000000"
 	ajagg $t "FULL JOIN" "select count(*), count(t.i), count(d.k), sum(d.grp), sum(t.a) from %T t full join %D d on t.b = d.k and t.a > 9000"
 	ajagg $t "RIGHT JOIN, GROUP BY a key of the inner side" "select d.grp, count(*), count(t.i), sum(t.a) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	# A14: float4 results that are denormal are decided by the backend (qual only: flagged; projection: scout pass)
+	ajagg $t "recheck: float4 underflow in the scan qual" "select count(*), sum(d.grp), sum(t.a) from %T t join %D d on t.b = d.k where t.d / 1e38::float4 > 0::float4"
+	ajagg $t "recheck: float4 underflow in the scan qual, GROUP BY" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k where t.d / 1e38::float4 > 0::float4 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	ajagg $t "recheck: float4 underflow in the projection, GROUP BY" "select d.grp, count(*), sum((t.d / 1e38::float4 * 1e38::float4)::int) from %T t join %D d on t.b = d.k where t.d < 'Infinity'::float4 and t.d > '-Infinity'::float4 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
+	ajagg $t "recheck: LEFT JOIN, float4 underflow in the ON qual" "select count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and t.d / 1e38::float4 > 0::float4"
 	adim=ad; adim2=ad2
 	ajagg $t "Arrow dimension table: GROUP BY" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000;"
 	adim=sd; adim2=sd2
@@ -177,6 +182,55 @@ done
 ajagg a1 "parallel workers" "select count(*), sum(t.a), max(d.grp) from %T t join %D d on t.b = d.k" "$APAR"
 ajagg a1 "GROUP BY, parallel workers" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1" "$APAR set pg_strom.gpupreagg_max_groups=1000;"
 ajagg p1 "GROUP BY, parallel workers (Parquet)" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1" "$APAR set pg_strom.gpupreagg_max_groups=1000;"
+
+# A12: rows the device cannot decide on an Arrow / Parquet source. A numeric qual used to keep the whole table on the CPU
+# ("numeric in Arrow expressions"); now the VM computes it and hands back the rows it cannot decide (a numeric beyond 64
+# bits, a division by zero, a float4 result that underflows): the service names such a row by (record batch, row) and the
+# backend re-evaluates it from the file. The answer must be the CPU's, the plan must be the GPU's, and EXPLAIN ANALYZE must
+# show rows handed back ("Fallback-stats").
+echo "arrow: rows the device cannot decide (A12: float4 underflow, numerics beyond 64 bits, division by zero)"
+ark_rows() { # table, settings, query-with-%T -> rows re-evaluated by the backend (EXPLAIN ANALYZE's "Fallback-stats: depth[0]=N")
+	r=$($PSQL -d scantest -c "$GPU $2 explain (analyze, costs off) $(printf '%s' "$3" | sed "s/%T/$1/g; s/%D/sd/g")" | sed -n 's/.*depth\[0\]=\([0-9]*\).*/\1/p' | head -1)
+	echo "${r:-0}"
+}
+ark_check() { # table, settings, query-with-%T, label: the backend must have re-evaluated at least one row
+	n=$(ark_rows "$1" "$2" "$3")
+	[ "$n" -gt 0 ]; check "$1: the GPU handed rows back to the backend ($n rechecked): $4" $?
+}
+# (a CASE with a numeric result is not pushed down, so the overflowing product stands alone: |c| above about 2.1e6 needs more than 64 bits)
+ARK_NUM="(c::numeric * c::numeric * c::numeric)"
+ARK_NUMT="(t.c::numeric * t.c::numeric * t.c::numeric)"
+for t in a1 p1; do
+	echo "table $t"
+	run $t "recheck: float4 underflow in a qual" "select i, d from %T where d / 1e38::float4 > 0::float4"
+	run $t "recheck: numeric beyond 64 bits in a qual" "select i, a from %T where $ARK_NUM > 5"
+	run $t "recheck: numeric division by zero in a qual" "select i from %T where i % 50 <> 0 and b::numeric / (i % 50)::numeric > 3"
+	run $t "recheck: numerics in the projection" "select i, a::numeric * 100000 / 7, case when i % 50 = 0 then c::numeric * c::numeric * c::numeric else a::numeric end from %T where a > 0"
+	aagg $t "recheck: ungrouped aggregate, numeric qual" "select count(*), sum(a), max(i) from %T where $ARK_NUM > 5"
+	aagg $t "recheck: ungrouped aggregate, float4 underflow qual" "select count(*), sum(b), min(i) from %T where d / 1e38::float4 > 0::float4"
+	aagg_any $t "recheck: GROUP BY, numeric qual" "select a % 7, count(*), sum(b) from %T where $ARK_NUM > 5 group by 1 order by 1"
+	aagg_any $t "recheck: GROUP BY, float4 underflow qual" "select a % 7, count(*), sum(b) from %T where d / 1e38::float4 > 0::float4 group by 1 order by 1"
+	aagg_any $t "recheck: numeric argument of an aggregate" "select count(*), sum(a::numeric * 3), sum(b) from %T where a > 0 and i % 50 <> 0 and b::numeric / (i % 50)::numeric > 3"
+done
+for t in a1 p1; do
+	ark_check $t "" "select i, a from %T where $ARK_NUM > 5" "numeric beyond 64 bits (scan)"
+	ark_check $t "" "select i from %T where i % 50 <> 0 and b::numeric / (i % 50)::numeric > 3" "numeric division by zero (scan)"
+	ark_check $t "" "select i, d from %T where d / 1e38::float4 > 0::float4" "float4 underflow (scan)"
+	ark_check $t "$AGGSET" "select count(*), sum(a), max(i) from %T where $ARK_NUM > 5" "numeric beyond 64 bits (aggregate)"
+	ark_check $t "$AGGSET" "select a % 7, count(*), sum(b) from %T where d / 1e38::float4 > 0::float4 group by 1" "float4 underflow (GROUP BY)"
+	adim=sd; adim2=sd2
+	# a numeric is not computed inside a join program (plan A6 "known gaps"): the plan may stay on the CPU, the answer must not change
+	ARROWANY=1
+	ajoin $t "recheck: numeric qual below the join" "select t.i, d.grp from %T t join %D d on t.b = d.k where $ARK_NUMT > 5"
+	ajagg $t "recheck: numeric qual below the join, aggregate" "select count(*), sum(d.grp), sum(t.a) from %T t join %D d on t.b = d.k where $ARK_NUMT > 5"
+	ajagg $t "recheck: LEFT JOIN, numeric ON qual, aggregate" "select count(*), count(d.k), sum(d.grp) from %T t left join %D d on t.b = d.k and $ARK_NUMT > 5"
+	ARROWANY=0
+	ajoin $t "recheck: float4 underflow qual below the join" "select t.i, d.grp from %T t join %D d on t.b = d.k where t.d / 1e38::float4 > 0::float4"
+	ajoin $t "recheck: LEFT JOIN, float4 underflow ON qual" "select t.i, d.grp from %T t left join %D d on t.b = d.k and t.d / 1e38::float4 > 0::float4 where t.i < 60000"
+	ark_check $t "$AJOINSET" "select t.i, d.grp from %T t join %D d on t.b = d.k where t.d / 1e38::float4 > 0::float4" "float4 underflow (join)"
+done
+# many groups (the overflow list of the GROUP BY kernels) next to a numeric qual
+aagg_any a1 "recheck: GROUP BY with many groups, numeric qual" "select i % 4000 as k, count(*), sum(a) from %T where $ARK_NUM > 5 group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=100000;"
 
 echo "arrow: value types (timestamps of every unit, dates, times, strings)"
 GPUQ="$GPU $AGGSET"

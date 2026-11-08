@@ -28,16 +28,7 @@ typedef struct scan_proj_attr
 	int			comp_numeric;		/* SCAN_PROJ_COMP: a numeric { unscaled, scale }; the NULL word carries the scale */
 } scan_proj_attr;
 
-/*
- * The optional instruction groups of the interpreter (kernels_vm/scan_common.slang compiles each out with -DVM_NO_<group>).
- * A program that uses none of them runs on the "lite" join kernels, whose pipelines compile in a fraction of the time
- * (Metal needs minutes for the full join kernel; see the Makefile).
- */
-#define SCAN_FEAT_NUM	0x1			/* numeric */
-#define SCAN_FEAT_JSON	0x2			/* jsonb */
-#define SCAN_FEAT_F8	0x4			/* float8 (software binary64) */
-#define SCAN_FEAT_GEOM	0x8			/* geometry */
-#define SCAN_FEAT_ALL	0xf
+/* SCAN_FEAT_* (the optional instruction groups) and the kernel tiers are in scan_caps.h */
 
 typedef struct scan_prog
 {
@@ -47,7 +38,16 @@ typedef struct scan_prog
 	scan_proj_attr *attrs;
 	uint32_t		ncomp;			/* number of computed values per matching row */
 	int				nregs;			/* registers the program needs (selects the kernel variant) */
-	uint32_t		feat;			/* SCAN_FEAT_* groups the instructions use (0: the lite kernels will do) */
+	uint32_t		feat;			/* SCAN_FEAT_* groups the instructions use (0: the lite kernels will do; without GEOM: the "nogeom" kernels) */
+	/*
+	 * Join programs (A14): which parts of the program can answer "the backend must decide" (SOP_RECHECK_CODE,
+	 * or an unreadable inner value). rck_outer: the scan quals of the outer row (the row has contributed
+	 * nothing yet, so the aggregating kernel only flags it); rck_walk: the join walk or the projection (an
+	 * accumulator cannot take back what the row's earlier matches added, so the service first runs a scout
+	 * pass that names those rows and the aggregating pass skips them).
+	 */
+	int				rck_outer;
+	int				rck_walk;
 	int				max_src_resno;	/* highest source column copied as is */
 	/* join (GpuJoin) */
 	int				join_mode;

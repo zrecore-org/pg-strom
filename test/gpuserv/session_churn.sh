@@ -35,6 +35,7 @@ CONF
 sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
 trap stop EXIT INT TERM
 export PGSTROM_GPUSERV_CACHE_DIR=$ROOT/speccache
+export PGSTROM_GPUSERV_PIPELINE_CACHE_DIR=${PGSTROM_GPUSERV_PIPELINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pgstrom}   # the persisted pipeline cache is shared with prewarm_kernels.sh, not per test
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; exit 1; }
 n=0; while [ $n -lt 40 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break

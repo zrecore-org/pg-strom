@@ -123,8 +123,30 @@ void arrow_load_col(uint c, uint desc, uint row, inout Reg regs[VM_MAX_REGS])
             uint hdr = ((ar_ld8(sbase) & 1u) != 0u) ? 1u : 4u;     // a 1-byte (short) or a 4-byte header
             if (slen < hdr)
                 return;
+            if (vt == SOP_VT_NUM)
+            {
+                // A12: a cached numeric (the datum is detoasted, so no compressed or external form): decode it to
+                // { unscaled, scale }; NaN / Infinity and values beyond 64 bits are evaluated by the backend
+                int64_t nv;
+                uint    nsc;
+                if (hdr == 1u && ar_ld8(sbase) == 1u)
+                    g_recheck = 1;
+                else if (hdr == 4u && (ar_ld8(sbase) & 3u) == 2u)
+                    g_recheck = 1;
+                else if (num_decode(sbase + hdr, slen - hdr, nv, nsc))
+                {
+                    regs[slot].v = nv;
+                    regs[slot].sc = nsc;
+                    regs[slot].isnull = 0;
+                }
+                else
+                    g_recheck = 1;
+                return;
+            }
             regs[slot].v = int64_t(uint64_t(sbase + hdr) | (uint64_t(slen - hdr) << 32));
             regs[slot].isnull = 0;
+            if (vt == SOP_VT_JSON)
+                regs[slot].sc = 5u;                   // jsonb: the register holds a container
             return;
         }
         if (mode == 4)
@@ -219,6 +241,8 @@ bool arrow_eval_row(uint row, uint epage, uint elp, uint coloff, uint ncols, uin
         regs[i].sc = 0;
     }
     arrow_load_row(row, coloff, ncols, regs);
+    if (g_recheck != 0)
+        return false;                               // A12: a column value the kernel cannot read (a cached numeric)
 
     bool hit = true;
     uint err = 0;

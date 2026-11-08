@@ -658,19 +658,35 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 /* ------------------------------------------------------------------------ */
 /*
  * One VkPipelineCache per context, seeded from
- * <$PGSTROM_GPUSERV_CACHE_DIR | $XDG_CACHE_HOME/pgstrom | ~/.cache/pgstrom>/pipeline-<vendor>-<device>-<uuid>.bin
+ * <$PGSTROM_GPUSERV_PIPELINE_CACHE_DIR | $PGSTROM_GPUSERV_CACHE_DIR | $XDG_CACHE_HOME/pgstrom | ~/.cache/pgstrom>/pipeline-<vendor>-<device>-<uuid>.bin
+ * (the interpreter kernels, a bounded set) and pipeline-spec-<...>.bin (the specialized kernels, which pile up and are dropped when
+ * the file passes its size limit), so that the interpreter pipelines survive the churn of the specialized ones
  * and written back (temp file + rename) after a pipeline creation that grew it.
  * PGSTROM_GPUSERV_PIPELINE_CACHE=off disables it; PGSTROM_GPUSERV_PIPELINE_LOG=1 logs the creation times.
  */
 static pthread_mutex_t pcache_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static double
+pcache_now(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+#define PCACHE_LOG(...) \
+	do { if (getenv("PGSTROM_GPUSERV_PIPELINE_LOG")) fprintf(stderr, __VA_ARGS__); } while (0)
+
 static int
 pcache_dir(char *buf, size_t len)
 {
-	const char *dir = getenv("PGSTROM_GPUSERV_CACHE_DIR");
+	const char *dir = getenv("PGSTROM_GPUSERV_PIPELINE_CACHE_DIR");
 	const char *xdg = getenv("XDG_CACHE_HOME");
 	const char *home = getenv("HOME");
 
+	if (!dir || !dir[0])
+		dir = getenv("PGSTROM_GPUSERV_CACHE_DIR");
 	if (dir && !strcmp(dir, "none"))
 		return -1;
 	if (dir && dir[0])
@@ -699,12 +715,13 @@ pcache_dir(char *buf, size_t len)
 
 /* the cache only grows (one entry per kernel version ever compiled): above this size the file is deleted at the next start */
 static size_t
-pcache_max_bytes(void)
+pcache_max_bytes(int spec)
 {
-	const char *e = getenv("PGSTROM_GPUSERV_PIPELINE_CACHE_MAX_MB");
-	long		mb = (e && e[0]) ? atol(e) : 768;
+	const char *e = getenv(spec ? "PGSTROM_GPUSERV_PIPELINE_CACHE_SPEC_MAX_MB" : "PGSTROM_GPUSERV_PIPELINE_CACHE_MAX_MB");
+	long		dflt = spec ? 512 : 1536;
+	long		mb = (e && e[0]) ? atol(e) : dflt;
 
-	return (size_t) (mb > 0 ? mb : 768) << 20;
+	return (size_t) (mb > 0 ? mb : dflt) << 20;
 }
 
 /*
@@ -750,38 +767,36 @@ pcache_header_ok(const void *data, size_t size, const VkPhysicalDeviceProperties
 		memcmp((const char *) data + 16, props->pipelineCacheUUID, VK_UUID_SIZE) == 0;
 }
 
+/* open one persisted cache (spec: the specialized kernels' file) into *pc; *saved is the size of its data, path its file */
 static void
-pcache_open(gpu_vk_ctx *ctx)
+pcache_open_one(gpu_vk_ctx *ctx, const VkPhysicalDeviceProperties *props, const char *dir, int spec,
+				VkPipelineCache *pc, size_t *saved, char *path_out, size_t path_len)
 {
-	VkPhysicalDeviceProperties props;
 	VkPipelineCacheCreateInfo ci;
-	const char *off = getenv("PGSTROM_GPUSERV_PIPELINE_CACHE");
-	char		dir[512];
 	void	   *data = NULL;
 	size_t		size = 0;
+	double		t_open = pcache_now(), t_read = 0;
 
-	ctx->pcache = VK_NULL_HANDLE;
-	ctx->pcache_path[0] = '\0';
-	if (off && (!strcmp(off, "off") || !strcmp(off, "0") || !strcmp(off, "none")))
-		return;
-	vkGetPhysicalDeviceProperties(ctx->phys, &props);
-	if (pcache_dir(dir, sizeof(dir)) == 0)
+	*pc = VK_NULL_HANDLE;
+	*saved = 0;
+	path_out[0] = '\0';
+	if (dir)
 	{
 		char		path[800];
-		const unsigned char *u = props.pipelineCacheUUID;
+		const unsigned char *u = props->pipelineCacheUUID;
 		FILE	   *fp;
 
-		snprintf(path, sizeof(path), "%s/pipeline-%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x.bin",
-				 dir, props.vendorID, props.deviceID,
+		snprintf(path, sizeof(path), "%s/pipeline-%s%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x.bin",
+				 dir, spec ? "spec-" : "", props->vendorID, props->deviceID,
 				 u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
 				 u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
-		snprintf(ctx->pcache_path, sizeof(ctx->pcache_path), "%s", path);
+		snprintf(path_out, path_len, "%s", path);
 		fp = fopen(path, "rb");
 		if (fp)
 		{
 			struct stat st;
 
-			if (fstat(fileno(fp), &st) == 0 && (size_t) st.st_size > pcache_max_bytes())
+			if (fstat(fileno(fp), &st) == 0 && (size_t) st.st_size > pcache_max_bytes(spec))
 				unlink(path);				/* grown past the limit (stale kernels): start over */
 			else if (fstat(fileno(fp), &st) == 0 && st.st_size > 0)
 			{
@@ -793,7 +808,7 @@ pcache_open(gpu_vk_ctx *ctx)
 					(memcpy(fr, buf, sizeof(fr)), 1) &&
 					fr[0] == PCACHE_MAGIC && fr[1] == (uint64_t) st.st_size - PCACHE_FRAME &&
 					fr[2] == pcache_hash(buf + PCACHE_FRAME, (size_t) st.st_size - PCACHE_FRAME) &&
-					pcache_header_ok(buf + PCACHE_FRAME, (size_t) st.st_size - PCACHE_FRAME, &props))
+					pcache_header_ok(buf + PCACHE_FRAME, (size_t) st.st_size - PCACHE_FRAME, props))
 				{
 					size = (size_t) st.st_size - PCACHE_FRAME;
 					memmove(buf, buf + PCACHE_FRAME, size);
@@ -805,53 +820,82 @@ pcache_open(gpu_vk_ctx *ctx)
 			fclose(fp);
 		}
 	}
+	t_read = pcache_now();
 	memset(&ci, 0, sizeof(ci));
 	ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 	ci.initialDataSize = size;
 	ci.pInitialData = data;
-	if (vkCreatePipelineCache(ctx->dev, &ci, NULL, &ctx->pcache) != VK_SUCCESS)
+	if (vkCreatePipelineCache(ctx->dev, &ci, NULL, pc) != VK_SUCCESS)
 	{
-		ctx->pcache = VK_NULL_HANDLE;
+		*pc = VK_NULL_HANDLE;
 		if (size > 0)
 		{
 			/* the driver refused the data (another driver build): start empty, the file is replaced on the first save */
 			ci.initialDataSize = 0;
 			ci.pInitialData = NULL;
 			size = 0;
-			if (vkCreatePipelineCache(ctx->dev, &ci, NULL, &ctx->pcache) != VK_SUCCESS)
-				ctx->pcache = VK_NULL_HANDLE;
+			if (vkCreatePipelineCache(ctx->dev, &ci, NULL, pc) != VK_SUCCESS)
+				*pc = VK_NULL_HANDLE;
 		}
 	}
-	if (ctx->pcache)
-		ctx->pcache_saved = size;
+	if (*pc)
+		*saved = size;
+	PCACHE_LOG("gpuserv: pipeline cache%s opened: %zu bytes, read+check %.3f s, vkCreatePipelineCache %.3f s\n",
+			   spec ? " (specialized)" : "", size, t_read - t_open, pcache_now() - t_read);
 	free(data);
+}
+
+static void
+pcache_open(gpu_vk_ctx *ctx)
+{
+	VkPhysicalDeviceProperties props;
+	const char *off = getenv("PGSTROM_GPUSERV_PIPELINE_CACHE");
+	char		dir[512];
+	int			have_dir;
+
+	ctx->pcache = ctx->pcache_sp = VK_NULL_HANDLE;
+	ctx->pcache_path[0] = ctx->pcache_sp_path[0] = '\0';
+	ctx->pcache_saved = ctx->pcache_sp_saved = 0;
+	if (off && (!strcmp(off, "off") || !strcmp(off, "0") || !strcmp(off, "none")))
+		return;
+	vkGetPhysicalDeviceProperties(ctx->phys, &props);
+	have_dir = (pcache_dir(dir, sizeof(dir)) == 0);
+	pcache_open_one(ctx, &props, have_dir ? dir : NULL, 0, &ctx->pcache, &ctx->pcache_saved,
+					ctx->pcache_path, sizeof(ctx->pcache_path));
+	pcache_open_one(ctx, &props, have_dir ? dir : NULL, 1, &ctx->pcache_sp, &ctx->pcache_sp_saved,
+					ctx->pcache_sp_path, sizeof(ctx->pcache_sp_path));
 }
 
 /* write the cache back if it grew; best effort */
 static void
-pcache_save(gpu_vk_ctx *ctx)
+pcache_save(gpu_vk_ctx *ctx, int spec)
 {
+	VkPipelineCache pc = spec ? ctx->pcache_sp : ctx->pcache;
+	size_t	   *saved = spec ? &ctx->pcache_sp_saved : &ctx->pcache_saved;
+	const char *path = spec ? ctx->pcache_sp_path : ctx->pcache_path;
 	size_t		size = 0;
 	void	   *data;
 	char		tmp[sizeof(ctx->pcache_path) + 32];
 	int			fd;
 	int			ok;
 
-	if (!ctx->pcache || !ctx->pcache_path[0])
+	if (!pc || !path[0])
 		return;
+	double		t_save = pcache_now();
+
 	pthread_mutex_lock(&pcache_lock);
-	if (vkGetPipelineCacheData(ctx->dev, ctx->pcache, &size, NULL) != VK_SUCCESS ||
-		size == 0 || size == ctx->pcache_saved || size > pcache_max_bytes())
+	if (vkGetPipelineCacheData(ctx->dev, pc, &size, NULL) != VK_SUCCESS ||
+		size == 0 || size == *saved || size > pcache_max_bytes(spec))
 		goto out;
 	data = malloc(size);
 	if (!data)
 		goto out;
-	if (vkGetPipelineCacheData(ctx->dev, ctx->pcache, &size, data) != VK_SUCCESS)
+	if (vkGetPipelineCacheData(ctx->dev, pc, &size, data) != VK_SUCCESS)
 	{
 		free(data);
 		goto out;
 	}
-	snprintf(tmp, sizeof(tmp), "%s.%d.tmp", ctx->pcache_path, (int) getpid());
+	snprintf(tmp, sizeof(tmp), "%s.%d.tmp", path, (int) getpid());
 	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	ok = 0;
 	if (fd >= 0)
@@ -862,12 +906,13 @@ pcache_save(gpu_vk_ctx *ctx)
 			  write(fd, data, size) == (ssize_t) size);
 		if (close(fd) != 0)
 			ok = 0;
-		if (ok && rename(tmp, ctx->pcache_path) == 0)
-			ctx->pcache_saved = size;
+		if (ok && rename(tmp, path) == 0)
+			*saved = size;
 		else
 			unlink(tmp);
 	}
 	free(data);
+	PCACHE_LOG("gpuserv: pipeline cache%s saved: %zu bytes in %.3f s\n", spec ? " (specialized)" : "", size, pcache_now() - t_save);
 out:
 	pthread_mutex_unlock(&pcache_lock);
 }
@@ -883,6 +928,8 @@ gpu_vk_close(gpu_vk_ctx *ctx)
 			vkDestroyFence(ctx->dev, ctx->fence, NULL);
 		if (ctx->pcache)
 			vkDestroyPipelineCache(ctx->dev, ctx->pcache, NULL);
+		if (ctx->pcache_sp)
+			vkDestroyPipelineCache(ctx->dev, ctx->pcache_sp, NULL);
 		if (ctx->cmd_pool)
 			vkDestroyCommandPool(ctx->dev, ctx->cmd_pool, NULL);
 		vkDestroyDevice(ctx->dev, NULL);
@@ -891,6 +938,7 @@ gpu_vk_close(gpu_vk_ctx *ctx)
 		vkDestroyInstance(ctx->instance, NULL);
 	ctx->fence = VK_NULL_HANDLE;
 	ctx->pcache = VK_NULL_HANDLE;
+	ctx->pcache_sp = VK_NULL_HANDLE;
 	ctx->cmd_pool = VK_NULL_HANDLE;
 	ctx->dev = VK_NULL_HANDLE;
 	ctx->instance = VK_NULL_HANDLE;
@@ -1144,9 +1192,9 @@ gpu_vk_buffer_destroy(gpu_vk_ctx *ctx, gpu_vk_buffer *b)
 /* ------------------------------------------------------------------------ */
 /* pipeline / dispatch                                                       */
 /* ------------------------------------------------------------------------ */
-int
-gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
-					   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size, char *err, size_t errlen)
+static int
+pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+				size_t spirv_bytes, uint32_t nbind, uint32_t pc_size, char *err, size_t errlen, int spec)
 {
 	VkShaderModuleCreateInfo smi;
 	VkDescriptorSetLayoutBinding *binds = NULL;
@@ -1247,15 +1295,15 @@ gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv
 		struct timespec t0, t1;
 
 		clock_gettime(CLOCK_MONOTONIC, &t0);
-		rc = vkCreateComputePipelines(ctx->dev, ctx->pcache, 1, &cpi, NULL, &p->pipeline);
+		rc = vkCreateComputePipelines(ctx->dev, spec ? ctx->pcache_sp : ctx->pcache, 1, &cpi, NULL, &p->pipeline);
 		clock_gettime(CLOCK_MONOTONIC, &t1);
 		if (getenv("PGSTROM_GPUSERV_PIPELINE_LOG"))
 			fprintf(stderr, "gpuserv: pipeline %zu bytes SPIR-V created in %.3f s (cache %s, rc=%d)\n",
 					spirv_bytes, (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9,
-					ctx->pcache ? "on" : "off", (int) rc);
+					(spec ? ctx->pcache_sp : ctx->pcache) ? "on" : "off", (int) rc);
 		/* a pipeline that came out of the cache or compiled in a blink adds nothing worth rewriting the file for */
 		if (rc == VK_SUCCESS && (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 >= 50)
-			pcache_save(ctx);
+			pcache_save(ctx, spec);
 	}
 	if (rc != VK_SUCCESS)
 	{
@@ -1303,6 +1351,21 @@ gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv
 		}
 	}
 	return 0;
+}
+
+int
+gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+						  size_t spirv_bytes, uint32_t nbind, uint32_t pc_size, char *err, size_t errlen)
+{
+	return pipeline_create(ctx, p, spirv, spirv_bytes, nbind, pc_size, err, errlen, 0);
+}
+
+/* the same for a specialized kernel: its compiled form goes to the specialized kernels' cache file */
+int
+gpu_vk_pipeline_create_spec(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+							size_t spirv_bytes, uint32_t nbind, uint32_t pc_size, char *err, size_t errlen)
+{
+	return pipeline_create(ctx, p, spirv, spirv_bytes, nbind, pc_size, err, errlen, 1);
 }
 
 int

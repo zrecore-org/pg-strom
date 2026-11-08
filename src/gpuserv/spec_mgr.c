@@ -629,7 +629,7 @@ build_entry(spec_mgr *m, spec_entry *e)
 	}
 	t1 = now_ms();
 	perr[0] = '\0';
-	if (gpu_vk_pipeline_create_ex(m->vk, &e->pipe, spv, len, nbind, pcs, perr, sizeof(perr)) != 0)
+	if (gpu_vk_pipeline_create_spec(m->vk, &e->pipe, spv, len, nbind, pcs, perr, sizeof(perr)) != 0)
 	{
 		snprintf(e->err, sizeof(e->err), "pipeline: %s", perr);
 		free(spv);

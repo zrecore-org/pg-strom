@@ -6032,8 +6032,8 @@ pgstrom_numeric_static_dscale(Node *node)
  * pgstrom_expr_has_geometry_func
  *
  * A11: does the expression call a PostGIS function that the Vulkan VM implements (&&, ~, @, st_contains ...)? Those
- * predicates hand rows back to the backend, which an Arrow_Fdw table and a GPU-Cache cannot do (see
- * vulkan_geom_source_ok()); the scan path asks this before it accepts a qualifier for such a relation, because the
+ * predicates hand rows back to the backend; since A12 every source can take them back (see
+ * pgstrom_source_can_recheck()), and the scan path asks this before it accepts a qualifier for a relation, because the
  * check pgstrom_xpu_expression() makes has no PlannerInfo.
  */
 static bool

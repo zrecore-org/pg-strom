@@ -15,7 +15,8 @@
  *                           holds the complete datum (header included, detoasted by the backend) and is
  *                           compacted when it fills
  *                 Every type is stored, whether the GPU can compute with it or not: the kernels read the
- *                 columns the program names (bool, integers, date/time, float4, text), and the result
+ *                 columns the program names (bool, integers, date/time, float4, float8, text, geometry, numeric
+ *                 and jsonb: the last three as a string register or decoded from the datum), and the result
  *                 tuples copy the others as they are.
  *   visibility    a bitmap 'vis': bit = the version's xmin is committed. The scan kernels skip rows whose
  *                 bit is 0. A version of a transaction in flight has its transaction id as xmin (or xmax)
@@ -1302,6 +1303,8 @@ gcache_build_table(const gcache *g, const scan_prog *prog, uint32_t *tab, char *
 				t[3] = 8;
 				break;
 			case SOP_VT_STR:
+			case SOP_VT_JSON:
+			case SOP_VT_NUM:
 				if (col->kind != GCK_VAR || col->vt != GCVT_STR)
 					goto badtype;
 				t[2] = (uint32_t) col->v_off;

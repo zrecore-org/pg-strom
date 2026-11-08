@@ -24,8 +24,7 @@ static bool					enable_gpuscan = false;		/* GUC */
 /*
  * pgstromPathScansArrowFdw - does the (GpuScan) path read an Arrow_Fdw table?
  *
- * The Vulkan service runs plain scans on Arrow record batches; a join or an aggregation that
- * would be pushed into the same task (GpuJoin, GpuPreAgg) still needs heap pages.
+ * (Unused since A5 part 2: GpuJoin and GpuPreAgg read Arrow record batches as well.)
  */
 bool
 pgstromPathScansArrowFdw(PlannerInfo *root, const CustomPath *cpath)

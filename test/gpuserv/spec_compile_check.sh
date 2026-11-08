@@ -1,6 +1,7 @@
 #!/bin/sh
 # Offline check of the kernel generator: build spec_check, write the generated sources of every kernel kind
-# and compile each with slangc (no GPU, no PostgreSQL, no lock needed):
+# and compile each with slangc (no GPU, no PostgreSQL, no lock needed); first feat_check, which verifies that every geometry
+# opcode sets the geometry bit of the kernel tier selection (scan_caps.c scan_vm_op_feat):
 #
 #   sh test/gpuserv/spec_compile_check.sh [outdir]
 #
@@ -9,6 +10,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 GS=$ROOT/src/gpuserv
 OUT=${1:-/tmp/spec_check_out}
 SLANGC=${SLANGC:-$(command -v slangc || echo "$HOME/tools/slang-2026.20/bin/slangc")}
+make -C "$GS" feat_check >/dev/null && "$GS/feat_check" || { echo "feat_check: failed (an opcode is missing from the kernel tier classification)"; exit 1; }
 make -C "$GS" spec_check >/dev/null || { echo "spec_check: build failed"; exit 1; }
 rm -rf "$OUT"
 "$GS/spec_check" "$OUT" >/dev/null || { echo "spec_check: the generator failed"; exit 1; }

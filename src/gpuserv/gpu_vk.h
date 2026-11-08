@@ -71,6 +71,9 @@ typedef struct gpu_vk_ctx
 	VkPipelineCache		pcache;					/* persisted compiled pipelines, or VK_NULL_HANDLE */
 	size_t				pcache_saved;			/* size of the data last written to pcache_path */
 	char				pcache_path[768];
+	VkPipelineCache		pcache_sp;				/* the same for the specialized kernels (their own file) */
+	size_t				pcache_sp_saved;
+	char				pcache_sp_path[768];
 
 	gpu_vk_devinfo		info;
 	gpu_vk_feat			feat;
@@ -157,6 +160,10 @@ int  gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spi
 int  gpu_vk_pipeline_create_ex(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 							   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size,
 							   char *err, size_t errlen);
+/* a specialized kernel: persisted in the specialized kernels' pipeline cache file, apart from the interpreter's */
+int  gpu_vk_pipeline_create_spec(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
+								 size_t spirv_bytes, uint32_t nbind, uint32_t pc_size,
+								 char *err, size_t errlen);
 void gpu_vk_pipeline_destroy(gpu_vk_ctx *ctx, gpu_vk_pipeline *p);
 
 /*

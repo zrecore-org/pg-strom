@@ -15,6 +15,38 @@ enum {
 	SOP_END
 };
 
+/*
+ * The optional instruction groups of the interpreter (kernels_vm/scan_common.slang compiles each out with -DVM_NO_<group>).
+ * scan_prog.feat is the set of groups a program uses, and it picks one of three kernel tiers (every VM kernel family is built
+ * three times, see the Makefile): "lite" for a program that uses none of them (a fraction of the size, the first pipeline
+ * creation takes a second where Metal needs minutes for the full join kernel), "nogeom" (-DVM_NO_GEOM) for numeric, jsonb and
+ * float8 without geometry (the geometry soft-float code is about 70% of the full kernel), and "full" for geometry.
+ */
+#define SCAN_FEAT_NUM	0x1			/* numeric */
+#define SCAN_FEAT_JSON	0x2			/* jsonb */
+#define SCAN_FEAT_F8	0x4			/* float8 (software binary64) */
+#define SCAN_FEAT_GEOM	0x8			/* geometry */
+#define SCAN_FEAT_ALL	0xf
+
+/* kernel tiers; the index into the engine's pipeline arrays is (register/aggregate variant) + (variants per tier) * tier */
+#define SCAN_TIER_FULL		0
+#define SCAN_TIER_LITE		1
+#define SCAN_TIER_NOGEOM	2
+#define SCAN_NTIERS			3
+
+/* PGSTROM_GPUSERV_TIERS=full: every program runs on the full kernels (what the service did before the tiers; for measurements) */
+extern int scan_tier_full_only;
+
+static inline int
+scan_feat_tier(uint32_t feat)
+{
+	if (scan_tier_full_only)
+		return SCAN_TIER_FULL;
+	if (feat == 0)
+		return SCAN_TIER_LITE;
+	return (feat & SCAN_FEAT_GEOM) ? SCAN_TIER_FULL : SCAN_TIER_NOGEOM;
+}
+
 typedef struct
 {
 	int		cls;			/* 0: unsupported, else SOP_CMPI / SOP_CMPF / SOP_ARITH / ..., or
@@ -25,6 +57,8 @@ typedef struct
 
 scan_func_class scan_vm_classify_func(uint32_t opcode);
 const char *scan_vm_opcode_name(uint32_t opcode);
+/* the optional instruction group of an opcode (SCAN_FEAT_* of scan_prog.h, 0 for the always compiled ones); test/gpuserv feat_check.c */
+uint32_t scan_vm_op_feat(uint32_t op);
 /* A6: see scan_caps.c. Returns SOP_LIKE_*, or -1 if the VM cannot match the pattern */
 int		scan_vm_like_shape(const unsigned char *pat, int plen, unsigned char *lit, int *p_litlen);
 /* true if the VM implements this function opcode */

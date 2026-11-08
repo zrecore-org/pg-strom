@@ -328,6 +328,33 @@ do_prewarm(long device, uint32_t nbind, uint32_t pcsize, char **files, int nfile
 		else
 		{
 			clock_gettime(CLOCK_MONOTONIC, &t1);
+			/*
+			 * An empty dispatch (0 workgroups): measured 2026-11-07, a pipeline that was created but never dispatched in
+			 * the process is not found by the next process (the compile of a 32-register aggregation kernel, 270 s, is
+			 * repeated), while one that was dispatched once is (18 ms); the driver finishes its lazy compile and
+			 * records the result at the first dispatch.
+			 */
+			{
+				gpu_vk_buffer bufs[8];
+				gpu_vk_buffer *bp[8];
+				char		pc[64];
+				uint32_t	nb = nbind < 8 ? nbind : 8;
+				uint32_t	k;
+
+				memset(bufs, 0, sizeof(bufs));
+				memset(pc, 0, sizeof(pc));
+				for (k = 0; k < nb; k++)
+				{
+					bp[k] = &bufs[k];
+					if (gpu_vk_buffer_create(ctx, &bufs[k], 4096, 0) != 0)
+						break;
+				}
+				if (k == nb)
+					(void) gpu_vk_dispatch(ctx, &pl, bp, pc, 0, 1, 1, NULL);
+				while (k-- > 0)
+					gpu_vk_buffer_destroy(ctx, &bufs[k]);
+			}
+			clock_gettime(CLOCK_MONOTONIC, &t1);
 			printf("prewarm %s: %.2f s\n", files[i],
 				   (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9);
 			fflush(stdout);
@@ -371,7 +398,15 @@ main(int argc, char **argv)
 			return do_prewarm(device, (uint32_t) nb, (uint32_t) pc, &argv[i + 3], argc - i - 3);
 		}
 		if (!strcmp(argv[i], "--probe"))
+		{
 			probe = 1;
+			/*
+			 * The postmaster waits for the probe for a bounded time (60 s) and the probe only runs a few tiny kernels,
+			 * so it must not load the persisted pipeline caches (a cache of 1 GB made one start take 45 s on a busy
+			 * machine and the postmaster killed the probe: "GPU probe did not finish within 60000 ms").
+			 */
+			setenv("PGSTROM_GPUSERV_PIPELINE_CACHE", "off", 1);
+		}
 		else if (!strcmp(argv[i], "--serve"))
 			serve = 1;
 		else if (!strcmp(argv[i], "--allow-cpu"))

@@ -89,17 +89,34 @@ emit(builder *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0
 		b->insn = ni;
 		b->insn_cap = ncap;
 	}
-	if (op >= SOP_NUMCONST && op <= SOP_NUMRND)
-		b->feat |= SCAN_FEAT_NUM;
-	else if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
-		b->feat |= SCAN_FEAT_JSON;
-	else if (op >= SOP_CMPD && op <= SOP_D2F)
-		b->feat |= SCAN_FEAT_F8;
-	else if ((op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW) || op == SOP_GEOMFLAG || op == SOP_GEOMDIST || op == SOP_GEOMLEN)		/* not NULLMRG (136): always compiled in */
-		b->feat |= SCAN_FEAT_GEOM;
+	b->feat |= scan_vm_op_feat(op);
 	p = b->insn + 6 * b->ninsn++;
 	p[0] = op; p[1] = dst; p[2] = a; p[3] = rb; p[4] = k0; p[5] = k1;
 	return (int)(b->ninsn - 1);
+}
+
+/*
+ * The optional instruction groups of the finished program: those emit() collected, and again from every instruction word
+ * (so an op that was patched in afterwards cannot hide a group). A group missing here would run the program on a kernel
+ * that does not have it ("malformed program"); see scan_vm_op_feat() and feat_check.c.
+ */
+static uint32_t
+builder_feat(const builder *b)
+{
+	uint32_t	feat = b->feat;
+
+	for (uint32_t i = 0; i < b->ninsn; i++)
+		feat |= scan_vm_op_feat(b->insn[6 * i]);
+	return feat;
+}
+
+/* instructions that can return SOP_RECHECK_CODE (the row is evaluated by the backend), see scan_common.slang */
+static int
+op_may_recheck(uint32_t op)
+{
+	return (op >= SOP_NUMCONST && op <= SOP_NUMRND) || (op >= SOP_JSONGET && op <= SOP_JSONCONT) ||
+		(op >= SOP_GEOMBOX && op <= SOP_GEOM3DDW) || op == SOP_GEOMFLAG || op == SOP_GEOMDIST || op == SOP_GEOMLEN ||
+		op == SOP_FARITH || op == SOP_STRCMP || op == SOP_STRLIKE || op == SOP_STRLEN;
 }
 
 static int
@@ -1821,7 +1838,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	prog->nwords = nwords;
 	prog->ncomp = ncomp;
 	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
-	prog->feat = b.feat;
+	prog->feat = builder_feat(&b);
 	prog->max_src_resno = max_src;
 	free(b.insn);
 	free(b.pool);
@@ -2512,9 +2529,20 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			}
 		}
 		w[17] = prog->oj_words;
+		/* which parts of the program can recheck (A14): see scan_prog.h */
+		for (uint32_t i = 0; i < b.ninsn; i++)
+			if (op_may_recheck(b.insn[6 * i]))
+			{
+				if (i < nq)
+					prog->rck_outer = 1;
+				else
+					prog->rck_walk = 1;
+			}
 		for (int depth = 1; depth <= nrels; depth++)
 			if (rels[depth - 1].gist_page0)
-				w[18] = 1;							/* a GiST join: the aggregating kernels read a skip bitmap (scan_exec.c) */
+				prog->rck_walk = 1;
+		if (prog->rck_walk)
+			w[18] = 1;								/* the aggregating kernels read a skip bitmap (scan_exec.c, arrow_exec.c) */
 		memcpy(w + insnoff, b.insn, sizeof(uint32_t) * 6 * b.ninsn);
 		memcpy(w + insnoff + 6 * b.ninsn, comp_regs, sizeof(uint32_t) * ncomp);
 		if (agg_mode)
@@ -2534,7 +2562,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	prog->nwords = nwords;
 	prog->ncomp = ncomp;
 	prog->nregs = (b.maxreg > (int) b.nslots ? b.maxreg : (int) b.nslots);
-	prog->feat = b.feat;
+	prog->feat = builder_feat(&b);
 	prog->max_src_resno = max_src;
 	prog->ndepth = nrels;
 	prog->join_mode = 1;
