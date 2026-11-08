@@ -383,6 +383,7 @@ gen_arrow_eval_row(gen_ctx *g, sbuf *o)
 		if (slot != 0xff)
 			sb_printf(o, "    arrow_load_col(%uu, 0x%xu, row, regs);\n", c, desc);
 	}
+	sb_printf(o, "    if (g_recheck != 0)\n        return false;\n");
 	sb_printf(o, "    bool hit = true;\n    uint err = 0;\n");
 	if (qreg != 0xffffffffu)
 	{

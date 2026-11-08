@@ -77,6 +77,7 @@ typedef struct
 	pg_atomic_uint32 invalidate_seq;	/* bumped whenever the cache is invalidated */
 	pg_atomic_uint32 loader_pid;
 	pg_atomic_uint32 nrebuilds;
+	pg_atomic_uint32 nscans;			/* scans (first tasks) the cache served: a query that read the table instead does not count */
 	pg_atomic_uint32 info_valid;
 } GpuCacheSharedState;
 
@@ -828,6 +829,7 @@ getGpuCacheSharedState(Oid database_oid, Oid table_oid, uint32_t table_sig, cons
 		pg_atomic_init_u32(&gc_sstate->invalidate_seq, 0);
 		pg_atomic_init_u32(&gc_sstate->loader_pid, 0);
 		pg_atomic_init_u32(&gc_sstate->nrebuilds, 0);
+		pg_atomic_init_u32(&gc_sstate->nscans, 0);
 		pg_atomic_init_u32(&gc_sstate->info_valid, 0);
 		dlist_push_tail(&gpucache_shared_head->hash_slots[hindex], &gc_sstate->chain);
 	}
@@ -1292,6 +1294,8 @@ __gpuCacheColumnVt(Form_pg_attribute attr)
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:
 		case TypeOpCode__geometry:		/* A12: a string register to the kernel, as on a heap table (PostGIS predicates) */
+		case TypeOpCode__numeric:		/* A12: the kernel decodes { int64, scale }, a value beyond that is re-checked */
+		case TypeOpCode__jsonb:			/* A12: a container register, as on a heap table */
 			return (attr->attlen == -1) ? GCVT_STR : GCVT_NONE;
 		default:
 			break;
@@ -1735,10 +1739,12 @@ append_gpucache_info(StringInfo buf, GpuCacheSharedState *gc_sstate,
 					 ", \"cache_sz\" : %zu"
 					 ", \"max_num_rows\" : %ld"
 					 ", \"rebuilds\" : %u"
+					 ", \"scans\" : %u"
 					 ", \"config_options\" : ",
 					 gpucache_phase_label(phase), 1U << gc_sstate->opts.gpu_device_id,
 					 gc_sstate->opts.cache_sz, (long) gc_sstate->opts.max_rows,
-					 pg_atomic_read_u32(&gc_sstate->nrebuilds));
+					 pg_atomic_read_u32(&gc_sstate->nrebuilds),
+					 pg_atomic_read_u32(&gc_sstate->nscans));
 	escape_json(buf, config);
 	if (phase == GPUCACHE_PHASE__IS_READY)
 	{
@@ -1913,9 +1919,10 @@ __gpuCacheKdsHead(pgstromTaskState *pts, pgstromTaskScanState *ptss)
 }
 
 /*
- * Can the cache serve this session? A column whose value the program reads must be one the GPU can load
- * from the cache; a numeric (and any other type the cache only passes through) cannot. A join program
- * never reads such values (the planner does not offer them), so only scans and aggregations are checked.
+ * Can the cache serve this session? A column whose value the program reads must be one the GPU can load from the
+ * cache (bool, integers, date/time, float4, float8, text, geometry, numeric and jsonb); any other type is only passed
+ * through. A join program never reads such values (the planner does not offer them), so only scans and aggregations
+ * are checked.
  */
 bool
 pgstromGpuCacheProgramOk(pgstromTaskState *pts, const XpuCommand *session_cmd)
@@ -1943,7 +1950,11 @@ pgstromGpuCacheProgramOk(pgstromTaskState *pts, const XpuCommand *session_cmd)
 			{
 				uint32_t	desc = prog.words[coloff + c];
 
-				if (((desc >> 16) & 0xff) != 0xff && ((desc >> 12) & 0xf) == SOP_VT_NUM)
+				uint32_t	vt = (desc >> 12) & 0xf;
+
+				if (((desc >> 16) & 0xff) != 0xff &&
+					vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_FLOAT4 && vt != SOP_VT_FLOAT8 &&
+					vt != SOP_VT_STR && vt != SOP_VT_NUM && vt != SOP_VT_JSON && vt != SOP_VT_NULLONLY)
 					retval = false;
 			}
 			scan_prog_free(&prog);
@@ -1972,6 +1983,7 @@ pgstromScanChunkGpuCache(pgstromTaskState *pts,
 		kern_data_store *kds;
 		size_t		sz;
 
+		pg_atomic_fetch_add_u32(&gc_desc->gc_sstate->nscans, 1);
 		__gpuCacheKdsHead(pts, ptss);
 		sz = offsetof(XpuCommand, u.gc_task.data) + MAXALIGN(offsetof(kern_data_store, colmeta[ptss->kds_head->nr_colmeta]));
 		resetStringInfo(&pts->xcmd_buf);

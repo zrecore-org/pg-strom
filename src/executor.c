@@ -1826,6 +1826,8 @@ __pgstromGpuCacheFallback(pgstromTaskState *pts)
 
 		if (!ptss->gpucache_desc)
 			continue;
+		elog(DEBUG1, "gpucache: the program reads a value the GPU cannot load from the cache of \"%s\"; reading the table",
+			 RelationGetRelationName(scan_rel));
 		ptss->gpucache_desc = NULL;
 		ptss->kds_head = NULL;
 		ptss->optimal_gpus = GetOptimalGpuForRelation(scan_rel);
