@@ -197,8 +197,9 @@ ark_check() { # table, settings, query-with-%T, label: the backend must have re-
 	n=$(ark_rows "$1" "$2" "$3")
 	[ "$n" -gt 0 ]; check "$1: the GPU handed rows back to the backend ($n rechecked): $4" $?
 }
-ARK_NUM="(case when i % 50 = 0 then c::numeric * c::numeric * c::numeric else a::numeric end)"
-ARK_NUMT="(case when t.i % 50 = 0 then t.c::numeric * c::numeric * c::numeric else t.a::numeric end)"
+# (a CASE with a numeric result is not pushed down, so the overflowing product stands alone: |c| above about 2.1e6 needs more than 64 bits)
+ARK_NUM="(c::numeric * c::numeric * c::numeric)"
+ARK_NUMT="(t.c::numeric * t.c::numeric * t.c::numeric)"
 for t in a1 p1; do
 	echo "table $t"
 	run $t "recheck: float4 underflow in a qual" "select i, d from %T where d / 1e38::float4 > 0::float4"

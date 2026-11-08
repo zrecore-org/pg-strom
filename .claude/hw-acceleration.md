@@ -641,6 +641,9 @@ The kernel never decides a boundary: an edge's side of the point is taken only w
 - Rows of the CPU-VM overflow path of a heap GROUP BY and GPU-Sort over rechecked rows keep their old behaviour (the service refuses GPU-Sort with rechecked rows).
 - The fuzzer builds heap tables only.
 
+
+**Numeric and jsonb on Arrow / GPU-Cache (2026-11-07, follow-up to A12).** Numeric quals over Arrow/Parquet columns were refused by `arrowFdwGpuScanSupported()` and are offered now; a CASE with a numeric result, and any numeric inside a join program, are still not pushed down. GPU-Cache reads numeric and jsonb columns (see "GPU-Cache columns"). Tests: the `arrow: rows the device cannot decide` block of `arrow_tests.inc` (about 60 checks; the whole `arrow_dev.sh` run is 432 checks) and the `gc9` block of `gpucache_tests.inc` (`gcserved` compares `gpucache_info()->>'scans'`). Dev runs on the merged tree: arrow_dev 432 ok, gpucache_dev 220 ok, recheck_dev all passed (1340 s), spec_dev and spec_compile_check passed. Not done: Arrow Decimal columns, GPU-Sort over rechecked rows.
+
 ## A13 status (spatial join through a GiST index: slice 1 done; facts read from master and this branch)
 
 **Decision.** Option (a), the GiST traversal, over the nested loop and the grid (the user's choice, 2026-11-04). The grid was estimated to come within about 2x of the GiST walk for point-in-polygon joins, since the point-in-polygon refinement dominates both; that estimate is not measured.
