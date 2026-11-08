@@ -666,6 +666,18 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
  */
 static pthread_mutex_t pcache_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static double
+pcache_now(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+#define PCACHE_LOG(...) \
+	do { if (getenv("PGSTROM_GPUSERV_PIPELINE_LOG")) fprintf(stderr, __VA_ARGS__); } while (0)
+
 static int
 pcache_dir(char *buf, size_t len)
 {
@@ -763,6 +775,7 @@ pcache_open_one(gpu_vk_ctx *ctx, const VkPhysicalDeviceProperties *props, const 
 	VkPipelineCacheCreateInfo ci;
 	void	   *data = NULL;
 	size_t		size = 0;
+	double		t_open = pcache_now(), t_read = 0;
 
 	*pc = VK_NULL_HANDLE;
 	*saved = 0;
@@ -807,6 +820,7 @@ pcache_open_one(gpu_vk_ctx *ctx, const VkPhysicalDeviceProperties *props, const 
 			fclose(fp);
 		}
 	}
+	t_read = pcache_now();
 	memset(&ci, 0, sizeof(ci));
 	ci.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 	ci.initialDataSize = size;
@@ -826,6 +840,8 @@ pcache_open_one(gpu_vk_ctx *ctx, const VkPhysicalDeviceProperties *props, const 
 	}
 	if (*pc)
 		*saved = size;
+	PCACHE_LOG("gpuserv: pipeline cache%s opened: %zu bytes, read+check %.3f s, vkCreatePipelineCache %.3f s\n",
+			   spec ? " (specialized)" : "", size, t_read - t_open, pcache_now() - t_read);
 	free(data);
 }
 
@@ -865,6 +881,8 @@ pcache_save(gpu_vk_ctx *ctx, int spec)
 
 	if (!pc || !path[0])
 		return;
+	double		t_save = pcache_now();
+
 	pthread_mutex_lock(&pcache_lock);
 	if (vkGetPipelineCacheData(ctx->dev, pc, &size, NULL) != VK_SUCCESS ||
 		size == 0 || size == *saved || size > pcache_max_bytes(spec))
@@ -894,6 +912,7 @@ pcache_save(gpu_vk_ctx *ctx, int spec)
 			unlink(tmp);
 	}
 	free(data);
+	PCACHE_LOG("gpuserv: pipeline cache%s saved: %zu bytes in %.3f s\n", spec ? " (specialized)" : "", size, pcache_now() - t_save);
 out:
 	pthread_mutex_unlock(&pcache_lock);
 }

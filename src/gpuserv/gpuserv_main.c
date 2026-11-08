@@ -398,7 +398,15 @@ main(int argc, char **argv)
 			return do_prewarm(device, (uint32_t) nb, (uint32_t) pc, &argv[i + 3], argc - i - 3);
 		}
 		if (!strcmp(argv[i], "--probe"))
+		{
 			probe = 1;
+			/*
+			 * The postmaster waits for the probe for a bounded time (60 s) and the probe only runs a few tiny kernels,
+			 * so it must not load the persisted pipeline caches (a cache of 1 GB made one start take 45 s on a busy
+			 * machine and the postmaster killed the probe: "GPU probe did not finish within 60000 ms").
+			 */
+			setenv("PGSTROM_GPUSERV_PIPELINE_CACHE", "off", 1);
+		}
 		else if (!strcmp(argv[i], "--serve"))
 			serve = 1;
 		else if (!strcmp(argv[i], "--allow-cpu"))
