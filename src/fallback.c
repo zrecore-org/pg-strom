@@ -716,3 +716,412 @@ ExecFallbackCpuJoinRightOuter(pgstromTaskState *pts)
 			__execFallbackCpuJoinRightOuterOneDepth(pts, depth);
 	}
 }
+
+/* ----------------------------------------------------------------
+ *
+ * A14: runtime CPU fallback of a whole node
+ *
+ * When the GPU service refuses a program, fails a task, is not ready, or disappears, the node
+ * continues on the CPU instead of failing the query:
+ *
+ *  - every task sent to the service is recorded in a journal (the heap blocks, the Arrow record batch
+ *    or the GPU-Cache table it reads).  The replies of one connection arrive in the order of the
+ *    commands, so a consumed reply acknowledges the oldest journal entry;
+ *  - on a failure the session is closed and the CPU runs the entries without an acknowledged reply
+ *    again, then claims the remaining work of the scan from the same shared counters the GPU path
+ *    uses.  Every visible row goes through execCpuFallbackBaseTuple() (base quals, joins against the
+ *    inner buffers in host memory, projection or partial-aggregate state), the code that also
+ *    re-evaluates the rows the GPU cannot decide;
+ *  - GpuPreAgg keeps its partial aggregates inside the session, so all of its journal entries are
+ *    replayed and the recheck tuples the lost session would have returned are held back until Final
+ *    (defer_fallback), so that nothing is emitted twice;
+ *  - RIGHT / FULL joins set the same outer-join map flags (idempotent), and the unmatched inner rows
+ *    are emitted by the last worker as with a working session.
+ *
+ * Not recoverable (the original error is raised): GPU-Sort (the parent Sort node was removed), pinned
+ * inner buffers and SELECT INTO direct (the rows never reach the host), and pg_strom.gpu_error_fallback
+ * = off.
+ * ----------------------------------------------------------------
+ */
+bool	pgstrom_gpu_error_fallback = true;
+char   *pgstrom_gpuserv_fault = NULL;
+bool	pgstrom_debug_no_limits = false;
+int		pgstrom_scan_chunk_blocks = 0;
+
+void
+pgstromJournalAppend(pgstromTaskState *pts, const XpuCommand *xcmd)
+{
+	MemoryContext oldcxt;
+	pgstromCpuJob *job;
+	const kern_data_store *kds = NULL;
+
+	if (!pts->cpu_fallback_ok)
+		return;
+	oldcxt = MemoryContextSwitchTo(pts->css.ss.ps.state->es_query_cxt);
+	if (pts->journal_tail >= pts->journal_nrooms)
+	{
+		if (pts->journal_head > 0 && (pts->xpu_task_flags & DEVTASK__PREAGG) == 0)
+		{
+			memmove(pts->journal, pts->journal + pts->journal_head,
+					sizeof(pgstromCpuJob) * (pts->journal_tail - pts->journal_head));
+			pts->journal_tail -= pts->journal_head;
+			pts->cpujob_next = (pts->cpujob_next > pts->journal_head
+								? pts->cpujob_next - pts->journal_head : 0);
+			pts->journal_head = 0;
+		}
+		if (pts->journal_tail >= pts->journal_nrooms)
+		{
+			uint32_t	nrooms = Max(pts->journal_nrooms * 2, 64);
+
+			if (pts->journal)
+				pts->journal = repalloc_huge(pts->journal, sizeof(pgstromCpuJob) * nrooms);
+			else
+				pts->journal = palloc(sizeof(pgstromCpuJob) * nrooms);
+			pts->journal_nrooms = nrooms;
+		}
+	}
+	job = &pts->journal[pts->journal_tail++];
+	memset(job, 0, sizeof(*job));
+	if (xcmd->tag == XpuCommandTag__XpuTaskExecGpuCache)
+	{
+		job->kind = CPUJOB_HEAP_ALL;
+		job->scan_relidx = xcmd->u.gc_task.t.scan_relidx;
+	}
+	else
+	{
+		job->scan_relidx = xcmd->u.task.scan_relidx;
+		if (xcmd->u.task.kds_src_offset != 0)
+			kds = (const kern_data_store *)
+				((const char *) xcmd + xcmd->u.task.kds_src_offset);
+		if (kds && kds->format == KDS_FORMAT_BLOCK)
+		{
+			job->kind = CPUJOB_HEAP_BLOCKS;
+			job->nblocks = kds->nitems;
+			job->blocks = palloc(sizeof(BlockNumber) * Max(kds->nitems, 1));
+			for (uint32_t i = 0; i < kds->nitems; i++)
+				job->blocks[i] = KDS_BLOCK_BLCKNR(kds, i);
+		}
+		else if (kds && (kds->format == KDS_FORMAT_ARROW ||
+						 kds->format == KDS_FORMAT_PARQUET))
+		{
+			job->kind = CPUJOB_ARROW_BATCH;
+			job->rb_flat = xcmd->u.task.arrow_rb_flat;
+		}
+		/* kind 0: a task the CPU cannot repeat; replaying it raises an error */
+	}
+	MemoryContextSwitchTo(oldcxt);
+}
+
+/* a reply was consumed: the oldest task of the journal is done */
+void
+pgstromJournalAck(pgstromTaskState *pts)
+{
+	if (!pts->cpu_fallback_ok ||
+		pts->journal_head >= pts->journal_tail ||
+		(pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
+		return;
+	if (pts->journal[pts->journal_head].blocks)
+		pfree(pts->journal[pts->journal_head].blocks);
+	pts->journal[pts->journal_head].blocks = NULL;
+	pts->journal_head++;
+	if (pts->journal_head == pts->journal_tail)
+	{
+		pts->journal_head = pts->journal_tail = 0;
+		pts->cpujob_next = 0;
+	}
+}
+
+void
+pgstromCpuModeBegin(pgstromTaskState *pts, const char *reason)
+{
+	if (pts->conn)
+	{
+		xpuClientCloseSession(pts->conn);
+		pts->conn = NULL;
+	}
+	elog(LOG, "%s: GPU execution failed (%s); the CPU runs the rest of the node",
+		 pts->css.methods->CustomName, reason);
+	pts->cpu_mode = true;
+	pts->defer_fallback = false;
+	pts->drain_fallback = false;
+	pts->cpujob_active = false;
+	if ((pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
+	{
+		/* the partial aggregates of the session are lost: repeat every task, drop the held-back tuples */
+		pts->cpujob_next = 0;
+		pts->fallback_index = 0;
+		pts->fallback_nitems = 0;
+		pts->fallback_usage = 0;
+	}
+	else
+		pts->cpujob_next = pts->journal_head;
+	if (pts->ps_state)
+		pg_atomic_fetch_add_u32(&pts->ps_state->cpu_mode_workers, 1);
+}
+
+void
+pgstromCpuModeReset(pgstromTaskState *pts)
+{
+	if (pts->cpujob_scan)
+	{
+		table_endscan(pts->cpujob_scan);
+		pts->cpujob_scan = NULL;
+	}
+	pts->cpu_mode = false;
+	pts->cpu_final_done = false;
+	pts->cpujob_active = false;
+	pts->cpujob_next = 0;
+	pts->journal_head = pts->journal_tail = 0;
+	pts->drain_fallback = false;
+	pts->final_is_last = false;
+	pts->fallback_index = pts->fallback_nitems = pts->fallback_usage = 0;
+}
+
+/* CPU mode: take the next unit of work (a replayed journal entry, then fresh work of the scan) */
+static bool
+__cpuModeLoadJob(pgstromTaskState *pts)
+{
+	pgstromCpuJob *job = &pts->cpujob;
+
+	memset(job, 0, sizeof(*job));
+	if (pts->cpujob_next < pts->journal_tail)
+	{
+		*job = pts->journal[pts->cpujob_next++];
+		if (job->kind == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s: the GPU service failed and the CPU cannot repeat this task",
+							pts->css.methods->CustomName)));
+		goto found;
+	}
+	while (pts->curr_scan_rel < pts->num_scan_rels)
+	{
+		pgstromTaskScanState *ptss = &pts->scan_rels[pts->curr_scan_rel];
+
+		job->scan_relidx = ptss->scan_relidx;
+		if (ptss->gpucache_desc)
+		{
+			uint32_t	count;
+
+			if (!ptss->gpucache_scan_count)
+				ptss->gpucache_scan_count = &ptss->__gpucache_count_data;
+			count = pg_atomic_fetch_add_u32(ptss->gpucache_scan_count, 1);
+			if (count == 0)
+			{
+				job->kind = CPUJOB_HEAP_ALL;
+				goto found;
+			}
+			pts->curr_scan_rel++;
+		}
+		else if (ptss->arrow_state)
+		{
+			uint32_t	rb_flat;
+
+			if (pgstromArrowFdwClaimBatch(ptss->arrow_state, &rb_flat))
+			{
+				job->kind = CPUJOB_ARROW_BATCH;
+				job->rb_flat = rb_flat;
+				goto found;
+			}
+			pts->curr_scan_rel++;
+		}
+		else
+		{
+			uint32_t	n = 0;
+
+			for (;;)
+			{
+				if (ptss->heap_block_pos < ptss->heap_block_end)
+				{
+					job->blocks = MemoryContextAlloc(pts->css.ss.ps.state->es_query_cxt,
+													 sizeof(BlockNumber) * 64);
+					while (ptss->heap_block_pos < ptss->heap_block_end && n < 64)
+						job->blocks[n++] = (BlockNumber) ptss->heap_block_pos++;
+					job->kind = CPUJOB_HEAP_BLOCKS;
+					job->nblocks = n;
+					goto found;
+				}
+				if (pts->br_state)
+				{
+					if (!pgstromBrinIndexNextChunk(pts, ptss))
+					{
+						pts->curr_scan_rel++;
+						break;
+					}
+				}
+				else
+				{
+					uint64_t	pos = pg_atomic_fetch_add_u64(&ptss->dsm->scan_block_count, 64);
+
+					if (pos >= ptss->dsm->scan_block_nums)
+					{
+						pts->curr_scan_rel++;
+						break;
+					}
+					ptss->heap_block_pos = pos;
+					ptss->heap_block_end = Min(pos + 64, ptss->dsm->scan_block_nums);
+				}
+			}
+		}
+	}
+	return false;
+found:
+	pts->cpujob_active = true;
+	pts->cpujob_pos = 0;
+	pts->cpujob_nrows = 0;
+	if (pts->ps_state)
+		pg_atomic_fetch_add_u64(&pts->ps_state->cpu_mode_chunks, 1);
+	return true;
+}
+
+static void
+__cpuJobCheckRel(pgstromTaskState *pts, pgstromTaskScanState *ptss)
+{
+	if (RelationGetDescr(ptss->scan_rel)->natts !=
+		RelationGetDescr(pts->css.ss.ss_currentRelation)->natts)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("%s: the GPU service failed, and the CPU cannot continue because \"%s\" has other columns than \"%s\"",
+						pts->css.methods->CustomName,
+						RelationGetRelationName(ptss->scan_rel),
+						RelationGetRelationName(pts->css.ss.ss_currentRelation))));
+}
+
+/* evaluate the visible rows of one heap block (a copy is taken, nothing runs under the buffer lock) */
+static void
+__cpuJobHeapBlock(pgstromTaskState *pts, pgstromTaskScanState *ptss, BlockNumber blkno)
+{
+	EState	   *estate = pts->css.ss.ps.state;
+	Relation	relation = ptss->scan_rel;
+	Snapshot	snapshot = estate->es_snapshot;
+	Buffer		buffer;
+	Page		page;
+	OffsetNumber lines, lineoff;
+	bool		check_visibility;
+	HeapTupleData *htups;
+	int			nhtups = 0;
+
+	if (!pts->hscan_strategy)
+	{
+		MemoryContext oldcxt = MemoryContextSwitchTo(estate->es_query_cxt);
+
+		pts->hscan_strategy = GetAccessStrategy(BAS_BULKREAD);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	buffer = ReadBufferExtended(relation, MAIN_FORKNUM, blkno, RBM_NORMAL,
+								pts->hscan_strategy);
+	heap_page_prune_opt(relation, buffer, &ptss->heap_vm_buffer, true);
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	page = BufferGetPage(buffer);
+	lines = PageGetMaxOffsetNumber(page);
+	check_visibility = (!PageIsAllVisible(page) || snapshot->takenDuringRecovery);
+	htups = palloc(sizeof(HeapTupleData) * Max(lines, 1));
+	for (lineoff = FirstOffsetNumber; lineoff <= lines; lineoff++)
+	{
+		ItemId		lpp = PageGetItemId(page, lineoff);
+		HeapTupleData htup;
+		bool		valid = true;
+
+		if (!ItemIdIsNormal(lpp))
+			continue;
+		htup.t_tableOid = RelationGetRelid(relation);
+		htup.t_data = (HeapTupleHeader) PageGetItem(page, lpp);
+		htup.t_len = ItemIdGetLength(lpp);
+		ItemPointerSet(&htup.t_self, blkno, lineoff);
+		if (check_visibility)
+		{
+			valid = HeapTupleSatisfiesVisibility(&htup, snapshot, buffer);
+			HeapCheckForSerializableConflictOut(valid, relation, &htup,
+												buffer, snapshot);
+		}
+		if (!valid)
+			continue;
+		htups[nhtups] = htup;
+		htups[nhtups].t_data = palloc(htup.t_len);
+		memcpy(htups[nhtups].t_data, htup.t_data, htup.t_len);
+		nhtups++;
+	}
+	UnlockReleaseBuffer(buffer);
+	for (int i = 0; i < nhtups; i++)
+		execCpuFallbackBaseTuple(pts, &htups[i]);
+}
+
+/*
+ * pgstromCpuModeStep - does one unit of CPU work (a heap block, up to 1000 rows of a record batch) and
+ * leaves the resulting tuples in the fallback buffer.  False: nothing is left.
+ */
+bool
+pgstromCpuModeStep(pgstromTaskState *pts)
+{
+	EState	   *estate = pts->css.ss.ps.state;
+	MemoryContext step_cxt, oldcxt;
+	pgstromCpuJob *job;
+	pgstromTaskScanState *ptss;
+
+	CHECK_FOR_INTERRUPTS();
+	if (!pts->cpujob_active && !__cpuModeLoadJob(pts))
+		return false;
+	job = &pts->cpujob;
+	if (job->scan_relidx < 0 || job->scan_relidx >= pts->num_scan_rels)
+		elog(ERROR, "%s: CPU fallback names scan relation %d of %d",
+			 pts->css.methods->CustomName, job->scan_relidx, pts->num_scan_rels);
+	ptss = &pts->scan_rels[job->scan_relidx];
+	__cpuJobCheckRel(pts, ptss);
+
+	step_cxt = AllocSetContextCreate(estate->es_query_cxt,
+									 "CPU fallback step",
+									 ALLOCSET_DEFAULT_SIZES);
+	oldcxt = MemoryContextSwitchTo(step_cxt);
+	switch (job->kind)
+	{
+		case CPUJOB_HEAP_BLOCKS:
+			__cpuJobHeapBlock(pts, ptss, job->blocks[pts->cpujob_pos++]);
+			if (pts->cpujob_pos >= job->nblocks)
+				pts->cpujob_active = false;
+			break;
+
+		case CPUJOB_HEAP_ALL:
+			if (pts->cpujob_pos == 0)
+				job->nblocks = RelationGetNumberOfBlocks(ptss->scan_rel);
+			__cpuJobHeapBlock(pts, ptss, pts->cpujob_pos++);
+			if (pts->cpujob_pos >= job->nblocks)
+				pts->cpujob_active = false;
+			break;
+
+		case CPUJOB_ARROW_BATCH:
+			{
+				uint32_t	last;
+
+				if (!ptss->arrow_state)
+					elog(ERROR, "%s: CPU fallback of an Arrow task, but \"%s\" is not an Arrow_Fdw table",
+						 pts->css.methods->CustomName,
+						 RelationGetRelationName(ptss->scan_rel));
+				if (pts->cpujob_pos == 0)
+					pts->cpujob_nrows = pgstromArrowFdwBatchNrows(ptss->arrow_state,
+																  ptss->scan_rel,
+																  job->rb_flat);
+				last = Min(pts->cpujob_pos + 1000, pts->cpujob_nrows);
+				while (pts->cpujob_pos < last)
+				{
+					HeapTuple	tuple;
+
+					/* the decoded row lives in the step context, which is deleted below */
+					tuple = pgstromArrowFdwRecheckTuple(ptss->arrow_state,
+														ptss->scan_rel,
+														job->rb_flat,
+														pts->cpujob_pos++);
+					execCpuFallbackBaseTuple(pts, tuple);
+				}
+				if (pts->cpujob_pos >= pts->cpujob_nrows)
+					pts->cpujob_active = false;
+			}
+			break;
+
+		default:
+			elog(ERROR, "%s: unknown CPU fallback job %d",
+				 pts->css.methods->CustomName, job->kind);
+	}
+	MemoryContextSwitchTo(oldcxt);
+	MemoryContextDelete(step_cxt);
+	return true;
+}

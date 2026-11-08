@@ -2794,9 +2794,10 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		}
 		/* registers: the slots, one more per computed value (scan_prog.c keeps them above the slots), temporaries */
 		nslots += nexprs;
-		if (list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
-			list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
-			nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
+		if (!pgstrom_debug_no_limits &&
+			(list_length(con.pp_info->groupby_actions) > SCAN_AGG_MAX ||
+			 list_length(con.target_partial->exprs) > SCAN_AGG_MAX ||
+			 nslots + nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS))
 		{
 			elog(DEBUG2, "GpuPreAgg: too many columns for the Vulkan service (%d output columns, %d kernel variables)",
 				 list_length(con.target_partial->exprs), nslots);
