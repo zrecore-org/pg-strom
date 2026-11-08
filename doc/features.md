@@ -96,7 +96,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   groups:** with the specialized kernels (plan A6) 5.7x faster than 8-process PostgreSQL at 7 groups and 3.9x at
   100 (dense integer keys; a direct-mapped table), 3.5x for a GROUP BY over a join; with the interpreter
   alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
-  queries with more than `pg_strom.gpupreagg_max_groups` (default 128) estimated groups on PostgreSQL.
+  queries with more than `pg_strom.gpupreagg_max_groups` (default 128; 1,000,000 as `pg_strom.gpupreagg_max_groups_heap` for a heap table) estimated groups on PostgreSQL.
 - Aggregation over a join runs on the device as well (`GpuPreAgg` on the join; plan A4): without GROUP BY
   4.8x faster than 8-process PostgreSQL with the specialized kernels (28 ms against 136 ms on 16.8M rows).
   This includes RIGHT and FULL joins: the matched rows are aggregated on the device and the inner rows

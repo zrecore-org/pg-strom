@@ -2170,7 +2170,8 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 #define GT_HDR			8
 #define GT_KEYW			6
 #define GT_MAX_BYTES	(384U << 20)	/* the table of a session */
-#define GT_MIN_GROUPS	192				/* use the table when the planner expects, or a task has produced, more groups */
+#define GT_MIN_GROUPS	192				/* use the table when a task has produced more groups */
+#define GT_EST_GROUPS	500				/* or when the planner expects more (an expression key has the default estimate of 200: the first task decides) */
 
 typedef struct gtab_state
 {
@@ -2213,7 +2214,7 @@ gtab_wanted(const agg_state *st, float est_groups)
 		return 0;
 	if (mode == 1 || st->gt)
 		return 1;
-	return est_groups > GT_MIN_GROUPS || (st->groups && st->groups->nents > GT_MIN_GROUPS);
+	return est_groups > GT_EST_GROUPS || (st->groups && st->groups->nents > GT_MIN_GROUPS);
 }
 
 static void

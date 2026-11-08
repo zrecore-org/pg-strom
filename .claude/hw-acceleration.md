@@ -1084,7 +1084,7 @@ The earlier A11 decision "no bit-exact emulation of PostGIS' distance" is revers
 | Numeric inside join programs (qual, projection, aggregate argument) | A6 numeric, next slice |
 | `float8` in joins and aggregates (`sum`/`avg`) | A10: wire the software binary64 library into the planner and the VM |
 | numeric `min`/`max`, `int8` `min`/`max` | A6; A3b (64-bit atomics) |
-| GROUP BY with more than about 100 groups (slower than PostgreSQL, limit `pg_strom.gpupreagg_max_groups` = 128) | A3: global-memory hash or sort-based GROUP BY; the largest item |
+| GROUP BY with more than about 100 groups over Arrow/Parquet, GPU-Cache and joins (limit `pg_strom.gpupreagg_max_groups` = 128; heap scans done, see "A3, many groups") | A3: port the session-wide hash table (`gtab.slang`) to `ARROW_SRC` and the join walk |
 | More than four inner relations, programs over the register limits | A6/A9: split the program or the join; today the planner keeps them on the CPU |
 | Computed jsonb/text values in the target list; Arrow/Parquet Decimal columns | A8, A5 leftovers |
 | Spatial joins beyond the fused-point GiST forms; PostGIS functions in joins | A13, A11 |
