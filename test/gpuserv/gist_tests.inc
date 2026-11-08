@@ -270,6 +270,182 @@ sql "delete from pg_g3z where id % 9 = 0"
 sql "update pg_g3z set geom = ST_Translate(geom, 1, 1) where id % 13 = 3 and geom is not null"
 gistjoin "after delete and updates" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
 
+# ---- slice 4: ST_DWithin / ST_3DDWithin / ST_Distance / ST_3DDistance of a POINT and a LINE / POLYGON / multi-geometry ----
+# On the GPU as a SCAN qual (and in any other program that is not a join: GpuPreAgg, Arrow, GPU-Cache): the exact point-to-geometry distance of
+# ST_Distance decides "distance <= tolerance" (2D; Z and M of the geometry ignored) and the 3D forms for lines, points and multi-geometries with a Z
+# (PostGIS' lw_dist3d_pt_seg: postgis/seg3d_probe.c). A row the kernel cannot decide (a point within 2^-40 of a segment's end projection in 2D, a point that
+# the winding test cannot place against an edge, non-finite values, a distance beyond FLT_MAX, mixed SRIDs, a bad tolerance, a 3D polygon) is rechecked
+# by the backend. In a GiST JOIN the join kernel has no walker (Metal could not compile it: plan, A13 slice 4): a line or polygon inner row is a poison record and
+# PostGIS answers on the CPU; the join tests below check that the answers stay PostGIS'.
+echo "GiST spatial join, ST_DWithin of lines and polygons (A13 slice 4)"
+sql "drop table if exists pg_g5z; drop table if exists pg_g5p; drop table if exists pg_g5q; drop table if exists pg_g5q3; drop table if exists pg_g5r; drop table if exists pg_g5s; drop table if exists pg_g5m; drop table if exists pg_g5n"
+sql "create table pg_g5z (id int4, geom geometry, a int4)"
+sql "insert into pg_g5z select i,
+	case i % 32
+		when 0 then null
+		when 1 then ST_GeomFromText('LINESTRING EMPTY')
+		when 2 then ST_GeomFromText('POLYGON EMPTY')
+		when 3 then ST_GeomFromText('MULTILINESTRING EMPTY')
+		when 4 then ST_GeomFromText('GEOMETRYCOLLECTION EMPTY')
+		when 5 then ST_MakeLine(ST_MakePoint(i % 50 + 0.13, i % 47 + 0.29), ST_MakePoint(i % 50 + 4.37, i % 47 + 3.11))
+		when 6 then ST_MakeLine(ARRAY[ST_MakePoint(i % 50 + 0.2, i % 47 + 0.1, 5), ST_MakePoint(i % 50 + 3.3, i % 47 + 0.7, 1), ST_MakePoint(i % 50 + 5.1, i % 47 + 4.6, 9)])
+		when 7 then ST_GeomFromEWKT('LINESTRINGM(' || (i % 50) || ' ' || (i % 47) || ' 3, ' || (i % 50 + 4.5) || ' ' || (i % 47 + 2.25) || ' 8)')
+		when 8 then ST_GeomFromEWKT('LINESTRING(' || (i % 50 + 0.5) || ' ' || (i % 47 + 0.5) || ' 1 2, ' || (i % 50 + 2.5) || ' ' || (i % 47 + 4.75) || ' 3 4, ' || (i % 50 + 6) || ' ' || (i % 47 + 1) || ' 5 6)')
+		when 9 then ST_GeomFromText('LINESTRING(' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50) || ' ' || (i % 47) || ')')
+		when 10 then ST_GeomFromText('LINESTRING(' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 1) || ' ' || (i % 47 + 1) || ', ' || (i % 50 + 2) || ' ' || (i % 47 + 2) || ', ' || (i % 50 + 3) || ' ' || (i % 47 + 3) || ')')
+		when 11 then ST_GeomFromText('LINESTRING(' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 0.0000001) || ' ' || (i % 47) || ', ' || (i % 50 + 5) || ' ' || (i % 47 + 0.0000001) || ')')
+		when 12 then ST_GeomFromText('MULTILINESTRING((' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 2.6) || ' ' || (i % 47 + 1.4) || '), (' || (i % 50 + 5.2) || ' ' || (i % 47 + 0.8) || ', ' || (i % 50 + 7.9) || ' ' || (i % 47 + 3.3) || ', ' || (i % 50 + 8) || ' ' || (i % 47 + 6) || '))')
+		when 13 then ST_MakePolygon(ST_MakeLine(ARRAY[ST_MakePoint(i % 50, i % 47), ST_MakePoint(i % 50 + 6.3, i % 47), ST_MakePoint(i % 50 + 6.3, i % 47 + 5.7), ST_MakePoint(i % 50, i % 47 + 5.7), ST_MakePoint(i % 50, i % 47)]))
+		when 14 then ST_GeomFromText('POLYGON((' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 9) || ' ' || (i % 47) || ', ' || (i % 50 + 9) || ' ' || (i % 47 + 9) || ', ' || (i % 50) || ' ' || (i % 47 + 9) || ', ' || (i % 50) || ' ' || (i % 47) || '), (' || (i % 50 + 2.3) || ' ' || (i % 47 + 2.3) || ', ' || (i % 50 + 2.3) || ' ' || (i % 47 + 6.7) || ', ' || (i % 50 + 6.7) || ' ' || (i % 47 + 6.7) || ', ' || (i % 50 + 6.7) || ' ' || (i % 47 + 2.3) || ', ' || (i % 50 + 2.3) || ' ' || (i % 47 + 2.3) || '))')
+		when 15 then ST_GeomFromEWKT('POLYGON((' || (i % 50) || ' ' || (i % 47) || ' 1, ' || (i % 50 + 5.5) || ' ' || (i % 47) || ' 2, ' || (i % 50 + 5.5) || ' ' || (i % 47 + 4.5) || ' 3, ' || (i % 50) || ' ' || (i % 47 + 4.5) || ' 4, ' || (i % 50) || ' ' || (i % 47) || ' 1))')
+		when 16 then ST_GeomFromEWKT('POLYGONM((' || (i % 50) || ' ' || (i % 47) || ' 1, ' || (i % 50 + 5.5) || ' ' || (i % 47) || ' 2, ' || (i % 50 + 3) || ' ' || (i % 47 + 4.5) || ' 3, ' || (i % 50) || ' ' || (i % 47) || ' 1))')
+		when 17 then ST_GeomFromEWKT('POLYGON((' || (i % 50) || ' ' || (i % 47) || ' 1 7, ' || (i % 50 + 4.4) || ' ' || (i % 47) || ' 2 8, ' || (i % 50 + 4.4) || ' ' || (i % 47 + 3.6) || ' 3 9, ' || (i % 50) || ' ' || (i % 47) || ' 1 7))')
+		when 18 then ST_GeomFromText('MULTIPOLYGON(((' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 3) || ' ' || (i % 47) || ', ' || (i % 50 + 3) || ' ' || (i % 47 + 3) || ', ' || (i % 50) || ' ' || (i % 47) || ')), ((' || (i % 50 + 6) || ' ' || (i % 47 + 6) || ', ' || (i % 50 + 9) || ' ' || (i % 47 + 6) || ', ' || (i % 50 + 9) || ' ' || (i % 47 + 9.5) || ', ' || (i % 50 + 6) || ' ' || (i % 47 + 6) || ')))')
+		when 19 then ST_GeomFromText('GEOMETRYCOLLECTION(POINT(' || (i % 50 + 1.5) || ' ' || (i % 47 + 1.5) || '), LINESTRING(' || (i % 50 + 3) || ' ' || (i % 47) || ', ' || (i % 50 + 8) || ' ' || (i % 47 + 4) || '), POLYGON((' || (i % 50) || ' ' || (i % 47 + 8) || ', ' || (i % 50 + 2) || ' ' || (i % 47 + 8) || ', ' || (i % 50 + 1) || ' ' || (i % 47 + 10) || ', ' || (i % 50) || ' ' || (i % 47 + 8) || ')))')
+		when 20 then ST_GeomFromText('MULTIPOINT((' || (i % 50 + 0.5) || ' ' || (i % 47 + 0.5) || '), (' || (i % 50 + 3.5) || ' ' || (i % 47 + 2.5) || '))')
+		when 21 then ST_MakeLine(ST_MakePoint(i % 50, i % 47), ST_MakePoint(i % 50 + 3, i % 47 + 3))
+		when 22 then ST_MakePoint(i % 50 + 0.37, i % 47 + 0.61)
+		when 23 then ST_GeomFromText('LINESTRING(' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 1e-9) || ' ' || (i % 47 + 5e-10) || ')')
+		when 24 then ST_GeomFromText('POLYGON((' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 1e-8) || ' ' || (i % 47) || ', ' || (i % 50) || ' ' || (i % 47 + 1e-8) || ', ' || (i % 50) || ' ' || (i % 47) || '))')
+		when 25 then ST_GeomFromText('CIRCULARSTRING(' || (i % 50) || ' ' || (i % 47) || ', ' || (i % 50 + 1) || ' ' || (i % 47 + 1) || ', ' || (i % 50 + 2) || ' ' || (i % 47) || ')')
+		else ST_MakeLine(ST_MakePoint(i % 50, i % 47), ST_MakePoint(i % 50 + (i % 7) + 0.5, i % 47 + (i % 5) + 0.25))
+	end, i
+	from generate_series(1, 3200) i"
+sql "insert into pg_g5z values (91001, ST_GeomFromText('LINESTRING(1e300 0, 1e300 1)'), 1), (91002, ST_GeomFromText('LINESTRING(-1e39 0, 1e39 1)'), 2), (91003, ST_GeomFromText('LINESTRING(1e-300 1e-300, 2e-300 2e-300)'), 3), (91004, ST_GeomFromText('POLYGON((0 0, 1e39 0, 1e39 1e39, 0 0))'), 4), (91005, ST_GeomFromText('LINESTRING(0 0, 1e154 1e154)'), 5)"
+sql "create index pg_g5z_gist on pg_g5z using gist (geom)"
+sql "create table pg_g5p (id int4, x float8, y float8, r float8)"
+# points off the integer grid (a point exactly on an edge is the winding test's undecidable case and goes to PostGIS; some are kept on purpose)
+sql "insert into pg_g5p select i, (i % 100) / 2.0 + case when i % 7 = 0 then 0 else 0.0137 end, (i / 100) / 2.0 + case when i % 7 = 0 then 0 else 0.0291 end, (i % 11) / 2.0 from generate_series(0, 4999) i"
+sql "insert into pg_g5p values (-1, null, 1, 1), (-2, 1, null, 1), (-3, 1, 1, null), (-4, 1e39, 0, 1), (-5, 3, 4, 5), (-6, 0.1, 0.1, 0.1), (-7, 1e300, 0, 1), (-8, 0, 0, 0), (-9, 1e-300, 1e-300, 1e-300), (-10, 1e154, 1e154, 1)"
+sql "analyze pg_g5z; analyze pg_g5p"
+J5="select o.id, i.id from pg_g5p o join pg_g5z i on"
+gistjoin "line/polygon: ST_DWithin(inner, point, constant)" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+gistjoin "line/polygon: the point first" "$J5 st_dwithin(st_makepoint(o.x, o.y), i.geom, 1.5)"
+gistjoin "line/polygon: tolerance 0" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 0)"
+gistjoin "line/polygon: tolerance of the outer row" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r)"
+gistjoin "line/polygon: tolerance an expression" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), o.r * 2 + 0.25)"
+gistjoin "line/polygon: large tolerance" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 12) and o.id % 50 = 0"
+gistjoin "line/polygon: with an inner qual" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 2) and i.a % 3 = 0"
+gistjoin "line/polygon: with an outer qual" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 2) and o.id % 5 = 0"
+gistjoin "line/polygon: fused 3-argument point (Z ignored)" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y, 2), 1.5)"
+gistjoin "line/polygon: fused 4-argument point (ZM ignored)" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y, 2, 3), 1.5)"
+gistjoin "line/polygon: left join" "select o.id, i.id from pg_g5p o left join pg_g5z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)"
+gistjoin "line/polygon: right join" "select o.id, i.id from pg_g5p o right join pg_g5z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)"
+gistjoin "line/polygon: semi join" "select o.id from pg_g5p o where exists (select 1 from pg_g5z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistjoin "line/polygon: anti join" "select o.id from pg_g5p o where not exists (select 1 from pg_g5z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistjoin "line/polygon: count per outer row" "select o.id, count(i.id) from pg_g5p o join pg_g5z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) group by o.id"
+# ST_3DDWithin of a non-point: on the CPU (poison), the answer is PostGIS'
+gistjoin "line/polygon: ST_3DDWithin (CPU)" "$J5 st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), 2.5) and i.id % 32 not in (6, 8, 15, 17)"
+# how many rows did the join hand back? (EXPLAIN ANALYZE: Fallback-stats; a line or polygon inner row is always handed back)
+fbsum() {
+	r=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON explain (analyze, costs off) $1" | grep "Fallback-stats" | head -1 | sed 's/[^0-9=]//g; s/=/ /g')
+	n=0; for v in $r; do n=$((n + v)); done; echo $n
+}
+n5=$(fbsum "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)")
+check "the GiST join hands the line and polygon rows to the backend (Fallback-stats sum $n5)" "$([ "${n5:-0}" -gt 0 ]; echo $?)"
+# the exact boundary, as a scan qual: a table with the geometry, a point and PostGIS' own ST_Distance in the same row; the tolerance is that value,
+# one float8 step below it and one above it (the step is computed from the exponent: checked below)
+sql "create table pg_g5q (id int4, geom geometry, x float8, y float8, r float8, rdn float8, rup float8)"
+sql "insert into pg_g5q select z.id, z.geom, p.x, p.y, p.d, p.d - power(2.0::float8, floor(ln(p.d) / ln(2.0)) - 52), p.d + power(2.0::float8, floor(ln(p.d) / ln(2.0)) - 52)
+	from pg_g5z z, lateral (select ST_X(pt) x, ST_Y(pt) y, ST_Distance(z.geom, pt) d from (select ST_MakePoint((z.id * 7919) % 5000 / 100.0 + 0.0123456789, (z.id * 104729) % 4700 / 100.0 + 0.00987654321) pt) q) p
+	where z.id <= 3200 and z.geom is not null and not ST_IsEmpty(z.geom) and GeometryType(z.geom) not in ('POINT', 'CIRCULARSTRING') and ST_SRID(z.geom) = 0 and p.d > 0"
+sql "analyze pg_g5q"
+nb=$($PSQL -d scantest -c "select count(*) from pg_g5q where not (rdn < r and r < rup and rdn > r * (1 - 1e-15) and rup < r * (1 + 1e-15))" | tail -1)
+check "the neighbours of the distances are one step away (violations: $nb)" "$([ "$nb" = 0 ]; echo $?)"
+run pg_g5q "st_dwithin at the exact distance" "select id from %T where st_dwithin(geom, st_makepoint(x, y), r)"
+run pg_g5q "st_dwithin one float8 step below" "select id from %T where st_dwithin(geom, st_makepoint(x, y), rdn)"
+run pg_g5q "st_dwithin one float8 step above" "select id from %T where st_dwithin(geom, st_makepoint(x, y), rup)"
+run pg_g5q "st_dwithin, the point first, exact" "select id from %T where st_dwithin(st_makepoint(x, y), geom, r)"
+run pg_g5q "st_dwithin, the point first, below" "select id from %T where st_dwithin(st_makepoint(x, y), geom, rdn)"
+run pg_g5q "st_distance = the stored distance" "select id from %T where st_distance(geom, st_makepoint(x, y)) = r"
+run pg_g5q "st_distance < r" "select id from %T where st_distance(geom, st_makepoint(x, y)) < r"
+run pg_g5q "st_distance <= rdn" "select id from %T where st_distance(st_makepoint(x, y), geom) <= rdn"
+run pg_g5q "st_dwithin of a fused 3-argument point (Z ignored)" "select id from %T where st_dwithin(geom, st_makepoint(x, y, 5), r)"
+run pg_g5q "st_dwithin of a fused 4-argument point (ZM ignored)" "select id from %T where st_dwithin(geom, st_makepoint(x, y, 5, 6), rdn)"
+ce=$($PSQL -d scantest -c "$CPU select count(*) from pg_g5q where st_dwithin(geom, st_makepoint(x, y), r)" | tail -1)
+cd=$($PSQL -d scantest -c "$CPU select count(*) from pg_g5q where st_dwithin(geom, st_makepoint(x, y), rdn)" | tail -1)
+cu=$($PSQL -d scantest -c "$CPU select count(*) from pg_g5q where st_dwithin(geom, st_makepoint(x, y), rup)" | tail -1)
+nbt=$($PSQL -d scantest -c "select count(*) from pg_g5q" | tail -1)
+check "boundary rows exist: exact $ce, below $cd, above $cu of $nbt rows" "$([ "$ce" -gt 0 ] && [ "$cu" -ge "$ce" ] && [ "$cd" -lt "$ce" ]; echo $?)"
+# the GPU decided (almost) every row: the backend re-evaluated only what the kernel could not (EXPLAIN ANALYZE of the GpuScan)
+fbscan() {
+	r=$($PSQL -d scantest -c "$GPU explain (analyze, costs off) $1" | grep "Fallback-stats" | head -1 | sed 's/[^0-9=]//g; s/=/ /g')
+	n=0; for v in $r; do n=$((n + v)); done; echo $n
+}
+nf=$(fbscan "select id from pg_g5q where st_dwithin(geom, st_makepoint(x, y), r)")
+echo "  info  exact-distance scan qual: $nf of $nbt rows re-checked by the backend"
+check "the GPU decided almost every row of the boundary scan ($nf of $nbt back)" "$([ $((nf * 10)) -lt $nbt ]; echo $?)"
+# 3D: Z lines, multilines, points and multipoints (the polygon, an M-only line and a 2D line are the backend's), PostGIS' own ST_3DDistance in the row
+sql "create table pg_g5q3 (id int4, geom geometry, x float8, y float8, z float8, r float8, rdn float8, rup float8)"
+sql "insert into pg_g5q3 select q.id, q.geom, ST_X(q.pt), ST_Y(q.pt), ST_Z(q.pt), q.d, q.d - power(2.0::float8, floor(ln(q.d) / ln(2.0)) - 52), q.d + power(2.0::float8, floor(ln(q.d) / ln(2.0)) - 52)
+	from (select g.id, g.geom, p.pt, ST_3DDistance(g.geom, p.pt) d
+		from (select i id, case i % 8
+				when 0 then ST_GeomFromEWKT('LINESTRING(' || (i % 40) || ' ' || (i % 37) || ' ' || (i % 9) || ', ' || (i % 40 + 3.7) || ' ' || (i % 37 + 1.3) || ' ' || (i % 9 + 2.1) || ')')
+				when 1 then ST_GeomFromEWKT('LINESTRING(' || (i % 40) || ' ' || (i % 37) || ' 1, ' || (i % 40 + 2.2) || ' ' || (i % 37 + 4.1) || ' 5, ' || (i % 40 + 6.5) || ' ' || (i % 37 + 2.3) || ' 0, ' || (i % 40 + 7) || ' ' || (i % 37 + 7) || ' 3)')
+				when 2 then ST_GeomFromEWKT('LINESTRING(' || (i % 40) || ' ' || (i % 37) || ' 1 7, ' || (i % 40 + 4.5) || ' ' || (i % 37 + 2.5) || ' 3 8)')
+				when 3 then ST_GeomFromEWKT('MULTILINESTRING((' || (i % 40) || ' ' || (i % 37) || ' 1, ' || (i % 40 + 2) || ' ' || (i % 37 + 1) || ' 2), (' || (i % 40 + 5) || ' ' || (i % 37 + 5) || ' 3, ' || (i % 40 + 7.7) || ' ' || (i % 37 + 3.1) || ' 4, ' || (i % 40 + 8) || ' ' || (i % 37 + 9) || ' 5))')
+				when 4 then ST_GeomFromEWKT('MULTIPOINT(' || (i % 40 + 0.5) || ' ' || (i % 37 + 0.5) || ' 2, ' || (i % 40 + 3.5) || ' ' || (i % 37 + 2.5) || ' 6)')
+				when 5 then ST_GeomFromEWKT('GEOMETRYCOLLECTION(POINT(' || (i % 40 + 1.5) || ' ' || (i % 37 + 1.5) || ' 1), LINESTRING(' || (i % 40 + 3) || ' ' || (i % 37) || ' 2, ' || (i % 40 + 8) || ' ' || (i % 37 + 4) || ' 6))')
+				when 6 then ST_GeomFromEWKT('LINESTRING(' || (i % 40) || ' ' || (i % 37) || ' 4, ' || (i % 40) || ' ' || (i % 37) || ' 4)')
+				else ST_GeomFromEWKT('LINESTRING(' || (i % 40) || ' ' || (i % 37) || ' 0, ' || (i % 40 + 1) || ' ' || (i % 37 + 1) || ' 1, ' || (i % 40 + 2) || ' ' || (i % 37 + 2) || ' 2)')
+			end geom from generate_series(1, 1600) i) g,
+			lateral (select ST_MakePoint((g.id * 7919) % 4000 / 100.0 + 0.0123456789, (g.id * 104729) % 3700 / 100.0 + 0.00987654321, (g.id % 11) / 1.7) pt) p) q
+	where q.d > 0"
+sql "insert into pg_g5q3 select 90000 + id, geom, x, y, z, r, rdn, rup from pg_g5q3 where id % 4 = 0 and id < 800"
+sql "analyze pg_g5q3"
+run pg_g5q3 "st_3ddwithin at the exact 3D distance" "select id from %T where st_3ddwithin(geom, st_makepoint(x, y, z), r)"
+run pg_g5q3 "st_3ddwithin one float8 step below" "select id from %T where st_3ddwithin(geom, st_makepoint(x, y, z), rdn)"
+run pg_g5q3 "st_3ddwithin one float8 step above" "select id from %T where st_3ddwithin(st_makepoint(x, y, z), geom, rup)"
+run pg_g5q3 "st_3ddistance = the stored distance" "select id from %T where st_3ddistance(geom, st_makepoint(x, y, z)) = r"
+run pg_g5q3 "st_3ddistance <= rdn" "select id from %T where st_3ddistance(st_makepoint(x, y, z), geom) <= rdn"
+run pg_g5q3 "st_3ddwithin of a fused 4-argument point (M ignored)" "select id from %T where st_3ddwithin(geom, st_makepoint(x, y, z, 9), r)"
+run pg_g5q3 "st_dwithin (2D) of the Z geometries" "select id from %T where st_dwithin(geom, st_makepoint(x, y), 2.5)"
+run pg_g5q3 "st_distance (2D) of the Z geometries" "select id from %T where st_distance(geom, st_makepoint(x, y)) <= 2.5"
+nf3=$(fbscan "select id from pg_g5q3 where st_3ddwithin(geom, st_makepoint(x, y, z), r)")
+n3=$($PSQL -d scantest -c "select count(*) from pg_g5q3" | tail -1)
+echo "  info  exact 3D scan qual: $nf3 of $n3 rows re-checked by the backend"
+check "the GPU decided almost every row of the 3D scan ($nf3 of $n3 back)" "$([ $((nf3 * 10)) -lt $n3 ]; echo $?)"
+# 3D of what the kernel does not measure: Z polygons, an M-only line, 2D lines (PostGIS measures in 2D and says so), a Z line with a missing Z point: all the backend's
+sql "create table pg_g5r (id int4, geom geometry)"
+sql "insert into pg_g5r values (1, ST_GeomFromEWKT('POLYGON((0 0 1, 5 0 1, 5 5 1, 0 5 1, 0 0 1))')), (2, ST_GeomFromEWKT('LINESTRINGM(0 0 1, 5 5 2)')), (3, ST_GeomFromEWKT('LINESTRING(0 0, 5 5)')), (4, ST_GeomFromEWKT('LINESTRING(0 0 3 4, 5 5 6 7)')), (5, ST_GeomFromEWKT('MULTIPOLYGON(((0 0 2, 3 0 2, 0 3 2, 0 0 2)))')), (6, ST_GeomFromEWKT('LINESTRING Z EMPTY')), (7, NULL), (8, ST_GeomFromEWKT('POLYGON EMPTY'))"
+sql "analyze pg_g5r"
+for pt in "ST_MakePoint(2, 2, 1)" "ST_MakePoint(2, 2, 7, 8)" "ST_MakePoint(9, 9, 1)" "ST_MakePoint(1e300, 1e300, 1)"; do
+	for tol in 0 1 2.5 100; do
+		run pg_g5r "st_3ddwithin(geom, $pt, $tol)" "select id from %T where st_3ddwithin(geom, $pt, $tol)"
+		run pg_g5r "st_3ddistance(geom, $pt) <= $tol" "select id from %T where st_3ddistance(geom, $pt) <= $tol"
+		run pg_g5r "st_dwithin(geom, $pt, $tol)" "select id from %T where st_dwithin(geom, $pt, $tol)"
+	done
+done
+# mixed SRID and a bad tolerance raise PostGIS' errors, the same ones
+sql "create table pg_g5n (id int4, x float8, y float8, r float8)"
+sql "insert into pg_g5n values (1, 10, 10, 1)"
+sql "create table pg_g5m (id int4, geom geometry)"
+sql "insert into pg_g5m select i, ST_SetSRID(ST_MakeLine(ST_MakePoint(i, 10), ST_MakePoint(i + 3, 12)), case when i % 2 = 0 then 4326 else 0 end) from generate_series(1, 200) i"
+sql "create index pg_g5m_gist on pg_g5m using gist (geom)"
+sql "analyze pg_g5m"
+for t in "pg_g5m i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 5)" "pg_g5m i on st_dwithin(i.geom, st_setsrid(st_makepoint(o.x, o.y), 3857), 1000)" "pg_g5z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), -1) and i.id % 32 = 5"; do
+	eg=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select o.id, i.id from pg_g5n o join $t" 2>&1 | grep -i 'error' | head -1 | sed 's/geometries.*/geometries/')
+	ec=$($PSQL -d scantest -c "$CPU select o.id, i.id from pg_g5n o join $t" 2>&1 | grep -i 'error' | head -1 | sed 's/geometries.*/geometries/')
+	check "error case on both paths: $t ($eg)" "$([ -n "$eg" ] && [ "$eg" = "$ec" ]; echo $?)"
+done
+for t in "'NaN'" "'Infinity'"; do
+	gistjoin "line/polygon: tolerance $t" "select o.id, i.id from pg_g5n o join pg_g5z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), $t::float8)"
+done
+# the same function as a scan qual (a column against a constant point) and non-finite coordinates (no index: scan quals only)
+sql "create table pg_g5s (id int4, geom geometry)"
+sql "insert into pg_g5s select id, geom from pg_g5z where id <= 640"
+sql "insert into pg_g5s values (92001, ST_MakeLine(ST_MakePoint('NaN', 1), ST_MakePoint(3, 4))), (92002, ST_MakeLine(ST_MakePoint(1, 1), ST_MakePoint('Infinity', 4))), (92003, ST_MakeLine(ST_MakePoint(-1, 1), ST_MakePoint(3, '-Infinity'))), (92004, ST_GeomFromText('POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')), (92005, ST_GeomFromText('LINESTRING(0 0, 4 4)')), (92006, ST_GeomFromText('LINESTRING(1e308 1e308, -1e308 -1e308)'))"
+sql "analyze pg_g5s"
+for pt in "ST_MakePoint(2, 2)" "ST_MakePoint(1.5, 2.5, 7)" "ST_MakePoint(10, 10)" "ST_MakePoint(0, 0)" "ST_MakePoint(4, 4)" "ST_MakePoint(1e300, 1e300)" "ST_GeomFromText('POINT EMPTY')" "ST_MakePoint('NaN', 1)"; do
+	for tol in 0 0.5 2 3.5 1e300 1e-300; do
+		run pg_g5s "st_dwithin(geom, $pt, $tol)" "select id from %T where st_dwithin(geom, $pt, $tol) and id <> 92006"
+		run pg_g5s "st_dwithin($pt, geom, $tol), with the 1e308 line" "select id from %T where st_dwithin($pt, geom, $tol)"
+	done
+done
+sql "delete from pg_g5z where id % 11 = 5"
+sql "update pg_g5z set geom = ST_Translate(geom, 1, 1) where id % 13 = 3 and geom is not null"
+gistjoin "line/polygon: after delete and updates" "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+
 # ---- GpuPreAgg over a GiST join with a geometry qual (A13) ----
 # The service runs a scout pass first (the join kernel only marks the outer rows it cannot decide: Z/M polygons, lines, big or
 # compressed values, bad tolerances), the aggregating kernels skip those rows, and the backend joins them on the CPU and

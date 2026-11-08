@@ -92,6 +92,25 @@ for t in rk_a rk_p rk_first; do
 	runagg_any $t "GROUP BY over a point ZM" "select id % 4, count(*) from %T where ST_Contains($HOLE, ST_MakePoint(x, y, z, m)) group by 1 order by 1"
 done
 
+# Distances of a point to a line, polygon or multi-geometry (A13 slice 4): the kernel measures them exactly; a point that projects within 2^-40 of a segment's
+# end, one the winding test cannot place against an edge, a 3D polygon and the like go back to the backend (the grid of arrow_points.cpp sits on the vertices)
+LN="'LINESTRING(0 0,8 3,12 12,3 14)'::geometry"
+LNZ="'LINESTRING Z(0 0 1,8 3 2,12 12 5,3 14 0)'::geometry"
+MLN="'MULTILINESTRING((0 0,5 5),(7 1,7 9),(-6 -6,-2 -4,-8 -1))'::geometry"
+for t in rk_a rk_p rk_first; do
+	echo "table $t: distances of a point to lines and polygons"
+	run $t "scan: ST_DWithin(line, point, 1.5)" "select id from %T where ST_DWithin($LN, ST_MakePoint(x, y), 1.5)"
+	run $t "scan: ST_DWithin(point, multiline, 0.5)" "select id from %T where ST_DWithin(ST_MakePoint(x, y), $MLN, 0.5)"
+	run $t "scan: ST_DWithin(polygon with holes, point, 0.75)" "select id from %T where ST_DWithin($HOLE, ST_MakePoint(x, y), 0.75)"
+	run $t "scan: ST_DWithin(multipolygon, point Z, 1)" "select id from %T where ST_DWithin($MULTI, ST_MakePoint(x, y, z), 1)"
+	run $t "scan: ST_Distance(line, point) < 2" "select id from %T where ST_Distance($LN, ST_MakePoint(x, y)) < 2"
+	run $t "scan: ST_3DDWithin(line Z, point Z, 2)" "select id from %T where ST_3DDWithin($LNZ, ST_MakePoint(x, y, z), 2)"
+	run $t "scan: ST_3DDistance(line Z, point ZM) <= 3" "select id from %T where ST_3DDistance(ST_MakePoint(x, y, z, m), $LNZ) <= 3"
+	runagg_any $t "count over ST_DWithin(line)" "select count(*), sum(id) from %T where ST_DWithin($LN, ST_MakePoint(x, y), 1.5)"
+	runagg_any $t "GROUP BY over ST_DWithin(polygon)" "select id % 4, count(*) from %T where ST_DWithin($HOLE, ST_MakePoint(x, y), 0.75) group by 1 order by 1"
+done
+rck_check rk_a "select id from %T where ST_DWithin($HOLE, ST_MakePoint(x, y), 0.75)" "ST_DWithin(polygon)"
+
 # ---- parallel workers: every worker has its own record-batch state and recheck buffers
 APAR="set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 runx() { # table, label, query-with-%T, settings: like run, with more settings after $GPU
@@ -206,6 +225,10 @@ rkgc "scan: next to a plain qual" "select id from %T where id % 3 = 0 and ST_Cov
 rkgc "aggregate: count, sum, min, max" "select count(*), sum(id), min(id), max(id) from %T where ST_Contains($SQ, ST_MakePoint(x, y))"
 rkgc "aggregate: GROUP BY id % 7" "select id % 7, count(*), sum(id) from %T where ST_Intersects(ST_MakePoint(x, y), $MULTI) group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1;"
 rkgc "aggregate: GROUP BY two keys" "select id % 3, id % 5, count(*), max(id) from %T where ST_Covers($SQ, ST_MakePoint(x, y)) group by 1, 2 order by 1, 2" "set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1;"
+rkgc "scan: ST_DWithin(line, point)" "select id from %T where ST_DWithin($LN, ST_MakePoint(x, y), 1.5)"
+rkgc "scan: ST_DWithin(polygon with holes, point ZM)" "select id from %T where ST_DWithin($HOLE, ST_MakePoint(x, y, z, m), 0.75)"
+rkgc "scan: ST_3DDWithin(line Z, point Z)" "select id from %T where ST_3DDWithin($LNZ, ST_MakePoint(x, y, z), 2)"
+rkgc "aggregate: count over ST_Distance(multiline) < 1" "select count(*), sum(id) from %T where ST_Distance(ST_MakePoint(x, y), $MLN) < 1"
 rkgc "scan, parallel workers" "select id from %T where ST_Contains($HOLE, ST_MakePoint(x, y))" "$APAR"
 n=$(rck_rows rk_gc "select id from %T where ST_Contains($SQ, ST_MakePoint(x, y))")
 [ "$n" -gt 0 ]; check "rk_gc: the GPU handed cached rows to the backend ($n rechecked)" $?

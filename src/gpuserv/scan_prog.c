@@ -569,6 +569,8 @@ emit_geomdwithin(builder *b, const kern_expression *kexp, int *next)
 	rt = expr_to_reg(b, kt, next);
 	if (rt < 0 || rt > 0xff)
 		return -1;
+	if (kexp->expflags & KEXP_FLAG__GEOM_NP)
+		flags |= SOP_GDW_NP;
 	*next = mark;
 	dst = new_reg(b, next);
 	if (dst < 0 ||
@@ -688,7 +690,7 @@ emit_geomdist(builder *b, const kern_expression *kexp, scan_func_class fc, int *
 	if (dst < 0 ||
 		emit(b, SOP_GEOMDIST, dst, ra, rb,
 			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16),
-			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) rza << 20) | ((uint32_t) rzb << 25) |
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) (rza < 0 ? 0 : rza) << 20) | ((uint32_t) (rzb < 0 ? 0 : rzb) << 25) |
 			 (d3 ? SOP_GDIST_3D : 0)) < 0)
 		return -1;
 	return dst;
@@ -787,10 +789,12 @@ emit_geom3ddw(builder *b, const kern_expression *kexp, int *next)
 		return -1;
 	*next = mark;
 	dst = new_reg(b, next);
+	if (kexp->expflags & KEXP_FLAG__GEOM_NP)
+		flags |= SOP_GDW_NP;
 	if (dst < 0 ||
 		emit(b, SOP_GEOM3DDW, dst, ra, rb,
 			 flags | ((uint32_t) rya << 8) | ((uint32_t) ryb << 16) | ((uint32_t) rt << 24),
-			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) rza << 20) | ((uint32_t) rzb << 25) |
+			 (uint32_t) (kmk[0] ? srid[0] : srid[1]) | ((uint32_t) (rza < 0 ? 0 : rza) << 20) | ((uint32_t) (rzb < 0 ? 0 : rzb) << 25) |
 			 ((kexp->expflags & KEXP_FLAG__GEOM_EXACT) ? SOP_GDW_EXACT : 0)) < 0)
 		return -1;
 	return dst;
