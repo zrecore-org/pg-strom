@@ -1507,6 +1507,7 @@ typedef struct
 	RelOptInfo	   *input_rel;
 	ParamPathInfo  *param_info;
 	double			num_groups;
+	int				max_keys;			/* GROUP BY keys: SCAN_GROUP_KEYS for a heap scan, SCAN_GROUP_KEYS_SHARED otherwise */
 	bool			try_parallel;
 	bool			has_aggfuncs;
 	PathTarget	   *target_upper;
@@ -2016,7 +2017,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				   con->inner_target_list == NIL &&
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
 				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
-				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)
+				list_length(con->groupby_keys) >= con->max_keys)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
 					 nodeToString(expr));
@@ -2615,6 +2616,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	ListCell   *lc;
 	CustomPath *cpath;
 	double		num_groups = 1.0;
+	bool		heap_scan;
 
 	/*
 	 * GpuPreAgg on top of a GpuJoin: the join kernel aggregates the joined rows on the device
@@ -2670,34 +2672,16 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 										 NULL, NULL);
 	}
 	/*
-	 * A GROUP BY over a heap table keeps its groups in one hash table in device memory for the whole query (gtab.slang) and
-	 * scales to many groups. The other sources (Arrow_Fdw, GPU-Cache, a join below) still use the workgroups' tables in
-	 * shared memory; with many more groups than fit, most rows would be aggregated on the CPU, so leave such queries to
+	 * A GROUP BY over a scan (heap, Arrow_Fdw, GPU-Cache) keeps its groups in one hash table in device memory for the whole query
+	 * (gtab.slang) and scales to many groups. A join below still uses the workgroups' tables in shared memory; with many more groups than fit, most rows would be aggregated on the CPU, so leave such queries to
 	 * PostgreSQL.
 	 */
-	if (parse->groupClause)
+	heap_scan = (input_path->custom_paths == NIL);
 	{
-		bool		heap_scan = (input_path->custom_paths == NIL);
 		int			limit;
 
-		if (heap_scan)
-		{
-			ListCell   *lc2;
-
-			foreach (lc2, pp_input->scan_rels_list)
-			{
-				pgstromPlanScanInfo *pp_scan = lfirst(lc2);
-				RelOptInfo *rel;
-
-				if (pp_scan->scan_relid >= (Index) root->simple_rel_array_size)
-					continue;
-				rel = root->simple_rel_array[pp_scan->scan_relid];
-				if (rel && (baseRelIsArrowFdw(rel) || baseRelHasGpuCache(root, rel)))
-					heap_scan = false;
-			}
-		}
 		limit = heap_scan ? pgstrom_gpupreagg_max_groups_heap : pgstrom_gpupreagg_max_groups;
-		if (num_groups > limit)
+		if (parse->groupClause && num_groups > limit)
 		{
 			elog(DEBUG2, "GpuPreAgg: estimated %.0f groups exceed pg_strom.gpupreagg_max_groups%s",
 				 num_groups, heap_scan ? "_heap" : "");
@@ -2719,6 +2703,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	con.input_rel      = input_rel;
 	con.param_info     = input_path->path.param_info;
 	con.num_groups     = num_groups;
+	con.max_keys       = heap_scan ? SCAN_GROUP_KEYS : SCAN_GROUP_KEYS_SHARED;
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();
@@ -3828,7 +3813,7 @@ pgstrom_init_gpu_preagg(void)
 							NULL, NULL, NULL);
 	/* pg_strom.gpupreagg_max_groups_heap */
 	DefineCustomIntVariable("pg_strom.gpupreagg_max_groups_heap",
-							"Largest estimated number of groups for which GROUP BY over a heap table runs on the GPU",
+							"Largest estimated number of groups for which GROUP BY over a scan (heap, Arrow_Fdw, GPU-Cache) runs on the GPU",
 							"A GROUP BY over a heap table keeps its groups in a hash table in device memory for the whole query; it beat 8-worker PostgreSQL from about a thousand groups up to a million. Other sources are limited by pg_strom.gpupreagg_max_groups",
 							&pgstrom_gpupreagg_max_groups_heap,
 							2000000,
