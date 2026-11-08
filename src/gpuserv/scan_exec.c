@@ -2170,8 +2170,7 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 #define GT_HDR			8
 #define GT_KEYW			6
 #define GT_MAX_BYTES	(384U << 20)	/* the table of a session */
-#define GT_MIN_GROUPS	192				/* use the table when a task has produced more groups */
-#define GT_EST_GROUPS	500				/* or when the planner expects more (an expression key has the default estimate of 200: the first task decides) */
+#define GT_INIT_SLOTS	(1U << 20)		/* the largest table created from the planner's estimate (it grows if needed) */
 
 typedef struct gtab_state
 {
@@ -2198,9 +2197,13 @@ gt_stride(const scan_prog *prog)
 	return stride;
 }
 
-/* PGSTROM_GPUSERV_GTAB: 0 never, 1 always (tests); default: when the groups are many */
+/*
+ * PGSTROM_GPUSERV_GTAB: 0 never, 1 always (tests); default: once a task of the shared-memory kernel has found that most of
+ * its rows overflow (scan_exec_group_task), the session uses the table. The planner's estimate is no guide (PostgreSQL
+ * estimates an expression such as a % 10 by the distinct values of a), it only sizes the table.
+ */
 static int
-gtab_wanted(const agg_state *st, float est_groups)
+gtab_wanted(const agg_state *st)
 {
 	static int	mode = -1;
 
@@ -2212,9 +2215,7 @@ gtab_wanted(const agg_state *st, float est_groups)
 	}
 	if (mode == 0)
 		return 0;
-	if (mode == 1 || st->gt)
-		return 1;
-	return est_groups > GT_EST_GROUPS || (st->groups && st->groups->nents > GT_MIN_GROUPS);
+	return mode == 1 || st->gt != NULL;
 }
 
 static void
@@ -2383,6 +2384,14 @@ scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen)
 }
 
 static int
+gtab_wanted_switch(void)
+{
+	const char *s = getenv("PGSTROM_GPUSERV_GTAB");
+
+	return !s || atoi(s) == 2;
+}
+
+static int
 ensure_gtab_pipeline(scan_engine *eng, int variant, char *err, size_t errlen)
 {
 	gpu_vk_ctx *vk = eng->vk;
@@ -2440,8 +2449,10 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	{
 		double		est = session->groupby_ngroups_estimation;
 
-		if (est < 0 || est > 1e9)
-			est = 1e9;
+		if (!(est >= 0))
+			est = 0;
+		if (est * 2 > GT_INIT_SLOTS)
+			est = GT_INIT_SLOTS / 2;
 		/* the planner's estimate, and at least what the session has seen (twice: the table is kept below half full) */
 		if (gtab_create(vk, prog, st, (uint64_t)(est * 2) > 4096 ? (uint64_t)(est * 2) : 4096, err, errlen) != 0)
 			return -1;
@@ -2596,7 +2607,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	uint32_t   *lp_base = NULL;
 	size_t		out_words;
 	const uint32_t *out;
-	int			rv = -1;
+	int			rv = -1, redo = 0;
 	const uint32_t *w;
 	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
@@ -2634,7 +2645,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		snprintf(err, errlen, "not a GROUP BY program");
 		return -1;
 	}
-	if (gtab_wanted(st, session->groupby_ngroups_estimation))
+	if (gtab_wanted(st))
 		return group_task_gtab(eng, session, prog, st, task, kds_src, err, errlen);
 	nagg = prog->nagg;
 	w = prog->words;
@@ -2726,6 +2737,27 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		goto done;
 	}
 	t2 = now_ms();
+	/*
+	 * Most rows found no slot in the workgroups' tables (many groups): the CPU would aggregate them one by one. Run the task
+	 * again on the session-wide table (gtab.slang) and keep using it. (The groups so far, if any, stay in the session's groups.)
+	 */
+	if (gtab_wanted_switch())
+	{
+		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
+		uint64_t	nov = 0, nhits = 0;
+
+		for (uint32_t i = 0; i < total_lps; i++)
+			nov += (flags[i] == 1);
+		for (uint32_t wg = 0; wg < ngroups_total; wg++)
+			nhits += out[4 + (size_t) wg * blk_words];
+		if (nov > 1000 && nov * 16 > nhits)
+		{
+			st->nitems_raw -= total_lps;
+			redo = 1;
+			rv = 0;
+			goto done;
+		}
+	}
 	/* merge the workgroups' tables */
 	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
 	{
@@ -2754,6 +2786,8 @@ done:
 	page_set_release(vk, &ps);
 	if (rv != 0 && err[0] == '\0')
 		snprintf(err, errlen, "GROUP BY aggregation failed");
+	if (redo)
+		return group_task_gtab(eng, session, prog, st, task, kds_src, err, errlen);
 	return rv;
 }
 
