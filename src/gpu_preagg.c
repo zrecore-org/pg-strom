@@ -3830,7 +3830,7 @@ pgstrom_init_gpu_preagg(void)
 							"Largest estimated number of groups for which GROUP BY over a heap table runs on the GPU",
 							"A GROUP BY over a heap table keeps its groups in a hash table in device memory for the whole query; it beat 8-worker PostgreSQL from about a thousand groups up to a million. Other sources are limited by pg_strom.gpupreagg_max_groups",
 							&pgstrom_gpupreagg_max_groups_heap,
-							1000000,
+							2000000,
 							1,
 							INT_MAX,
 							PGC_USERSET,

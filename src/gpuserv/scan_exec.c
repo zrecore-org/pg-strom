@@ -2169,7 +2169,7 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
  */
 #define GT_HDR			8
 #define GT_KEYW			6
-#define GT_MAX_BYTES	(384U << 20)	/* the table of a session */
+#define GT_MAX_BYTES	(512U << 20)	/* the table of a session */
 #define GT_INIT_SLOTS	(1U << 20)		/* the largest table created from the planner's estimate (it grows if needed) */
 
 typedef struct gtab_state

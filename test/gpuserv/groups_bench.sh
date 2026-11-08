@@ -62,7 +62,7 @@ if [ "$(sql "select count(*) from pg_class where relname = 'gt'")" = 0 ]; then
 	sql "vacuum analyze gt"
 fi
 echo "=== service: $(sql "select state from pgstrom.gpu_service_state()"), specialize=$SPEC, table $(sql "select pg_size_pretty(pg_table_size('gt'))")"
-GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000000;"
+GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000000; set pg_strom.gpupreagg_max_groups_heap=100000000;"
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 bench() { # label query
 	label=$1; qry=$2
