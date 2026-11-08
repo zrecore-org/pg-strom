@@ -41,6 +41,20 @@ else
 		LIST="$LIST $k ${k}_lite ${k}_nogeom"
 	done
 fi
+# Only what the test script needs (PREWARM_FOR=<script name>, set by locked_test.sh): a script whose programs use no
+# geometry never runs the full tier of a kernel (its programs use the lite or the nogeom variant), and the full tier is
+# the one that costs about 5 minutes per kernel when cold, so those scripts warm only the _lite and _nogeom variants.
+# The geometry scripts, the whole-suite scripts and any script not named here keep the whole list. A variant that a
+# script needs and the set leaves out is compiled at its first use, as before.
+#   PREWARM_SET=all|nongeom overrides the choice by script name
+case "${PREWARM_SET:-$PREWARM_FOR}" in
+	nongeom|float8_dev.sh|arrow_dev.sh|keys_dev.sh|fallback_dev.sh|gtab_dev.sh|spec_dev.sh|joinagg_dev.sh|gpucache_dev.sh|gpusort_dev.sh|hash_check.sh)
+		FILTERED=
+		for k in $LIST; do case "$k" in *_lite|*_nogeom) FILTERED="$FILTERED $k";; esac; done
+		LIST=$FILTERED ;;
+esac
+# PREWARM_LIST_ONLY=1: print the kernels that would be checked and stop (test of the sets)
+[ -n "$PREWARM_LIST_ONLY" ] && { for k in $LIST; do echo "$k"; done; exit 0; }
 geom() {	# nbind and push constant bytes by kernel family (scan_exec.c, arrow_exec.c)
 	case $1 in
 	gpuscan*|gpuagg*|gagg*|gpuarrow*) echo "5 16";;
