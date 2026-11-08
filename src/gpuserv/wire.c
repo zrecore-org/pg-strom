@@ -464,7 +464,15 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			{
 				char		msg[256];
 				size_t		len = 0;
-				XpuCommand *resp = (wc->session->u.session.xpucode_gpusort_keydesc
+				XpuCommand *resp;
+
+				if (scan_group_flush(&wc->prog, &wc->agg, msg, sizeof(msg)) != 0)
+				{
+					wlog(ws, 1, "final failed: %s", msg);
+					reply_error(wc, "XpuTaskFinal", "%s", msg);
+					break;
+				}
+				resp = (wc->session->u.session.xpucode_gpusort_keydesc
 								   ? scan_exec_agg_final_sorted(&ws->scan, wc->session, &wc->prog, &wc->agg, &len,
 																msg, sizeof(msg))
 								   : scan_exec_agg_final(wc->session, &wc->prog, &wc->agg, &len, msg, sizeof(msg)));
