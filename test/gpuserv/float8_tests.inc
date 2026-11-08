@@ -210,5 +210,5 @@ for t in $(f8part joinagg); do
 	rungrp $t "float8 aggregates over a join per group" "select d.grp, sum(d.v), min(t.x), max(d.u), avg(d.v), count(*) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
 	rungrp $t "float8 aggregates over a join with a float8 qual and a FILTER per group" "select d.grp, sum(d.v) filter (where d.grp < 3), max(t.y), min(d.u) from %T t join f8_dim d on t.b = d.k where t.x > d.v group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
 	rungrp $t "sum(float4) over a join per group" "select d.grp, sum((t.a % 8)::float4), sum((d.k % 5)::float4), count(*) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
-	rungrp $t "many groups over a join (overflow rows)" "select t.b % 300, sum(d.v), min(t.x), max(d.u) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
+	rungrp $t "many groups over a join (overflow rows)" "select d.k, sum(d.v), min(t.x), max(d.u) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
 done
