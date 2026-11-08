@@ -1507,6 +1507,7 @@ typedef struct
 	RelOptInfo	   *input_rel;
 	ParamPathInfo  *param_info;
 	double			num_groups;
+	int				max_keys;			/* GROUP BY keys: SCAN_GROUP_KEYS for a heap scan, SCAN_GROUP_KEYS_SHARED otherwise */
 	bool			try_parallel;
 	bool			has_aggfuncs;
 	PathTarget	   *target_upper;
@@ -2016,7 +2017,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				   con->inner_target_list == NIL &&
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
 				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
-				list_length(con->groupby_keys) >= SCAN_GROUP_KEYS)
+				list_length(con->groupby_keys) >= con->max_keys)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
 					 nodeToString(expr));
@@ -2615,6 +2616,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	ListCell   *lc;
 	CustomPath *cpath;
 	double		num_groups = 1.0;
+	bool		heap_scan;
 
 	/*
 	 * GpuPreAgg on top of a GpuJoin: the join kernel aggregates the joined rows on the device
@@ -2675,9 +2677,8 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	 * shared memory; with many more groups than fit, most rows would be aggregated on the CPU, so leave such queries to
 	 * PostgreSQL.
 	 */
-	if (parse->groupClause)
+	heap_scan = (input_path->custom_paths == NIL);
 	{
-		bool		heap_scan = (input_path->custom_paths == NIL);
 		int			limit;
 
 		if (heap_scan)
@@ -2697,7 +2698,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 			}
 		}
 		limit = heap_scan ? pgstrom_gpupreagg_max_groups_heap : pgstrom_gpupreagg_max_groups;
-		if (num_groups > limit)
+		if (parse->groupClause && num_groups > limit)
 		{
 			elog(DEBUG2, "GpuPreAgg: estimated %.0f groups exceed pg_strom.gpupreagg_max_groups%s",
 				 num_groups, heap_scan ? "_heap" : "");
@@ -2719,6 +2720,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	con.input_rel      = input_rel;
 	con.param_info     = input_path->path.param_info;
 	con.num_groups     = num_groups;
+	con.max_keys       = heap_scan ? SCAN_GROUP_KEYS : SCAN_GROUP_KEYS_SHARED;
 	con.try_parallel   = be_parallel;
 	con.target_upper   = root->upper_targets[upper_stage];
 	con.target_partial = create_empty_pathtarget();

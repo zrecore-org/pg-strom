@@ -85,11 +85,9 @@ agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU fun
 agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
-agg.group3.* | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-agg.group4.int | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-srcfull.*.group3.* | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-aggjoin.type.group_three_keys | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-src.*.agg.group_three_keys | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
+srcfull.*.group3.* | GROUP BY with three or more keys over an Arrow/Parquet source or a join: only the heap path (gtab.slang) holds up to four keys | gap:A3
+aggjoin.type.group_three_keys | GROUP BY with three or more keys over an Arrow/Parquet source or a join: only the heap path (gtab.slang) holds up to four keys | gap:A3
+src.*.agg.group_three_keys | GROUP BY with three or more keys over an Arrow/Parquet source or a join: only the heap path (gtab.slang) holds up to four keys | gap:A3
 agg.groups.500.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
 agg.groups.50000.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
 agg.groups.1000000.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3

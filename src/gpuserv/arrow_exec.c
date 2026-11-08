@@ -1879,8 +1879,8 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&
@@ -2482,8 +2482,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS + 6 * sh.agg_max;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&

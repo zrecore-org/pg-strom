@@ -19,7 +19,7 @@
 // A row is flagged 2 if the backend must evaluate it (a string or numeric the kernel cannot read, as in gagg.slang).
 //
 // Table buffer (gtab): header { 0: slots claimed, 1: rows that qualified, 2: slot mask, 3: words per slot }, from word 8
-// the slots, each { tag, null mask, k0 lo, k0 hi, k1 lo, k1 hi, accumulators of the aggregates in order }.
+// the slots, each { tag, null mask, (lo, hi) of each of the GA_NK = 4 keys (unused keys 0), accumulators of the aggregates in order }.
 //   count:   { n }
 //   sum:     { n, Lpos, Cpos, Lneg, Cneg, nbig, Lxl, Cxl, Lxh, Cxh }   v in [0, 2^32): Lpos += v;  v in (-2^32, 0): Lneg += -v;
 //            other v: x = v + 2^63 (unsigned), Lxl += low word of x, Lxh += high word, nbig++. L is a 32-bit sum and C counts
@@ -38,10 +38,10 @@
 #ifndef GA_NA
 #define GA_NA 12
 #endif
-#define GA_NK 2
+#define GA_NK 4
 #define GT_MAXPROBE 64
 #define GT_HDR 8
-#define GT_KEYW 6
+#define GT_KEYW (2 + 2 * GA_NK)
 
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint> gtab;
 
@@ -60,11 +60,16 @@ groupshared int64_t st_key[SCAN_WG * GA_NK];
 groupshared uint    st_ok[SCAN_WG * GA_NA];
 groupshared int64_t st_val[SCAN_WG * GA_NA];
 
-uint hash_keys(int64_t k0, int64_t k1, uint kn)
+uint hash_key_words(int64_t k, uint bit, uint kn, uint h)
+{
+    return (h ^ (uint(k) ^ (uint(k >> 32) * 0x9e3779b1u) ^ (((kn >> bit) & 1u) * 0x85ebca6bu))) * 0x01000193u;
+}
+
+uint hash_keys(int64_t k[GA_NK], uint kn)
 {
     uint h = 0x811c9dc5u;
-    h = (h ^ (uint(k0) ^ (uint(k0 >> 32) * 0x9e3779b1u) ^ ((kn & 1u) * 0x85ebca6bu))) * 0x01000193u;
-    h = (h ^ (uint(k1) ^ (uint(k1 >> 32) * 0x9e3779b1u) ^ ((kn & 2u) * 0x85ebca6bu))) * 0x01000193u;
+    for (uint i = 0; i < GA_NK; i++)
+        h = hash_key_words(k[i], i, kn, h);
     h ^= h >> 15;
     h *= 0x2c1b3c6du;
     h ^= h >> 12;
@@ -99,25 +104,33 @@ void add_wrap(uint i, uint c, uint x)
 }
 
 // the first word of the slot of a key, NO_SLOT if the table has no such slot (yet)
-uint gt_find(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride)
+uint gt_find(uint tag, uint kn, uint tid, uint mask, uint stride)
 {
     uint s = tag & mask;
-    uint k0l = uint(k0), k0h = uint(uint64_t(k0) >> 32), k1l = uint(k1), k1h = uint(uint64_t(k1) >> 32);
     for (uint p = 0; p < GT_MAXPROBE; p++)
     {
         uint base = GT_HDR + s * stride;
         uint t = gtab[base];
         if (t == 0)
             return NO_SLOT;
-        if (t == tag && gtab[base + 1] == kn && gtab[base + 2] == k0l && gtab[base + 3] == k0h &&
-            gtab[base + 4] == k1l && gtab[base + 5] == k1h)
-            return base;
+        if (t == tag && gtab[base + 1] == kn)
+        {
+            bool same = true;
+            for (uint i = 0; i < GA_NK; i++)
+            {
+                uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                if (gtab[base + 2 + 2 * i] != uint(kv & 0xffffffffu) || gtab[base + 3 + 2 * i] != uint(kv >> 32))
+                    same = false;
+            }
+            if (same)
+                return base;
+        }
         s = (s + 1) & mask;
     }
     return NO_SLOT;
 }
 
-void gt_insert(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride)
+void gt_insert(uint tag, uint kn, uint tid, uint mask, uint stride)
 {
     uint s = tag & mask;
     for (uint p = 0; p < GT_MAXPROBE; p++)
@@ -133,10 +146,12 @@ void gt_insert(uint tag, uint kn, int64_t k0, int64_t k1, uint mask, uint stride
             if (prev == 0)
             {
                 gtab[base + 1] = kn;
-                gtab[base + 2] = uint(k0);
-                gtab[base + 3] = uint(uint64_t(k0) >> 32);
-                gtab[base + 4] = uint(k1);
-                gtab[base + 5] = uint(uint64_t(k1) >> 32);
+                for (uint i = 0; i < GA_NK; i++)
+                {
+                    uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
+                    gtab[base + 2 + 2 * i] = uint(kv & 0xffffffffu);
+                    gtab[base + 3 + 2 * i] = uint(kv >> 32);
+                }
                 uint d;
                 InterlockedAdd(gtab[0], 1, d);
                 return;
@@ -264,21 +279,19 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             spec_stage(regs, tid);
 #else
             {
-                int64_t k0 = 0, k1 = 0;
+                int64_t kk[GA_NK];
                 uint kn = 0;
-                if (nkeys > 0)
+                for (uint i = 0; i < GA_NK; i++)
                 {
-                    Reg r = regs[prog[keyoff]];
-                    if (r.isnull != 0) kn |= 1u; else k0 = r.v;
+                    kk[i] = 0;
+                    if (i < nkeys)
+                    {
+                        Reg r = regs[prog[keyoff + i]];
+                        if (r.isnull != 0) kn |= (1u << i); else kk[i] = r.v;
+                    }
+                    st_key[tid * GA_NK + i] = kk[i];
                 }
-                if (nkeys > 1)
-                {
-                    Reg r = regs[prog[keyoff + 1]];
-                    if (r.isnull != 0) kn |= 2u; else k1 = r.v;
-                }
-                st_key[tid * GA_NK + 0] = k0;
-                st_key[tid * GA_NK + 1] = k1;
-                st_hash[tid] = hash_keys(k0, k1, kn);
+                st_hash[tid] = hash_keys(kk, kn);
                 st_kn[tid] = kn | 0x80000000u;
                 for (uint k = 0; k < naggs; k++)
                 {
@@ -314,18 +327,16 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 outb[fidx] = 1u;
                 continue;
             }
-            uint kn = st_kn[tid] & 3u;
-            int64_t k0 = st_key[tid * GA_NK + 0];
-            int64_t k1 = st_key[tid * GA_NK + 1];
+            uint kn = st_kn[tid] & 15u;
             uint tag = st_hash[tid];
             if (tag == 0)
                 tag = 1;
             if (mode == 1)
             {
-                gt_insert(tag, kn, k0, k1, mask, stride);
+                gt_insert(tag, kn, tid, mask, stride);
                 continue;
             }
-            uint base = gt_find(tag, kn, k0, k1, mask, stride);
+            uint base = gt_find(tag, kn, tid, mask, stride);
             if (base == NO_SLOT)
             {
                 outb[fidx] = (mode == 0) ? 4u : 1u;
