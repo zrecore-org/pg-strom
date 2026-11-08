@@ -425,7 +425,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 				nexprs++;
 		}
 		/* a computed value has a slot and a register of its own above the slots (scan_prog.c), plus temporaries */
-		if (nslots + 2 * nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
+		if (!pgstrom_debug_no_limits && nslots + 2 * nexprs + SCAN_VM_TEMP_BUDGET > SCAN_MAX_REGS)
 		{
 			elog(DEBUG2, "GpuJoin: %d kernel variables exceed the Vulkan service's registers", nslots);
 			return NULL;

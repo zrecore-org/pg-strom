@@ -1405,9 +1405,11 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				((const char *) session + session->xpucode_groupby_keyhash);
 			const kern_expression *kk = KEXP_FIRST_ARG(khash);
 
-			if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS)
+			int		maxkeys = SCAN_GROUP_KEYS;		/* (a join has its own builder: join_build_agg) */
+
+			if (khash->nr_args < 1 || khash->nr_args > (uint32_t) maxkeys)
 			{
-				fail(&b, "%u GROUP BY keys (up to %d are supported)", khash->nr_args, SCAN_GROUP_KEYS);
+				fail(&b, "%u GROUP BY keys (up to %d are supported)", khash->nr_args, maxkeys);
 				goto error;
 			}
 			for (uint32_t j = 0; j < khash->nr_args; j++, kk = KEXP_NEXT_ARG(kk))
@@ -1993,7 +1995,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 	const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
 	const kern_expression *ksave = KEXP_FIRST_ARG(kagg);
 	int			slot_reg[SCAN_MAX_REGS];
-	int			key_slot[SCAN_GROUP_KEYS];
+	int			key_slot[SCAN_GROUP_KEYS_SHARED];
 	int			perm = b->nslots;
 	int			nagg = 0, nkeys = 0, nattrs_out = kagg->u.pagg.nattrs;
 
@@ -2009,8 +2011,8 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 			((const char *) session + session->xpucode_groupby_keyhash);
 		const kern_expression *kk = KEXP_FIRST_ARG(khash);
 
-		if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS)
-			return fail(b, "%u GROUP BY keys (up to %d are supported)", khash->nr_args, SCAN_GROUP_KEYS);
+		if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS_SHARED)
+			return fail(b, "%u GROUP BY keys (up to %d are supported over a join)", khash->nr_args, SCAN_GROUP_KEYS_SHARED);
 		for (uint32_t j = 0; j < khash->nr_args; j++, kk = KEXP_NEXT_ARG(kk))
 		{
 			int		bytes, vt, r, nx = perm;
@@ -2153,7 +2155,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	int			max_src = 0;
 	int			agg_mode, nagg = 0, nkeys = 0;
 	uint32_t	agg_tab[4 * SCAN_AGG_MAX];
-	uint32_t	key_reg_tab[SCAN_GROUP_KEYS];
+	uint32_t	key_reg_tab[SCAN_GROUP_KEYS_SHARED];
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));

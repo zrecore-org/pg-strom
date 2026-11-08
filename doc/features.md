@@ -73,10 +73,13 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   into Vulkan on unified-memory devices; `PGSTROM_GPUSERV_NO_MAP=1` turns this off).
 - The result tuples are formed on the CPU by the service from the source tuple plus the GPU's
   computed values, in heap order.
-- **Errors are not recovered.** A kernel error (division by zero, integer overflow) fails the query,
-  with a message that names the function, block and line pointer. PostgreSQL evaluates quals in an
-  order the GPU does not follow, so a row PostgreSQL would have skipped can raise an error on the GPU.
-  `pg_strom.cpu_fallback` does not change this (see [parameters.md](parameters.md)).
+- **Errors and refusals fall back to the CPU (A14).** A program the service refuses, a kernel error (division by
+  zero, integer overflow), a lost device, a service that is not ready or disappears do not fail the query: the node
+  continues on the CPU and returns the rows of the plan with `pg_strom.enabled = off`, including its own error when the
+  CPU raises one too (PostgreSQL evaluates quals in an order the GPU does not follow, so a row it would have skipped can
+  raise an error on the GPU only; the CPU re-run does not). See `pg_strom.gpu_error_fallback` in
+  [parameters.md](parameters.md) for how it works and for what is not recoverable (GPU-Sort, pinned inner buffers,
+  SELECT INTO direct).
 - Arrow_Fdw (A5): one or several Arrow files (any number of record batches) and Parquet files (one task per
   row group; **the backend decodes the row group with libparquet on the CPU**, the GPU only filters).
   The planner offers a GpuScan only if every referenced column has a supported Arrow type: Int
@@ -96,7 +99,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
   groups:** with the specialized kernels (plan A6) 5.7x faster than 8-process PostgreSQL at 7 groups and 3.9x at
   100 (dense integer keys; a direct-mapped table), 3.5x for a GROUP BY over a join; with the interpreter
   alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
-  queries with more than `pg_strom.gpupreagg_max_groups` (default 128) estimated groups on PostgreSQL.
+  queries with more than `pg_strom.gpupreagg_max_groups` (default 128; 2,000,000 as `pg_strom.gpupreagg_max_groups_heap` for a scan: heap, Arrow/Parquet, GPU-Cache) estimated groups on PostgreSQL.
 - Aggregation over a join runs on the device as well (`GpuPreAgg` on the join; plan A4): without GROUP BY
   4.8x faster than 8-process PostgreSQL with the specialized kernels (28 ms against 136 ms on 16.8M rows).
   This includes RIGHT and FULL joins: the matched rows are aggregated on the device and the inner rows

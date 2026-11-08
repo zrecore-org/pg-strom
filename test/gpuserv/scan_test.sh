@@ -21,7 +21,7 @@ fail=0
 # exactly one shard, whatever the weights say. SHARD=1/1 (the default) runs everything.
 SHARD=${SHARD:-1/1}
 shard_i=${SHARD%/*}; shard_n=${SHARD#*/}
-SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fuzz:40 gist:30 gpusort:20 recheck:650"
+SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fallback:150 fuzz:40 gist:30 gpusort:20 recheck:650"
 SHARD_MINE=$(echo $SHARD_UNITS | tr ' ' '\n' | sort -t: -k2 -nr | awk -F: -v n="$shard_n" -v me="$shard_i" \
 	'{ b = 1; for (k = 2; k <= n; k++) if (load[k] < load[b]) b = k; load[b] += $2; if (b == me) printf "%s ", $1 }')
 mine() { # does this shard run the unit? (a unit that is not in the list runs on shard 1)
@@ -200,8 +200,8 @@ for t in s1 s2 s3; do
 done
 runagg s1 "parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 runagg_any s1 "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
-runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
-if mine_tbl s1; then plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?; fi
+runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16; set pg_strom.gpupreagg_max_groups_heap=16;"
+if mine_tbl s1; then plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; set pg_strom.gpupreagg_max_groups_heap=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?; fi
 
 echo "joins"
 sql "create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp,
@@ -353,6 +353,9 @@ JOINSET="$JOINSET_SAVE"
 # ---- aggregation over a join (GpuPreAgg on GpuJoin), with and without GROUP BY
 unit_source joinagg "${0%/*}/joinagg_tests.inc"
 
+# ---- GROUP BY with many groups (the session-wide hash table)
+unit_source gtab "${0%/*}/gtab_tests.inc"
+
 echo "arrow (Arrow_Fdw)"
 # The foreign tables read Arrow IPC files written by arrow_gen.cpp (the arrow-tools do not build on macOS).
 ARROWDIR="$ROOT/arrow"; mkdir -p "$ARROWDIR"
@@ -429,6 +432,7 @@ unit_source fuzz "${0%/*}/fuzz_regress.inc"
 unit_source gpusort "${0%/*}/gpusort_tests.inc"
 unit_source gpucache "${0%/*}/gpucache_tests.inc"
 unit_source spec "${0%/*}/spec_tests.inc"
+unit_source fallback "${0%/*}/fallback_tests.inc"
 
 echo "errors"
 if mine_tbl s1; then

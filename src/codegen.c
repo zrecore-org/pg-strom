@@ -5848,7 +5848,7 @@ pgstrom_vulkan_expr_limits(Expr *expr)
 	int			regs = vulkan_expr_regs((Node *) expr, &nodes);
 
 	/* one register less: a list of quals is one AND whose accumulator takes a register */
-	if (regs > SCAN_VM_TEMP_BUDGET - 1 || nodes > SCAN_VM_EXPR_NODES)
+	if (!pgstrom_debug_no_limits && (regs > SCAN_VM_TEMP_BUDGET - 1 || nodes > SCAN_VM_EXPR_NODES))
 	{
 		elog(DEBUG2, "expression is too deep for the Vulkan service (%d registers, %d nodes): %s",
 			 regs, nodes, nodeToString(expr));

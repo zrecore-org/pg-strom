@@ -167,7 +167,7 @@ __xpuConnectSessionWorker(void *__priv)
 /*
  * xpuClientSendCommand
  */
-static void
+static bool
 xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 {
 	int			sockfd = conn->sockfd;
@@ -188,18 +188,19 @@ xpuClientSendCommand(XpuConnection *conn, const XpuCommand *xcmd)
 			len -= nbytes;
 		}
 		else if (nbytes == 0)
-			elog(ERROR, "unable to send xPU command to the service");
+			return false;
 		else if (errno == EINTR)
 			CHECK_FOR_INTERRUPTS();
 		else
-			elog(ERROR, "failed on write(2): %m");
+			return false;		/* the service is gone (EPIPE, ECONNRESET, ...) */
 	}
+	return true;
 }
 
 /*
  * xpuClientSendCommandIOV
  */
-static void
+static bool
 xpuClientSendCommandIOV(XpuConnection *conn,
 						const XpuCommand *xcmd,
 						struct iovec *iov, int iovcnt)
@@ -233,12 +234,13 @@ xpuClientSendCommandIOV(XpuConnection *conn,
 			} while (iovcnt > 0 && nbytes > 0);
 		}
 		else if (nbytes == 0)
-			elog(ERROR, "unable to send xPU command to the service");
+			return false;
 		else if (errno == EINTR)
 			CHECK_FOR_INTERRUPTS();
 		else
-			elog(ERROR, "failed on writev(2): %m");
+			return false;
 	}
+	return true;
 }
 
 /*
@@ -750,6 +752,11 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->fallback_desc_nitems = nitems;
 	}
 
+	/* fault injection (tests) */
+	if (pgstrom_gpuserv_fault && pgstrom_gpuserv_fault[0] != '\0')
+		session->fault_spec = __appendBinaryStringInfo(&buf, pgstrom_gpuserv_fault,
+													   strlen(pgstrom_gpuserv_fault) + 1);
+
 	/* SELECT INTO Direct related */
 	if (OidIsValid(pp_info->select_into_relid))
 	{
@@ -919,11 +926,9 @@ static bool
 pgstromTaskStateBeginScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	XpuConnection  *conn = pts->conn;
 	uint32_t		curval, newval;
 
 	/* update the parallel_task_control */
-	Assert(conn != NULL);
 	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
 		if ((curval & 1) != 0)
@@ -941,10 +946,8 @@ static bool
 pgstromTaskStateEndScan(pgstromTaskState *pts)
 {
 	pgstromSharedState *ps_state = pts->ps_state;
-	XpuConnection  *conn = pts->conn;
 	uint32_t		curval, newval;
 
-	Assert(conn != NULL);
 	curval = pg_atomic_read_u32(&ps_state->parallel_task_control);
 	do {
 		Assert(curval >= 2);
@@ -1048,14 +1051,47 @@ __pickupNextXpuCommand(XpuConnection *conn)
  * conn->mutex held; releases it.
  */
 static void
-__xpuConnectLostError(XpuConnection *conn)
+__xpuConnectLostError(pgstromTaskState *pts)
 {
+	XpuConnection *conn = pts->conn;
+
 	pthreadMutexUnlock(&conn->mutex);
+	if (pts->cpu_fallback_ok)
+	{
+		pgstromCpuModeBegin(pts, "the connection to the GPU service was lost");
+		return;
+	}
 	ereport(ERROR,
 			(errcode(ERRCODE_CONNECTION_FAILURE),
 			 errmsg("PG-Strom: the connection to the GPU service was lost"),
 			 errdetail("The service exited or was restarted while this query was running."),
 			 errhint("See the server log for the reason, for example a kernel that did not finish in time.")));
+}
+
+/*
+ * __xpuConnectDeviceError - the service answered a command with an error.  mutex held, released here.
+ * Returns when the node continues on the CPU (A14), raises the error otherwise.
+ */
+static void
+__xpuConnectDeviceError(pgstromTaskState *pts)
+{
+	XpuConnection *conn = pts->conn;
+	char		msg[sizeof(conn->errorbuf.message) + 256];
+
+	snprintf(msg, sizeof(msg), "%s:%d  %s",
+			 conn->errorbuf.filename,
+			 conn->errorbuf.lineno,
+			 conn->errorbuf.message);
+	if (pts->cpu_fallback_ok)
+	{
+		pthreadMutexUnlock(&conn->mutex);
+		pgstromCpuModeBegin(pts, msg);
+		return;
+	}
+	pthreadMutexUnlock(&conn->mutex);
+	ereport(ERROR,
+			(errcode(conn->errorbuf.errcode),
+			 errmsg("%s", msg)));
 }
 
 static XpuCommand *
@@ -1073,14 +1109,8 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 		/* device error checks */
 		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
 		{
-			pthreadMutexUnlock(&conn->mutex);
-			ereport(ERROR,
-					(errcode(conn->errorbuf.errcode),
-					 errmsg("%s:%d  %s",
-							conn->errorbuf.filename,
-							conn->errorbuf.lineno,
-							conn->errorbuf.message)));
-
+			__xpuConnectDeviceError(pts);
+			return NULL;
 		}
 		if (!dlist_is_empty(&conn->ready_cmds_list))
 		{
@@ -1091,7 +1121,10 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 		{
 			/* wait for the running commands, unless the service is gone */
 			if (conn->terminated != 0)
-				__xpuConnectLostError(conn);
+			{
+				__xpuConnectLostError(pts);
+				return NULL;
+			}
 			pthreadMutexUnlock(&conn->mutex);
 		}
 		else
@@ -1109,6 +1142,7 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 				 * fetch them, or the rows of all workers but the last one would be lost.
 				 */
 				is_final_worker = (try_final_callback && pgstromTaskStateEndScan(pts));
+				pts->final_is_last = is_final_worker;
 				if (try_final_callback &&
 					(is_final_worker || (pts->xpu_task_flags & DEVTASK__PREAGG) != 0))
 				{
@@ -1118,7 +1152,13 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 					__xcmd.magic  = XpuCommandMagicNumber;
 					__xcmd.tag    = XpuCommandTag__XpuTaskFinal;
 					__xcmd.length = offsetof(XpuCommand, u);
-					xpuClientSendCommand(conn, &__xcmd);
+					if (!xpuClientSendCommand(conn, &__xcmd))
+					{
+						if (!pts->cpu_fallback_ok)
+							elog(ERROR, "failed on write(2) of XpuTaskFinal: %m");
+						pgstromCpuModeBegin(pts, "failed to send a command to the GPU service");
+						return NULL;
+					}
 					continue;
 				}
 			}
@@ -1140,6 +1180,7 @@ __waitAndFetchNextXpuCommand(pgstromTaskState *pts, bool try_final_callback)
 	}
 	xcmd = __pickupNextXpuCommand(conn);
 	pthreadMutexUnlock(&conn->mutex);
+	pgstromJournalAck(pts);
 	__updateStatsXpuCommand(pts, xcmd);
 	return xcmd;
 }
@@ -1162,13 +1203,8 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 		/* device error checks */
 		if (conn->errorbuf.errcode != ERRCODE_STROM_SUCCESS)
 		{
-			pthreadMutexUnlock(&conn->mutex);
-			ereport(ERROR,
-					(errcode(conn->errorbuf.errcode),
-					 errmsg("%s:%d  %s",
-							conn->errorbuf.filename,
-							conn->errorbuf.lineno,
-							conn->errorbuf.message)));
+			__xpuConnectDeviceError(pts);
+			return NULL;
 		}
 
 		if ((conn->num_running_cmds + conn->num_ready_cmds) < max_async_tasks &&
@@ -1188,12 +1224,20 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 				Assert(pts->curr_scan_rel >= pts->num_scan_rels);
 				break;
 			}
-			xpuClientSendCommandIOV(conn, xcmd, xcmd_iov, xcmd_iovcnt);
+			pgstromJournalAppend(pts, xcmd);
+			if (!xpuClientSendCommandIOV(conn, xcmd, xcmd_iov, xcmd_iovcnt))
+			{
+				if (!pts->cpu_fallback_ok)
+					elog(ERROR, "failed on writev(2): %m");
+				pgstromCpuModeBegin(pts, "failed to send a task to the GPU service");
+				return NULL;
+			}
 		}
 		else if (!dlist_is_empty(&conn->ready_cmds_list))
 		{
 			xcmd = __pickupNextXpuCommand(conn);
 			pthreadMutexUnlock(&conn->mutex);
+			pgstromJournalAck(pts);
 			__updateStatsXpuCommand(pts, xcmd);
 			return xcmd;
 		}
@@ -1205,7 +1249,10 @@ __fetchNextXpuCommand(pgstromTaskState *pts)
 			 * So, let's wait for the response.
 			 */
 			if (conn->terminated != 0)
-				__xpuConnectLostError(conn);
+			{
+				__xpuConnectLostError(pts);
+				return NULL;
+			}
 			ResetLatch(MyLatch);
 			pthreadMutexUnlock(&conn->mutex);
 
@@ -1682,14 +1729,54 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 /*
  * pgstromExecScanAccess
  */
+/*
+ * pgstromExecScanCpu - the node runs on the CPU (A14): the units of work are done one at a time and
+ * their tuples handed out before the next one is read
+ */
+static TupleTableSlot *
+pgstromExecScanCpu(pgstromTaskState *pts)
+{
+	TupleTableSlot *slot;
+
+	for (;;)
+	{
+		slot = pgstromFetchFallbackTuple(pts);
+		if (slot)
+			return slot;
+		if (!pgstromCpuModeStep(pts))
+			break;
+	}
+	if (!pts->cpu_final_done)
+	{
+		pts->cpu_final_done = true;
+		/* what the Final reply of a working session says: the last worker emits the unmatched inner rows */
+		if (!pts->final_done)
+		{
+			pts->final_done = true;
+			pts->final_is_last = pgstromTaskStateEndScan(pts);
+		}
+		if (pts->final_is_last || (pts->xpu_task_flags & DEVTASK__PREAGG) != 0)
+			ExecFallbackCpuJoinRightOuter(pts);
+	}
+	return pgstromFetchFallbackTuple(pts);
+}
+
+/*
+ * pgstromExecScanAccess
+ */
 static TupleTableSlot *
 pgstromExecScanAccess(pgstromTaskState *pts)
 {
 	TupleTableSlot *slot;
 
-	slot = pgstromFetchFallbackTuple(pts);
-	if (slot)
-		return slot;
+	if (!pts->defer_fallback || pts->drain_fallback)
+	{
+		slot = pgstromFetchFallbackTuple(pts);
+		if (slot)
+			return slot;
+	}
+	if (pts->cpu_mode)
+		return pgstromExecScanCpu(pts);
 
 	while (!pts->curr_resp || !(slot = pgstromScanNextTuple(pts)))
 	{
@@ -1725,8 +1812,14 @@ pgstromExecScanAccess(pgstromTaskState *pts)
 			if (tryExecCpuFallbackChunks(pts) == 0)
 				goto next_chunks;
 		}
+		else if (pts->cpu_mode)
+		{
+			return pgstromExecScanCpu(pts);
+		}
 		else
 		{
+			/* the end of the results: GpuPreAgg's held-back tuples can go out now */
+			pts->drain_fallback = true;
 			return pgstromFetchFallbackTuple(pts);
 		}
 	}
@@ -1849,6 +1942,24 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	/* attach pgstromSharedState, if none */
 	if (!pts->ps_state)
 		pgstromSharedStateInitDSM(&pts->css, NULL, NULL);
+	/*
+	 * A14: may the node continue on the CPU if the GPU service fails?  Not when the results never reach the
+	 * host (pinned inner buffers, SELECT INTO direct) or GPU-Sort replaced the parent's Sort node.
+	 */
+	pts->cpu_fallback_ok = (pgstrom_gpu_error_fallback &&
+							pts->pp_info->gpusort_keys_expr == NIL &&
+							(pts->xpu_task_flags & DEVTASK__SELECT_INTO_DIRECT) == 0 &&
+							/* GpuPreAgg always has the 'pinned' final buffer flags; its partial states come back as rows */
+							((pts->xpu_task_flags & DEVTASK__PREAGG) != 0 ||
+							 (pts->xpu_task_flags & (DEVTASK__PINNED_HASH_RESULTS |
+													 DEVTASK__PINNED_ROW_RESULTS)) == 0));
+	for (int i=0; pts->cpu_fallback_ok && i < pts->num_inner_rels; i++)
+	{
+		if (pts->inners[i].inner_pinned_buffer)
+			pts->cpu_fallback_ok = false;
+	}
+	pts->defer_fallback = (pts->cpu_fallback_ok &&
+						   (pts->xpu_task_flags & DEVTASK__PREAGG) != 0);
 	/* preload inner buffer, if any */
 	if (pts->num_inner_rels > 0)
 	{
@@ -1893,7 +2004,8 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 	if ((pts->xpu_task_flags & DEVKIND__NVIDIA_GPU) != 0)
 	{
 		gpuClientOpenSession(pts, session);
-		GpuJoinInnerPreloadAfterWorks(pts);
+		if (!pts->cpu_mode)
+			GpuJoinInnerPreloadAfterWorks(pts);
 	}
 	else
 	{
@@ -1918,11 +2030,11 @@ pgstromExecTaskState(CustomScanState *node)
 	ProjectionInfo *proj_info = node->ss.ps.ps_ProjInfo;
 	TupleTableSlot *slot;
 
-	if (!pts->conn)
+	if (!pts->conn && !pts->cpu_mode)
 	{
 		if (!__pgstromExecTaskOpenConnection(pts))
 			return NULL;
-		Assert(pts->conn);
+		Assert(pts->conn || pts->cpu_mode);
 	}
 
 	/*
@@ -1988,6 +2100,7 @@ execInnerPreLoadPinnedOneDepth(pgstromTaskState *pts,
 			goto skip;
 		Assert(pts->conn);
 	}
+	Assert(!pts->cpu_fallback_ok);
 
 	for (;;)
 	{
@@ -2078,10 +2191,12 @@ pgstromExecResetTaskState(CustomScanState *node)
 	ListCell   *lc;
 
 	/* reset connections */
-	if (pts->conn)
+	if (pts->conn || pts->cpu_mode)
 	{
-		xpuClientCloseSession(pts->conn);
+		if (pts->conn)
+			xpuClientCloseSession(pts->conn);
 		pts->conn = NULL;
+		pgstromCpuModeReset(pts);
 		if (pts->curr_resp)
 			xpuClientPutResponse(pts->curr_resp);
 		pts->curr_resp = NULL;
@@ -3051,7 +3166,9 @@ pgstromExplainTaskState(CustomScanState *node,
 			if (fallback_nitems[i] > 0)
 				fallback_exists = true;
 		}
-		if (fallback_exists)
+		uint32_t	cpu_workers = pg_atomic_read_u32(&ps_state->cpu_mode_workers);
+
+		if (fallback_exists || cpu_workers > 0)
 		{
 			resetStringInfo(&buf);
 			for (int i=0; i <= pts->num_inner_rels; i++)
@@ -3060,6 +3177,11 @@ pgstromExplainTaskState(CustomScanState *node,
 					appendStringInfo(&buf, ", ");
 				appendStringInfo(&buf, "depth[%d]=%lu", i, fallback_nitems[i]);
 			}
+			/* the GPU service failed and the node continued on the CPU (A14) */
+			if (cpu_workers > 0)
+				appendStringInfo(&buf, ", cpu-mode: %u worker(s), %lu task(s)",
+								 cpu_workers,
+								 pg_atomic_read_u64(&ps_state->cpu_mode_chunks));
 			ExplainPropertyText("Fallback-stats", buf.data, es);
 		}
 	}
@@ -3325,8 +3447,16 @@ __xpuClientOpenSession(pgstromTaskState *pts,
 	 * Initialize the new session
 	 */
 	Assert(session->tag == XpuCommandTag__OpenSession);
-	xpuClientSendCommand(conn, session);
+	if (!xpuClientSendCommand(conn, session))
+	{
+		if (!pts->cpu_fallback_ok)
+			elog(ERROR, "failed to send OpenSession to the GPU service: %m");
+		pgstromCpuModeBegin(pts, "failed to send OpenSession to the GPU service");
+		return;
+	}
 	resp = __waitAndFetchNextXpuCommand(pts, false);
+	if (pts->cpu_mode)
+		return;
 	if (!resp)
 		elog(ERROR, "Bug? OpenSession response is missing");
 	if (resp->tag != XpuCommandTag__Success)

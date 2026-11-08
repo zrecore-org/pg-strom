@@ -39,7 +39,9 @@ src.heap.union_all_agg | UNION ALL / Append below the aggregate: GpuPreAgg does 
 agg.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group3.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group3.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
@@ -47,8 +49,11 @@ agg.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_
 agg.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group3.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group3.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group3.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
@@ -60,11 +65,13 @@ agg.groups.50000.text.raised | GROUP BY key text/varchar/bpchar: not a scan_vm_g
 aggjoin.type.group_text_key | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
+agg.group3.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.gpucache.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.gpucache.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 src.gpucache.agg.group_uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 agg.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
+agg.group3.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 srcfull.*.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 srcfull.*.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 src.*.agg.group_bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
@@ -74,14 +81,8 @@ agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU fun
 agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
-agg.group3.* | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-agg.group4.int | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-srcfull.*.group3.* | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-aggjoin.type.group_three_keys | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-src.*.agg.group_three_keys | GROUP BY with three or more keys: the kernels hold at most two | gap:A3
-agg.groups.500.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
-agg.groups.50000.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
-agg.groups.1000000.default | more estimated groups than pg_strom.gpupreagg_max_groups (128): the GPU is slower than PostgreSQL there (global-memory hash GROUP BY) | gap:A3
+aggjoin.type.group_three_keys | GROUP BY with three or more keys over a join: the join kernels hold two (the session-wide table is not ported to the join walk) | gap:A3
+src.*.agg.group_three_keys | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 agg.group.grouping_sets | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
