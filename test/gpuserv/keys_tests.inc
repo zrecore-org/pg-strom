@@ -86,4 +86,16 @@ tm "GPU, group by a text key, 3000 groups, 2M rows" "$GBIG select k, count(*), s
 tm "GPU, group by an int key, 3000 groups, 2M rows" "$GBIG select (v % 3000)::int4, count(*), sum(v) from tkb group by 1"
 cpu_tm() { t0=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); $PSQL -d scantest -c "$CPU $1" >/dev/null; t1=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); echo "  time  $2: $((t1 - t0)) ms"; }
 cpu_tm "select k, count(*), sum(v) from tkb group by k" "CPU, group by a text key"
+# ---- bool keys (booleq is a device function): hash-join key and GROUP BY key
+for kind in "inner join" "left join" "right join"; do
+	runkj "bool key: $kind" "select t.i, d.w from tbo t $kind tbi d on t.b = d.b"
+done
+runkj "bool key: semi join" "select t.i from tbo t where t.b in (select d.b from tbi d)"
+runkj "bool key: anti join" "select t.i from tbo t where not exists (select 1 from tbi d where d.b = t.b)"
+runkj "bool key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tbo t join tbi d on t.b = d.b group by d.w"
+runkj "bool and int key" "select t.i, d.w from tbo t join tbi d on t.b = d.b and t.n = d.w / 10 % 5"
+rung "group by a bool" "select b, count(*), sum(pay), min(n), max(n) from %T group by b" tbo
+rung "group by a bool and an int" "select b, n, count(*), sum(pay) from %T group by b, n" tbo
+rung "group by three keys with a bool" "select b, n, m, count(*), sum(pay) from %T group by b, n, m" tbo
+rung "group by four keys with a bool" "select b, n, m, o, count(*), sum(pay) from %T group by b, n, m, o" tbo
 echo

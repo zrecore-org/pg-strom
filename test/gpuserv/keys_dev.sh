@@ -70,6 +70,10 @@ sql "alter table tki alter column ext set storage external"
 sql "update tki set ext = ext where i % 1 = 0"
 sql "insert into tki select i + 5000, k, kv, kb, n, big, ext, grp from tki where i % 10 = 0"
 sql "vacuum analyze tko"; sql "vacuum analyze tki"
+# bool keys: tbo (3000 rows) joined to the 4 rows of tbi
+sql "create table tbo as select i, case when i % 13 = 0 then null else (i % 3 = 0) end as b, (i % 5)::int4 as n, (i % 7)::int4 as m, (i % 4)::int4 as o, i::int8 as pay from generate_series(1, 3000) i"
+sql "create table tbi as select * from (values (true, 10), (false, 20), (null::bool, 30), (true, 40)) v(b, w)"
+sql "analyze tbo"; sql "analyze tbi"
 # GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
 # table is sized for the estimate and overflows); tkb is big enough for several tasks
 sql "create table tkm as select md5((i % 100)::text) as k, (i % 7)::int4 as n, i::int8 as v from generate_series(1, 20000) i"

@@ -22,9 +22,6 @@ srcfull.*.join.key.numeric.* | hash-join key numeric: numeric_eq is not a device
 join.key.uuid.* | hash-join key uuid: uuid_eq is not a device function | gap:A6
 aggjoin.key.uuid | hash-join key uuid: uuid_eq is not a device function | gap:A6
 srcfull.*.join.key.uuid.* | hash-join key uuid: uuid_eq is not a device function | gap:A6
-join.key.bool.* | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
-aggjoin.key.bool | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
-srcfull.*.join.key.bool.* | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
 join.key.null_safe.inner | IS NOT DISTINCT FROM as a join clause: a DistinctExpr is not an opcode and the clause is not hash-joinable | gap:A14
 join.nl.nonequi.* | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
 join.nl.range.inner | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
@@ -52,20 +49,12 @@ agg.group3.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() typ
 srcfull.gpucache.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.gpucache.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 src.gpucache.agg.group_uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-agg.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-agg.group3.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-srcfull.*.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-srcfull.*.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-src.*.agg.group_bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-src.*.agg.group_two_keys | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 agg.group.expr_date | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
 aggjoin.type.group_three_keys | GROUP BY with three or more keys over a join: the join kernels hold two (the session-wide table is not ported to the join walk) | gap:A3
-src.*.agg.group_three_keys | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 agg.group.grouping_sets | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
