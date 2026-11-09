@@ -440,6 +440,12 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
 		if (h_kmrels->chunks[depth-1].is_nestloop ||
 			h_kmrels->chunks[depth-1].gist_offset != 0)
 		{
+			if (pts->inners[depth-1].gist_clause_failed)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("%s: the CPU cannot run the GiST join at depth %d (its index clause has no CPU form)",
+								pts->css.methods->CustomName, depth),
+						 errdetail("The GPU service failed first: %s", pts->cpu_mode_reason ? pts->cpu_mode_reason : "?")));
 			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth, l_state, matched);
 		}
 		else
@@ -879,6 +885,7 @@ pgstromCpuModeBegin(pgstromTaskState *pts, const char *reason)
 	elog(LOG, "%s: GPU execution failed (%s); the CPU runs the rest of the node",
 		 pts->css.methods->CustomName, reason);
 	pts->cpu_mode = true;
+	pts->cpu_mode_reason = MemoryContextStrdup(pts->css.ss.ps.state->es_query_cxt, reason);
 	pts->defer_fallback = false;
 	pts->drain_fallback = false;
 	pts->cpujob_active = false;
