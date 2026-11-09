@@ -138,7 +138,7 @@ for t in ty1 ty2; do
 	runagg $t "GROUP BY date + integer" "select dt3 + 3 as k, count(*) from %T where i > 5 group by 1 order by 1"
 	runagg $t "GROUP BY a high-cardinality date (overflow to the CPU)" "select dt, count(*) from %T where dt > '1990-01-01' group by 1 order by 1"
 done
-runagg_any ty1 "text key stays on the CPU" "select f, count(*) from %T group by 1 order by 1"
+runagg_any ty1 "text key" "select f, count(*) from %T group by 1 order by 1"
 
 echo "types: joins on temporal keys"
 JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
@@ -152,7 +152,7 @@ for t in ty1 ty2; do
 	runjoin $t "date key with a date computed on the GPU" "select t.i, t.dt2 + d.k as x, d.d - t.dt2 as y from %T t join ty_dim d on t.dt = d.d where t.dt2 < '2008-01-01' and d.d < 'infinity'"
 	ANYPLAN=1
 	runjoin $t "a text qual keeps the outer scan of a join on the CPU" "select t.i, d.k from %T t join ty_dim d on t.dt = d.d where t.f = 'abc'"
-	runjoin $t "text key stays on the CPU" "select t.i, d.k from %T t join ty_dim d on t.f = d.nm"
+	runjoin $t "text key" "select t.i, d.k from %T t join ty_dim d on t.f = d.nm"
 done
 ANYPLAN=0
 

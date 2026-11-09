@@ -1524,6 +1524,10 @@ scan_vm_agg_action_supported(int action)
 		case KAGG_ACTION__PSUM_FP:			/* sum(float8), avg(float4/float8) */
 		case KAGG_ACTION__PAVG_FP:
 		case KAGG_ACTION__PSUM_FP32:		/* sum(float4): float4pl, every addition rounded to binary32 */
+		/* A10: PostgreSQL's float8_accum / float8_regr_accum states (kernels_vm/vagg.inc): variance, stddev, covar, corr, regr_* of
+		 * float4/float8. The integer and numeric forms (STDDEV_NUM) and regr_count (COVAR_CNT) stay on the CPU. */
+		case KAGG_ACTION__STDDEV:
+		case KAGG_ACTION__COVAR:
 			return true;
 		default:
 			break;

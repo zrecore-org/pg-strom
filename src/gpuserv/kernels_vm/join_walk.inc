@@ -446,6 +446,35 @@
 
                     if (rf != NONE_REG && (regs[rf].isnull != 0 || regs[rf].v == 0))
                         continue;                           // FILTER (WHERE ...) is not true
+#ifndef VM_NO_F8
+                    if (cls >= AC_VAR)
+                    {
+                        if (cls == AC_VCONT)
+                            continue;
+                        bool isreg = (cls == AC_REG);
+                        uint rb = isreg ? prog[aggoff + 4 * (k + 1) + 1] : ra;         // the Y register of regr(Y, X)
+                        if (regs[ra].isnull != 0 || (isreg && regs[rb].isnull != 0))
+                            continue;
+                        VS s;
+                        s.n = an[k]; s.a0 = aa[k]; s.b0 = ab[k];
+                        s.a1 = 0; s.b1 = 0; s.a2 = 0;
+                        if (isreg)
+                        {
+                            s.a1 = aa[k + 1]; s.b1 = ab[k + 1]; s.a2 = aa[k + 2];
+                        }
+                        uint ae = 0u;
+                        s = vs_acc(cls, s, uint64_t(regs[ra].v), uint64_t(regs[rb].v), ae);
+                        an[k] = s.n; aa[k] = s.a0; ab[k] = s.b0;
+                        if (isreg)
+                        {
+                            an[k + 1] = s.n; aa[k + 1] = s.a1; ab[k + 1] = s.b1;
+                            an[k + 2] = s.n; aa[k + 2] = s.a2;
+                        }
+                        if (ae != 0u)
+                            report_error(page, lp, ae);
+                        continue;
+                    }
+#endif
                     if (cls == AC_COUNT_ANY)
                         an[k] += 1;
                     else if (regs[ra].isnull == 0)
@@ -689,6 +718,40 @@
                             if (a_cls[k] < AC_FSUM || st_ok[j * GA_NA + k] == 0)
                                 continue;
                             uint a = s * GA_NA + k;
+                            if (a_cls[k] >= AC_VAR)
+                            {
+                                if (a_cls[k] == AC_VCONT)
+                                    continue;
+                                bool isreg = (a_cls[k] == AC_REG);
+                                if (isreg && st_ok[j * GA_NA + k + 1] == 0)
+                                    continue;
+                                VS vs;
+                                vs.n = sh_an[a];
+                                vs.a0 = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
+                                vs.b0 = int64_t(uint64_t(sh_l2[a]) | (uint64_t(sh_l3[a]) << 32));
+                                vs.a1 = 0; vs.b1 = 0; vs.a2 = 0;
+                                if (isreg)
+                                {
+                                    vs.a1 = int64_t(uint64_t(sh_l0[a + 1]) | (uint64_t(sh_l1[a + 1]) << 32));
+                                    vs.b1 = int64_t(uint64_t(sh_l2[a + 1]) | (uint64_t(sh_l3[a + 1]) << 32));
+                                    vs.a2 = int64_t(uint64_t(sh_l0[a + 2]) | (uint64_t(sh_l1[a + 2]) << 32));
+                                }
+                                uint ve = 0u;
+                                vs = vs_acc(a_cls[k], vs, uint64_t(st_val[j * GA_NA + k]), isreg ? uint64_t(st_val[j * GA_NA + k + 1]) : 0ull, ve);
+                                if (ve != 0u)
+                                    report_error(page, 0u, ve);
+                                sh_an[a] = vs.n;
+                                sh_l0[a] = uint(uint64_t(vs.a0) & 0xffffffffu); sh_l1[a] = uint(uint64_t(vs.a0) >> 32);
+                                sh_l2[a] = uint(uint64_t(vs.b0) & 0xffffffffu); sh_l3[a] = uint(uint64_t(vs.b0) >> 32);
+                                if (isreg)
+                                {
+                                    sh_an[a + 1] = vs.n; sh_an[a + 2] = vs.n;
+                                    sh_l0[a + 1] = uint(uint64_t(vs.a1) & 0xffffffffu); sh_l1[a + 1] = uint(uint64_t(vs.a1) >> 32);
+                                    sh_l2[a + 1] = uint(uint64_t(vs.b1) & 0xffffffffu); sh_l3[a + 1] = uint(uint64_t(vs.b1) >> 32);
+                                    sh_l0[a + 2] = uint(uint64_t(vs.a2) & 0xffffffffu); sh_l1[a + 2] = uint(uint64_t(vs.a2) >> 32);
+                                }
+                                continue;
+                            }
                             uint n = sh_an[a];
                             int64_t acc = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
                             uint ae = fagg_acc(a_cls[k], uint64_t(st_val[j * GA_NA + k]), n, acc);

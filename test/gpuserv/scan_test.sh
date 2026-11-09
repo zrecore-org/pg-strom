@@ -190,7 +190,7 @@ for t in s1 s2 s3; do
 	runagg $t "one int key" "select a % 10 as k, count(*), sum(b), min(c), max(b), avg(a) from %T group by 1 order by 1"
 	runagg $t "key with NULLs" "select b % 5 as k, count(*), count(b), sum(a) from %T group by 1 order by 1"
 	runagg $t "two integer keys" "select a % 4 as k1, b % 3 as k2, count(*), sum(c), max(a) from %T group by 1, 2 order by 1, 2"
-	runagg_any $t "bool key (stays on the CPU)" "select a % 4 as k1, e, count(*), sum(c), max(a) from %T group by 1, 2 order by 1, 2"
+	runagg_any $t "bool key" "select a % 4 as k1, e, count(*), sum(c), max(a) from %T group by 1, 2 order by 1, 2"
 	runagg $t "int8 key" "select c % 7 as k, count(*), sum(a) from %T group by 1 order by 1"
 	runagg $t "with quals and FILTER" "select a % 6 as k, count(*) filter (where b > 0), sum(b) filter (where e), max(c) from %T where a > -9000 group by 1 order by 1"
 	runagg_any $t "empty input" "select a % 6 as k, count(*), sum(b) from %T where a > 100000 group by 1 order by 1"
@@ -199,7 +199,7 @@ for t in s1 s2 s3; do
 	runagg $t "overflow with two keys" "select i % 97 as k1, i % 13 as k2, count(*), sum(a) from %T group by 1, 2 order by 1, 2" "$BIGGROUPS"
 done
 runagg s1 "parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
-runagg_any s1 "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
+runagg_any s1 "text key" "select f, count(*) from %T group by f order by 1 limit 20"
 runagg_any s1 "too many estimated groups stay on the CPU" "select i, count(*) from %T where i < 50000 group by i order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16; set pg_strom.gpupreagg_max_groups_heap=16;"
 if mine_tbl s1; then plan=$($PSQL -d scantest -c "$GPU set pg_strom.gpupreagg_max_groups=16; set pg_strom.gpupreagg_max_groups_heap=16; explain select i % 1000, count(*) from s1 group by 1" | grep -c "Custom Scan (GpuPreAgg)"); [ "$plan" -eq 0 ]; check "a group count above pg_strom.gpupreagg_max_groups is not offloaded" $?; fi
 
@@ -263,7 +263,7 @@ JOINSET="$JOINSET_SAVE"
 ANYPLAN=1
 runjoin s1 "aggregate on top (the join stays below the CPU aggregate)" "select d.grp, count(*), sum(t.a) from %T t join %D d on t.b = d.k group by 1 order by 1"
 runjoin s1 "LEFT JOIN with a WHERE qual on the inner side stays on the CPU" "select t.i, d.grp from %T t left join %D d on t.b = d.k where d.grp is null and t.i < 3000"
-runjoin s1 "float key stays on the CPU" "select t.i, d.grp from %T t join %D d on t.d::float8 = d.k::float8 where t.i < 3000"
+runjoin s1 "float key (float8 cast)" "select t.i, d.grp from %T t join %D d on t.d::float8 = d.k::float8 where t.i < 3000"
 ANYPLAN=0
 runjoin s1 "parallel workers" "select t.i, d.grp from %T t join %D d on t.b = d.k" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 

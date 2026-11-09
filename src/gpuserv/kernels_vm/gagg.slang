@@ -51,6 +51,9 @@ static const uint AC_SUM        = 3;
 static const uint AC_MIN        = 4;
 static const uint AC_MAX        = 5;
 static const uint AC_FSUM       = 6;            // 6 float8 sum / avg, 7 min, 8 max, 9 sum(float4): fagg_acc()
+static const uint AC_VAR        = 10;           // variance / stddev (n, Sx, Sxx), regr head (11) + continuation (12): see vs_acc()
+static const uint AC_REG        = 11;
+static const uint AC_VCONT      = 12;
 static const uint NONE_REG      = 0xffffffffu;
 static const uint COMMITTED     = 0x8000u;
 static const uint NO_SLOT       = 0xffffffffu;
@@ -367,6 +370,40 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                             if (a_cls[k] < AC_FSUM || st_ok[j * GA_NA + k] == 0)
                                 continue;
                             uint a = s * GA_NA + k;
+                            if (a_cls[k] >= AC_VAR)
+                            {
+                                if (a_cls[k] == AC_VCONT)
+                                    continue;
+                                bool isreg = (a_cls[k] == AC_REG);
+                                if (isreg && st_ok[j * GA_NA + k + 1] == 0)
+                                    continue;
+                                VS vs;
+                                vs.n = sh_an[a];
+                                vs.a0 = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
+                                vs.b0 = int64_t(uint64_t(sh_l2[a]) | (uint64_t(sh_l3[a]) << 32));
+                                vs.a1 = 0; vs.b1 = 0; vs.a2 = 0;
+                                if (isreg)
+                                {
+                                    vs.a1 = int64_t(uint64_t(sh_l0[a + 1]) | (uint64_t(sh_l1[a + 1]) << 32));
+                                    vs.b1 = int64_t(uint64_t(sh_l2[a + 1]) | (uint64_t(sh_l3[a + 1]) << 32));
+                                    vs.a2 = int64_t(uint64_t(sh_l0[a + 2]) | (uint64_t(sh_l1[a + 2]) << 32));
+                                }
+                                uint ve = 0u;
+                                vs = vs_acc(a_cls[k], vs, uint64_t(st_val[j * GA_NA + k]), isreg ? uint64_t(st_val[j * GA_NA + k + 1]) : 0ull, ve);
+                                if (ve != 0u)
+                                    report_error(page, base + j, ve);
+                                sh_an[a] = vs.n;
+                                sh_l0[a] = uint(uint64_t(vs.a0) & 0xffffffffu); sh_l1[a] = uint(uint64_t(vs.a0) >> 32);
+                                sh_l2[a] = uint(uint64_t(vs.b0) & 0xffffffffu); sh_l3[a] = uint(uint64_t(vs.b0) >> 32);
+                                if (isreg)
+                                {
+                                    sh_an[a + 1] = vs.n; sh_an[a + 2] = vs.n;
+                                    sh_l0[a + 1] = uint(uint64_t(vs.a1) & 0xffffffffu); sh_l1[a + 1] = uint(uint64_t(vs.a1) >> 32);
+                                    sh_l2[a + 1] = uint(uint64_t(vs.b1) & 0xffffffffu); sh_l3[a + 1] = uint(uint64_t(vs.b1) >> 32);
+                                    sh_l0[a + 2] = uint(uint64_t(vs.a2) & 0xffffffffu); sh_l1[a + 2] = uint(uint64_t(vs.a2) >> 32);
+                                }
+                                continue;
+                            }
                             uint n = sh_an[a];
                             int64_t acc = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
                             uint ae = fagg_acc(a_cls[k], uint64_t(st_val[j * GA_NA + k]), n, acc);

@@ -2392,8 +2392,10 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PAVG_INT64		602		/* <int8>,<int8+8> */
 #define KAGG_ACTION__PAVG_FP		603		/* <int4>,<float8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_NUMERIC	604		/* <int4>,<int8+8> - NROWS+PSUM */
-#define KAGG_ACTION__STDDEV			701		/* <int4>,<float8>,<float8> - stddev */
-#define KAGG_ACTION__COVAR			801		/* <int4>,<float8>x5 - covariance */
+#define KAGG_ACTION__STDDEV			701		/* variance, stddev of float4/float8: PostgreSQL's float8_accum state N, Sx, Sxx (A10) */
+#define KAGG_ACTION__STDDEV_NUM		702		/* variance, stddev of integers and numeric: an exact int128 / numeric state, CPU only */
+#define KAGG_ACTION__COVAR			801		/* covar, corr, regr_*: float8_regr_accum state N, Sx, Sxx, Sy, Syy, Sxy (A10) */
+#define KAGG_ACTION__COVAR_CNT		802		/* regr_count: CPU only (the catalog's final function returns float8, PostgreSQL's bigint) */
 
 /* identifier of final functions */
 #define KAGG_FINAL__SIMPLE_VREF			1000
