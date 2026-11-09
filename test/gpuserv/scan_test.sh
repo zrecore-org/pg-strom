@@ -180,7 +180,7 @@ for t in s1 s2 s3; do
 	runagg $t "expressions as arguments" "select sum(a + b), max(b * 2), min(c - 1), count(a * 2) from %T"
 	runagg $t "FILTER (WHERE ...)" "select count(*) filter (where b > 0), sum(b) filter (where a < 0), max(c) filter (where e) from %T"
 	runagg $t "sum beyond 64 bits" "select sum(c + 9000000000000000000), avg(c + 9000000000000000000), sum(c) from %T"
-	runagg_any $t "float aggregates stay on the CPU too" "select count(*), sum(a), sum(d) from %T where a > 9000"
+	runagg_any $t "float aggregates (sum(float4) too) run on the GPU or the CPU, same result" "select count(*), sum(a), sum(d) from %T where a > 9000"
 done
 runagg s1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 
