@@ -82,7 +82,7 @@ runsort_set s1 "dense_rank() < 3 per partition, DESC" "select * from (select a /
 runsort s1 "row_number() <= 4 per partition (total order)" "select * from (select a / 1000 as p, a, sum(c) as sc, row_number() over (partition by a / 1000 order by sum(c), a) r from %T group by a / 1000, a) z where r <= 4 order by p, r"
 # a window on top of GROUP BY the planner cannot feed from the sorter stays on the CPU
 runsort_cpu s1 "avg() key: the sorter has no average" "select a % 40 as k, avg(b) from %T group by 1 order by 2 desc nulls last, 1"
-runsort_cpu s1 "bool group key (GpuPreAgg does not take bool keys)" "select e, count(*) from %T group by e order by e desc"
+runsort s1 "bool group key (booleq is a device function: the groups are sorted on the GPU)" "select e, count(*) from %T group by e order by e desc"
 runsort_cpu s1 "float4 NaN key" "select d, count(*) from %T group by d order by d"
 runsort_cpu s1 "sort key is not in the result of the GROUP BY (expression)" "select a % 40 as k, count(*) from %T group by 1 order by (a % 40) * 2 desc, 1"
 

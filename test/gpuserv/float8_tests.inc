@@ -122,7 +122,7 @@ for t in $(f8part join); do
 	runjoin $t "LEFT JOIN with a float8 column of the inner side" "select t.i, d.v, d.u from %T t left join f8_dim d on t.b = d.k where t.i % 11 = 4"
 	runjoin $t "aggregate over the join with a float8 qual" "select d.grp, count(*), sum(t.a) from %T t join f8_dim d on t.b = d.k where t.x > d.v group by 1 order by 1"
 	ANYPLAN=1
-	runjoin $t "float8 join key stays on the CPU" "select t.i, d.grp from %T t join f8_dim d on t.x = d.v"
+	runjoin $t "float8 join key" "select t.i, d.grp from %T t join f8_dim d on t.x = d.v"
 done
 
 # float8 aggregates, with and without GROUP BY. The GPU adds in another order than a serial scan (with GROUP BY: the row order inside

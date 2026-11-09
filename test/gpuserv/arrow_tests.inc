@@ -105,7 +105,7 @@ for t in a1 a2 a3 p1; do
 	aagg $t "date key" "select dt, count(*), sum(a) from %T where dt is not null group by 1 order by 1 limit 100" "set pg_strom.gpupreagg_max_groups=100000000;"
 	aagg_any $t "date key (with the NULL group), two keys" "select dt, a % 2 as k2, count(*), max(b) from %T where a > 9990 group by 1, 2 order by 1, 2"
 	aagg_any $t "timestamp key" "select ts, count(*) from %T where a > 9995 group by 1 order by 1"
-	aagg_cpu $t "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
+	aagg $t "text key (the session table, strings compared by their bytes)" "select f, count(*) from %T group by f order by 1 limit 20"
 	aagg $t "sum and min of a float4 column cast to float8 (exact in a double)" "select count(*), sum(d::float8), min(d::float8), max(d::float8) from %T where a > 9000"
 	aagg $t "sum(float4): every addition rounded to float4 (A10)" "select count(*), sum(d) from %T where a > 9000"
 done
