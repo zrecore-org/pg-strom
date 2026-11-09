@@ -45,7 +45,7 @@ set pg_strom.enabled=off; set max_parallel_workers_per_gather=0;
 select 'cpu-count', count(*) from ar2 where ST_Area(g) > 100;
 select 'cpu-sum', sum(ST_Area(g)) from ar2;
 select 'cpu-minmax', min(ST_Area(g)), max(ST_Area(g)) from ar2;
-set pg_strom.enabled=on; set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0;
+set pg_strom.enabled=on; set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off;
 select 'gpu-count', count(*) from ar2 where ST_Area(g) > 100;
 select 'gpu-count', count(*) from ar2 where ST_Area(g) > 100;
 select 'gpu-sum', sum(ST_Area(g)) from ar2;
