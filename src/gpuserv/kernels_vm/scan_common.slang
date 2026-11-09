@@ -1879,7 +1879,7 @@ uint gdw3_load(Reg r, inout uint srid, inout uint64_t px, inout uint64_t py, ino
     return 0u;
 }
 
-// ST_Z (k0 = 0) and ST_M (k0 = 1) of a point
+// ST_Z (k0 = 0), ST_M (k0 = 1), ST_X (2) and ST_Y (3) of a point
 uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg a = regs[ra];
@@ -1898,8 +1898,8 @@ uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
     uint hz = h.flags & 1u;
     uint hm = (h.flags >> 1) & 1u;
     uint nd = 2u + hz + hm;
-    uint idx = (k0 == 0u) ? 2u : 2u + hz;
-    if (npts == 0u || (k0 == 0u ? hz == 0u : hm == 0u))
+    uint idx = (k0 == 0u) ? 2u : (k0 == 1u ? 2u + hz : k0 - 2u);     // ST_X (k0 2) and ST_Y (k0 3) read the first two doubles
+    if (npts == 0u || (k0 == 0u && hz == 0u) || (k0 == 1u && hm == 0u))
     {
         regs[dst].isnull = 1u;                          // an empty point, or no such dimension
         return 0u;
@@ -2406,6 +2406,12 @@ uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout
 // One loop over the members (a point, a line or a polygon; the members of a multi-geometry, or of a collection, which may itself hold a
 // multi-geometry), one loop over a member's arrays (a line; a polygon's rings), one segment computation: each heavy step is written, and
 // so inlined, once (the Slang compiler copies a function at every call site).
+#define AREA_FN
+#define AR_F2 ArF2s
+#define AR_SRC_T uint
+#define AR_LD(src, off) ld64s(src, off)
+#include "area_ring.inc"
+
 uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
@@ -2433,6 +2439,7 @@ uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
     if (o + 8u > l)
         return SOP_RECHECK_CODE;
     bool per = (k0 >= 2u);
+    bool area = (k0 == 4u);                             // ST_Area: the polygons' rings by PostGIS' ptarray_signed_area (area_ring.inc)
     bool d3 = ((k0 & 1u) != 0u) && (hz != 0u);
     uint end = b + l;
     uint p = b + o;
@@ -2528,6 +2535,20 @@ uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
             if (np > (end - q) / stride)
                 return SOP_RECHECK_CODE;
             uint64_t asum = 0ull;
+            if (area)
+            {
+                // lwpoly_area: a ring of fewer than 3 points is skipped; the exterior ring's |area| is added, a hole's subtracted
+                if (np >= 3u)
+                {
+                    uint64_t sa = area_ring_signed(s, q, stride, np);
+                    if (sa == AR_NONE)
+                        return SOP_RECHECK_CODE;
+                    sa = sa & F64_MAG;
+                    c = (ar == 0u) ? f64_add(c, sa) : f64_sub(c, sa);
+                }
+                q += np * stride;
+                continue;
+            }
             for (uint i = 0u; i + 1u < np; i++)
             {
                 uint p0 = q + i * stride;
@@ -2579,8 +2600,160 @@ uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 
 // ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim (GEOMFLAG): the flags byte of any geometry, the same as geom_flag()
 // of cpu_vm.c
+// ST_NPoints (k0 6), ST_NumPoints (7), ST_NumGeometries (8), ST_NRings (9), ST_NumInteriorRings (10), ST_IsEmpty (11): the same as geom_cnt()
+// of cpu_vm.c. One walk over the members (a multi-geometry inside a collection too; a collection inside a collection, curves and the like
+// go back to the backend): PostGIS counts the vertices of every member (an empty member adds 0) and the rings of every polygon; a
+// geometry is empty when no member has an element (a polygon: a ring); ST_NumGeometries is 0 for an empty geometry, the member count of a
+// collection or 1; ST_NumPoints is the point count of a LINESTRING only and ST_NumInteriorRings that of a POLYGON (rings - 1, 0 when empty),
+// NULL for every other type (probe: postgis/measure_probe.sql).
+uint vm_geom_cnt(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+{
+    Reg x = regs[ra];
+    if (x.isnull != 0u)
+    {
+        regs[dst].isnull = 1u;
+        return 0u;
+    }
+    uint s = str_src(x);
+    uint b = str_off(x);
+    uint l = str_len(x);
+    if (l < 12u || (ldb_s(s, b) & 0xe0u) != 0u)
+        return SOP_RECHECK_CODE;
+    uint gflags = ldb_s(s, b + 3u);
+    if ((gflags & 0x08u) != 0u)
+        return SOP_RECHECK_CODE;
+    uint nd = 2u + (gflags & 1u) + ((gflags >> 1u) & 1u);
+    uint o = 4u;
+    if ((gflags & 0x40u) != 0u && (gflags & 0x10u) != 0u)
+        o += 8u;
+    if ((gflags & 0x04u) != 0u)
+        o += 8u * nd;
+    if (o + 8u > l)
+        return SOP_RECHECK_CODE;
+    uint end = b + l;
+    uint p = b + o;
+    uint gtype = ldw_s(s, p);
+    if (gtype == 0u || gtype > 7u)
+        return SOP_RECHECK_CODE;
+    uint stride = 8u * nd;
+    uint n0 = ldw_s(s, p + 4u);
+    if (k0 == 7u || k0 == 10u)
+    {
+        // a line's point count / a polygon's interior rings; NULL for every other type
+        regs[dst].isnull = 0u;
+        if (k0 == 7u ? gtype != 2u : gtype != 3u)
+            regs[dst].isnull = 1u;
+        else if (k0 == 7u)
+            regs[dst].v = int64_t(n0);
+        else
+            regs[dst].v = int64_t(n0 == 0u ? 0u : n0 - 1u);
+        return 0u;
+    }
+    uint rem0 = 1u;
+    uint rem1 = 0u;
+    bool inner = false;
+    if (gtype >= 4u)
+    {
+        rem0 = n0;
+        p += 8u;
+        if (rem0 > (end - p) / 8u)
+            return SOP_RECHECK_CODE;
+    }
+    uint top = rem0;
+    uint npts = 0u;
+    uint nrings = 0u;
+    bool nonempty = false;
+    for (uint guard = 0u; guard < 65536u; guard++)
+    {
+        if (inner)
+        {
+            if (rem1 == 0u)
+                inner = false;
+            else
+                rem1--;
+        }
+        if (!inner)
+        {
+            if (rem0 == 0u)
+                break;
+            rem0--;
+            if (gtype == 7u)
+            {
+                if (p + 8u > end)
+                    return SOP_RECHECK_CODE;
+                uint st = ldw_s(s, p);
+                if (st >= 4u && st <= 6u)
+                {
+                    rem1 = ldw_s(s, p + 4u);
+                    p += 8u;
+                    if (rem1 > (end - p) / 8u)
+                        return SOP_RECHECK_CODE;
+                    inner = true;
+                    continue;
+                }
+            }
+        }
+        if (p + 8u > end)
+            return SOP_RECHECK_CODE;
+        uint t = ldw_s(s, p);
+        uint n = ldw_s(s, p + 4u);
+        uint base = p + 8u;
+        if (t == 1u)
+        {
+            if (n > 1u || (n == 1u && base + stride > end))
+                return SOP_RECHECK_CODE;
+            npts += n;
+            p = base + n * stride;
+        }
+        else if (t == 2u)
+        {
+            if (n > (end - base) / stride)
+                return SOP_RECHECK_CODE;
+            npts += n;
+            p = base + n * stride;
+        }
+        else if (t == 3u)
+        {
+            uint data = base + 4u * n + ((n & 1u) != 0u ? 4u : 0u);
+            if (n > (end - base) / 4u || data > end)
+                return SOP_RECHECK_CODE;
+            uint qe = data;
+            for (uint ar = 0u; ar < n; ar++)
+            {
+                uint np = ldw_s(s, base + 4u * ar);
+                if (np > (end - qe) / stride)
+                    return SOP_RECHECK_CODE;
+                if (ar == 0u && np == 0u)
+                    return SOP_RECHECK_CODE;            // a polygon whose first ring is empty: PostGIS' emptiness rule differs
+                npts += np;
+                qe += np * stride;
+            }
+            nrings += n;
+            p = qe;
+        }
+        else
+            return SOP_RECHECK_CODE;
+        if (n > 0u)
+            nonempty = true;
+    }
+    if (rem0 > 0u || rem1 > 0u)
+        return SOP_RECHECK_CODE;
+    uint v = npts;
+    if (k0 == 8u)
+        v = nonempty ? (gtype >= 4u ? top : 1u) : 0u;
+    else if (k0 == 9u)
+        v = nrings;
+    else if (k0 == 11u)
+        v = nonempty ? 0u : 1u;
+    regs[dst].isnull = 0u;
+    regs[dst].v = int64_t(v);
+    return 0u;
+}
+
 uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
+    if (k0 >= 6u)
+        return vm_geom_cnt(dst, ra, k0, regs);
     Reg x = regs[ra];
     if (x.isnull != 0u)
     {
@@ -2593,6 +2766,16 @@ uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
     uint hz = gflags & 1u;
     uint hm = (gflags >> 1u) & 1u;
     uint v = 2u + hz + hm;                              // NDims, CoordDim
+    if (k0 == SOP_GFLAG_SRID)
+    {
+        // the 21-bit SRID (a value with bit 20 set would be sign-extended by PostGIS: the backend's)
+        uint sb0 = ldb_s(str_src(x), str_off(x));
+        if ((sb0 & 0x10u) != 0u)
+            return SOP_RECHECK_CODE;
+        regs[dst].isnull = 0u;
+        regs[dst].v = int64_t((sb0 << 16) | (ldb_s(str_src(x), str_off(x) + 1u) << 8) | ldb_s(str_src(x), str_off(x) + 2u));
+        return 0u;
+    }
     if (k0 == SOP_GFLAG_HASZ)
         v = hz;
     else if (k0 == SOP_GFLAG_HASM)

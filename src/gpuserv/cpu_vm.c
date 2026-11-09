@@ -1042,7 +1042,7 @@ gdw3_load(const unsigned char *p, uint32_t len, uint32_t *srid, uint64_t *px, ui
 	return 0;
 }
 
-/* ST_Z (k0 = 0) / ST_M (k0 = 1) of a point: the same as vm_geom_zm() of scan_common.slang */
+/* ST_Z (k0 = 0) / ST_M (k0 = 1) / ST_X (2) / ST_Y (3) of a point: the same as vm_geom_zm() of scan_common.slang */
 static uint32_t
 geom_zm(const unsigned char *p, uint32_t len, uint32_t k0, int *isnull, uint64_t *val)
 {
@@ -1053,9 +1053,9 @@ geom_zm(const unsigned char *p, uint32_t len, uint32_t k0, int *isnull, uint64_t
 	npts = ld32u(p + pos + 4);
 	hz = flags & 1;
 	hm = (flags >> 1) & 1;
-	idx = (k0 == 0 ? 2 : 2 + hz);
+	idx = (k0 == 0 ? 2 : (k0 == 1 ? 2 + hz : k0 - 2));	/* ST_X (k0 2), ST_Y (3) */
 	*isnull = 0;
-	if (npts == 0 || (k0 == 0 ? hz == 0 : hm == 0))
+	if (npts == 0 || (k0 == 0 && hz == 0) || (k0 == 1 && hm == 0))
 	{
 		*isnull = 1;
 		return 0;
@@ -1463,13 +1463,20 @@ geom_dwdist_np(const vm_env *env, const vm_reg *regs, uint32_t op, uint32_t ra, 
 	return 0;
 }
 
-/* ST_Length / ST_Length2D (k0 0), ST_3DLength (1), ST_Perimeter / ST_Perimeter2D (2), ST_3DPerimeter (3): the same as vm_geom_len() of
+/* PostGIS 3.7's ptarray_signed_area, the one text the kernel compiles too (kernels_vm/area_ring.inc) */
+#define AREA_FN static inline
+#define AR_F2 struct ArF2s
+#define AR_SRC_T const unsigned char *
+#define AR_LD(src, off) ld64u((src) + (off))
+#include "kernels_vm/area_ring.inc"
+
+/* ST_Length / ST_Length2D (k0 0), ST_3DLength (1), ST_Perimeter / ST_Perimeter2D (2), ST_3DPerimeter (3), ST_Area (4): the same as vm_geom_len() of
  * scan_common.slang (see the comment there for the summation order, and for why it is written as single loops) */
 static uint32_t
 geom_len(const unsigned char *s, uint32_t len, uint32_t k0, uint64_t *val)
 {
 	uint32_t	gflags, hz, hm, nd, o = 4, p, end = len, gtype, stride, rem0 = 1, rem1 = 0;
-	int			per = (k0 >= 2), d3, inner = 0;
+	int			per = (k0 >= 2), area = (k0 == 4), d3, inner = 0;
 	uint64_t	tot = 0, sub = 0;
 
 	if (len < 12 || (s[0] & 0xe0) != 0)
@@ -1578,6 +1585,20 @@ geom_len(const unsigned char *s, uint32_t len, uint32_t k0, uint64_t *val)
 
 			if (np > (end - q) / stride)
 				return SOP_RECHECK_CODE;
+			if (area)
+			{
+				if (np >= 3)
+				{
+					uint64_t	sa = area_ring_signed(s, q, stride, np);
+
+					if (sa == AR_NONE)
+						return SOP_RECHECK_CODE;
+					sa &= F64_MAG;
+					c = (ar == 0) ? f64_add(c, sa) : f64_sub(c, sa);
+				}
+				q += np * stride;
+				continue;
+			}
 			for (uint32_t i = 0; i + 1 < np; i++)
 			{
 				uint32_t	p0 = q + i * stride, p1 = p0 + stride;
@@ -1627,7 +1648,141 @@ geom_len(const unsigned char *s, uint32_t len, uint32_t k0, uint64_t *val)
 	return 0;
 }
 
-/* ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim: the same as vm_geom_flag() of scan_common.slang */
+/* ST_NPoints (k0 6), ST_NumPoints (7), ST_NumGeometries (8), ST_NRings (9), ST_NumInteriorRings (10), ST_IsEmpty (11): the same as
+ * vm_geom_cnt() of scan_common.slang; *isnull is set for the NULL answers of ST_NumPoints / ST_NumInteriorRings */
+static uint32_t
+geom_cnt(const unsigned char *s, uint32_t len, uint32_t k0, int *isnull, int64_t *val)
+{
+	uint32_t	gflags, nd, o = 4, p, end = len, gtype, stride, n0, rem0 = 1, rem1 = 0, top, npts = 0, nrings = 0, v;
+	int			inner = 0, nonempty = 0;
+
+	*isnull = 0;
+	if (len < 12 || (s[0] & 0xe0) != 0)
+		return SOP_RECHECK_CODE;
+	gflags = s[3];
+	if (gflags & 0x08)
+		return SOP_RECHECK_CODE;
+	nd = 2 + (gflags & 1) + ((gflags >> 1) & 1);
+	if ((gflags & 0x40) && (gflags & 0x10))
+		o += 8;
+	if (gflags & 0x04)
+		o += 8 * nd;
+	if (o + 8 > len)
+		return SOP_RECHECK_CODE;
+	p = o;
+	gtype = ld32u(s + p);
+	if (gtype == 0 || gtype > 7)
+		return SOP_RECHECK_CODE;
+	stride = 8 * nd;
+	n0 = ld32u(s + p + 4);
+	if (k0 == SOP_GFLAG_NUMPOINTS || k0 == SOP_GFLAG_NUMINTRINGS)
+	{
+		if (k0 == SOP_GFLAG_NUMPOINTS ? gtype != 2 : gtype != 3)
+			*isnull = 1;
+		else
+			*val = (k0 == SOP_GFLAG_NUMPOINTS) ? (int64_t) n0 : (int64_t) (n0 == 0 ? 0 : n0 - 1);
+		return 0;
+	}
+	if (gtype >= 4)
+	{
+		rem0 = n0;
+		p += 8;
+		if (rem0 > (end - p) / 8)
+			return SOP_RECHECK_CODE;
+	}
+	top = rem0;
+	for (uint32_t guard = 0; guard < 65536; guard++)
+	{
+		uint32_t	t, n, base;
+
+		if (inner)
+		{
+			if (rem1 == 0)
+				inner = 0;
+			else
+				rem1--;
+		}
+		if (!inner)
+		{
+			if (rem0 == 0)
+				break;
+			rem0--;
+			if (gtype == 7)
+			{
+				uint32_t	st;
+
+				if (p + 8 > end)
+					return SOP_RECHECK_CODE;
+				st = ld32u(s + p);
+				if (st >= 4 && st <= 6)
+				{
+					rem1 = ld32u(s + p + 4);
+					p += 8;
+					if (rem1 > (end - p) / 8)
+						return SOP_RECHECK_CODE;
+					inner = 1;
+					continue;
+				}
+			}
+		}
+		if (p + 8 > end)
+			return SOP_RECHECK_CODE;
+		t = ld32u(s + p);
+		n = ld32u(s + p + 4);
+		base = p + 8;
+		if (t == 1)
+		{
+			if (n > 1 || (n == 1 && base + stride > end))
+				return SOP_RECHECK_CODE;
+			npts += n;
+			p = base + n * stride;
+		}
+		else if (t == 2)
+		{
+			if (n > (end - base) / stride)
+				return SOP_RECHECK_CODE;
+			npts += n;
+			p = base + n * stride;
+		}
+		else if (t == 3)
+		{
+			uint32_t	data = base + 4 * n + ((n & 1) ? 4 : 0), qe = data;
+
+			if (n > (end - base) / 4 || data > end)
+				return SOP_RECHECK_CODE;
+			for (uint32_t ar = 0; ar < n; ar++)
+			{
+				uint32_t	np = ld32u(s + base + 4 * ar);
+
+				if (np > (end - qe) / stride)
+					return SOP_RECHECK_CODE;
+				if (ar == 0 && np == 0)
+					return SOP_RECHECK_CODE;
+				npts += np;
+				qe += np * stride;
+			}
+			nrings += n;
+			p = qe;
+		}
+		else
+			return SOP_RECHECK_CODE;
+		if (n > 0)
+			nonempty = 1;
+	}
+	if (rem0 > 0 || rem1 > 0)
+		return SOP_RECHECK_CODE;
+	v = npts;
+	if (k0 == SOP_GFLAG_NUMGEOMS)
+		v = nonempty ? (gtype >= 4 ? top : 1) : 0;
+	else if (k0 == SOP_GFLAG_NRINGS)
+		v = nrings;
+	else if (k0 == SOP_GFLAG_ISEMPTY)
+		v = nonempty ? 0 : 1;
+	*val = (int64_t) v;
+	return 0;
+}
+
+/* ST_HasZ / ST_HasM / ST_NDims / ST_Zmflag / ST_CoordDim / ST_SRID: the same as vm_geom_flag() of scan_common.slang */
 static uint32_t
 geom_flag(const unsigned char *p, uint32_t len, uint32_t k0, int64_t *val)
 {
@@ -1635,6 +1790,13 @@ geom_flag(const unsigned char *p, uint32_t len, uint32_t k0, int64_t *val)
 
 	if (len < 8 || (p[0] & 0xe0) != 0)
 		return SOP_RECHECK_CODE;
+	if (k0 == SOP_GFLAG_SRID)
+	{
+		if (p[0] & 0x10)
+			return SOP_RECHECK_CODE;
+		*val = (int64_t) (((uint32_t) p[0] << 16) | ((uint32_t) p[1] << 8) | p[2]);
+		return 0;
+	}
 	hz = p[3] & 1;
 	hm = (p[3] >> 1) & 1;
 	v = 2 + hz + hm;
@@ -1821,6 +1983,18 @@ vm_ext(const vm_env *env, uint32_t op, uint32_t dst, uint32_t ra, uint32_t rb, u
 			if (a.isnull)
 			{
 				regs[dst].isnull = 1;
+				return 0;
+			}
+			if (k0 >= SOP_GFLAG_NPOINTS)
+			{
+				int			isnull = 0;
+
+				rc = geom_cnt(str_ptr(env, a.v), str_len(a.v), k0, &isnull, &val);
+				if (rc != 0)
+					return rc;
+				regs[dst].isnull = isnull;
+				if (!isnull)
+					regs[dst].v = val;
 				return 0;
 			}
 			rc = geom_flag(str_ptr(env, a.v), str_len(a.v), k0, &val);

@@ -2523,6 +2523,8 @@ calib_host_ring(const double (*pt)[3], int n, bool d3)
 	return total;
 }
 
+static bool vulkan_geom_area_calibrated(Oid func_oid);
+
 /*
  * Does the installed PostGIS decide ST_DWithin(point, line or polygon, d) as "the 2D distance of the model (calib_ptarray_min per line or
  * ring; a polygon: 0 inside it, the distance to the exterior ring outside it, to the hole's ring inside a hole) <= d"? Called, with the
@@ -2680,6 +2682,8 @@ vulkan_geom_len_calibrated(Oid func_oid, int kind)
 	bool		ok = true, d3 = ((kind & 1) != 0), per = (kind >= 2);
 	MemoryContext oldcxt;
 
+	if (kind == 4)
+		return vulkan_geom_area_calibrated(func_oid);
 	for (int i = 0; i < ndone; i++)
 		if (done[i].oid == func_oid)
 			return done[i].ok;
@@ -2774,6 +2778,267 @@ vulkan_geom_len_calibrated(Oid func_oid, int kind)
 	PG_END_TRY();
 	if (!ok)
 		elog(LOG, "PG-Strom: PostGIS function %u does not compute lengths the way the GPU kernel does; it stays on the CPU", func_oid);
+	if (ndone < lengthof(done))
+	{
+		done[ndone].oid = func_oid;
+		done[ndone].ok = ok;
+		ndone++;
+	}
+	return ok;
+}
+
+/*
+ * ST_Area (R3): PostGIS 3.7 computes a ring's signed area with an adaptive determinant sum (ptarray_signed_area, reproduced in software
+ * binary64 by gpuserv/kernels_vm/area_ring.inc, which svc_area.c compiles for this module). The planner calls the installed ST_Area on
+ * fixed polygons (a ring, a ring with holes, a multipolygon of two; Z, so the third coordinate must be ignored) at five magnitudes and
+ * compares it bit for bit with the same composition on the host (lwpoly_area: the exterior ring's |area|, minus the holes'; lwgeom_area:
+ * the members added in order). Rings the kernel would hand to the backend are not compared, but at least 60 of the 100 must be.
+ */
+extern bool pgstrom_svc_area_ring(const void *pts, uint32_t stride, uint32_t npoints, double *signed_area);
+
+static bool
+vulkan_geom_area_calibrated(Oid func_oid)
+{
+	static struct { Oid oid; bool ok; } done[4];
+	static int	ndone = 0;
+	static const double scales[5] = {1000.0, 1e-3, 1e8, 1.0, 1e-100};
+	uint64_t	rng = 0x9E3779B97F4A7C15ULL;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 1);
+	bool		ok = true;
+	int			compared = 0;
+	MemoryContext oldcxt;
+
+	for (int i = 0; i < ndone; i++)
+		if (done[i].oid == func_oid)
+			return done[i].ok;
+	oldcxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int i = 0; i < 100 && ok; i++)
+		{
+			double		v[24][3];
+			double		sc = scales[i % 5], want = 0.0, got;
+			unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24 * 40 + 64);
+			size_t		off = VARHDRSZ + 4;
+			bool		multi = (i % 2 == 1), skip = false;
+			int			cnt[2][3] = {{5, 5, 4}, {4, 6, 5}};
+			int			nholes = 1 + (i % 3 == 0), at = 0;
+			uint32		t = 6, n = 2;
+
+			for (int k = 0; k < 24; k++)
+				for (int c = 0; c < 3; c++)
+				{
+					rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+					v[k][c] = ((double)(rng >> 11) / 9007199254740992.0 * 2.0 - 1.0) * sc + ((i % 7 == 6) ? 3.0 * sc : 0.0);
+				}
+			buf[VARHDRSZ + 3] = 0x01;			/* Z */
+			if (multi)
+			{
+				memcpy(buf + off, &t, 4);
+				memcpy(buf + off + 4, &n, 4);
+				off += 8;
+			}
+			for (int m = 0; m < (multi ? 2 : 1) && !skip; m++)
+			{
+				double		poly = 0.0;
+				int			nr = 1 + nholes, total = 0;
+				int			rc[3];
+
+				for (int r = 0; r < nr; r++)
+				{
+					rc[r] = cnt[m][r];
+					/* close the ring: the last point repeats the first */
+					memcpy(v[at + rc[r] - 1], v[at], sizeof(v[0]));
+					total += rc[r];
+				}
+				off = calib_put_poly_or_line(buf, off, v + at, rc, nr, false);
+				for (int r = 0; r < nr; r++)
+				{
+					double		sa;
+
+					if (!pgstrom_svc_area_ring(v[at], 24, rc[r], &sa))
+					{
+						skip = true;
+						break;
+					}
+					if (r == 0)
+						poly += fabs(sa);
+					else
+						poly -= fabs(sa);
+					at += rc[r];
+				}
+				want += poly;
+			}
+			if (skip)
+			{
+				pfree(buf);
+				continue;
+			}
+			SET_VARSIZE(buf, off);
+			InitFunctionCallInfoData(*fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
+			fcinfo->args[0].value = PointerGetDatum(buf);
+			fcinfo->args[0].isnull = false;
+			got = DatumGetFloat8(FunctionCallInvoke(fcinfo));
+			if (fcinfo->isnull || memcmp(&want, &got, sizeof(double)) != 0)
+				ok = false;
+			compared++;
+			pfree(buf);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	if (ok && compared < 60)
+		ok = false;
+	if (!ok)
+		elog(LOG, "PG-Strom: PostGIS function %u does not compute ST_Area the way the GPU kernel does; it stays on the CPU", func_oid);
+	if (ndone < lengthof(done))
+	{
+		done[ndone].oid = func_oid;
+		done[ndone].ok = ok;
+		ndone++;
+	}
+	return ok;
+}
+
+/*
+ * R3/R4 accessors: ST_X, ST_Y (kinds of GEOMZM 2, 3) and ST_SRID, ST_NPoints, ST_NumPoints, ST_NumGeometries, ST_NRings,
+ * ST_NumInteriorRings, ST_IsEmpty (kinds of GEOMFLAG 5..11) return values the kernel takes from the serialization. The installed function
+ * is called on fixed geometries and must give the expected answer (a NULL where the kernel gives NULL); a PostGIS that counts or reports
+ * differently keeps the function on the CPU. Geometries: a POINT with SRID 4326, a polygon with two rings (5 and 4 points) , a multi-
+ * linestring of lines of 2, 3 and 4 points, a line of 3 points, an empty point and a multipolygon with an empty polygon is not needed.
+ */
+static bool
+vulkan_geom_acc_calibrated(Oid func_oid, bool is_zm, int kind)
+{
+	static struct { Oid oid; bool ok; } done[16];
+	static int	ndone = 0;
+	FmgrInfo	flinfo;
+	LOCAL_FCINFO(fcinfo, 1);
+	bool		ok = true;
+	MemoryContext oldcxt;
+	/* test geometry j: 0 point(3.5, -2.25) srid 4326, 1 polygon rings {5,4}, 2 multilinestring {2,3,4}, 3 line of 3, 4 empty point */
+	for (int i = 0; i < ndone; i++)
+		if (done[i].oid == func_oid)
+			return done[i].ok;
+	oldcxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		fmgr_info(func_oid, &flinfo);
+		for (int j = 0; j < 5 && ok; j++)
+		{
+			double		pt[24][3];
+			unsigned char *buf = palloc0(VARHDRSZ + 4 + 8 + 24 * 24 + 64);
+			size_t		off = VARHDRSZ + 4;
+			uint32		t;
+			uint32		n;
+			Datum		r;
+			int			expect;			/* -1: NULL */
+			double		fexpect = 0.0;
+
+			for (int k = 0; k < 24; k++)
+			{
+				pt[k][0] = 3.5 + k; pt[k][1] = -2.25 - k; pt[k][2] = 7.0;
+			}
+			buf[VARHDRSZ + 3] = 0x01;
+			if (j == 0)
+			{
+				t = 1; n = 1;
+				memcpy(buf + off, &t, 4); memcpy(buf + off + 4, &n, 4);
+				memcpy(buf + off + 8, pt[0], 24);
+				off += 8 + 24;
+				buf[VARHDRSZ] = 0; buf[VARHDRSZ + 1] = 0x10; buf[VARHDRSZ + 2] = 0xE6;	/* SRID 4326 */
+			}
+			else if (j == 1)
+			{
+				int			cnt[2] = {5, 4};
+
+				off = calib_put_poly_or_line(buf, off, pt, cnt, 2, false);
+			}
+			else if (j == 2)
+			{
+				int			cnt[3] = {2, 3, 4};
+				int			at = 0;
+
+				t = 5; n = 3;
+				memcpy(buf + off, &t, 4); memcpy(buf + off + 4, &n, 4);
+				off += 8;
+				for (int k = 0; k < 3; k++)
+				{
+					off = calib_put_poly_or_line(buf, off, pt + at, &cnt[k], 1, true);
+					at += cnt[k];
+				}
+			}
+			else if (j == 3)
+			{
+				int			cnt[1] = {3};
+
+				off = calib_put_poly_or_line(buf, off, pt, cnt, 1, true);
+			}
+			else
+			{
+				t = 1; n = 0;
+				memcpy(buf + off, &t, 4); memcpy(buf + off + 4, &n, 4);
+				off += 8;
+			}
+			SET_VARSIZE(buf, off);
+			if (is_zm)
+			{
+				/* ST_X / ST_Y: a point answers its coordinate, an empty point NULL */
+				expect = (j == 0) ? 1 : (j == 4 ? -1 : -2);	/* -2: PostGIS raises, not called */
+				fexpect = (kind == 2) ? 3.5 : -2.25;
+			}
+			else
+			{
+				/* kind: 5 SRID 6 NPoints 7 NumPoints 8 NumGeometries 9 NRings 10 NumInteriorRings 11 IsEmpty */
+				static const int tab[7][5] = {
+					/* point, polygon, multiline, line, empty point */
+					{4326, 0, 0, 0, 0},		/* SRID */
+					{1, 9, 9, 3, 0},		/* NPoints */
+					{-1, -1, -1, 3, -1},	/* NumPoints */
+					{1, 1, 3, 1, 0},		/* NumGeometries */
+					{0, 2, 0, 0, 0},		/* NRings */
+					{-1, 1, -1, -1, -1},	/* NumInteriorRings */
+					{0, 0, 0, 0, 1}			/* IsEmpty */
+				};
+
+				expect = tab[kind - 5][j];
+			}
+			if (expect != -2)
+			{
+				InitFunctionCallInfoData(*fcinfo, &flinfo, 1, InvalidOid, NULL, NULL);
+				fcinfo->args[0].value = PointerGetDatum(buf);
+				fcinfo->args[0].isnull = false;
+				r = FunctionCallInvoke(fcinfo);
+				if (expect == -1)
+					ok = fcinfo->isnull;
+				else if (fcinfo->isnull)
+					ok = false;
+				else if (is_zm)
+					ok = (DatumGetFloat8(r) == fexpect);
+				else if (kind == 11)
+					ok = (DatumGetBool(r) == (expect != 0));
+				else
+					ok = (DatumGetInt32(r) == expect);
+			}
+			pfree(buf);
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(oldcxt);
+		FlushErrorState();
+		ok = false;
+	}
+	PG_END_TRY();
+	if (!ok)
+		elog(LOG, "PG-Strom: PostGIS function %u does not answer the accessor probes the way the GPU kernel does; it stays on the CPU", func_oid);
 	if (ndone < lengthof(done))
 	{
 		done[ndone].oid = func_oid;
@@ -2896,7 +3161,9 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return false;
 	/* st_z / st_m of a column, parameter or constant point (a fused st_makepoint has no register to read) */
 	if (fc.cls == SOP_GEOMZM || fc.cls == SOP_GEOMFLAG)
-		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0);
+		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0 &&
+				((fc.cls == SOP_GEOMZM && fc.kind < 2) || (fc.cls == SOP_GEOMFLAG && fc.kind < SOP_GFLAG_SRID) ||
+				 vulkan_geom_acc_calibrated(dfunc->func_oid, fc.cls == SOP_GEOMZM, (int) fc.kind)));
 	if (fc.cls == SOP_GEOMLEN)
 		return (list_length(func_args) == 1 && vulkan_geom_operand_shape(linitial(func_args)) == 0 &&
 				vulkan_geom_len_calibrated(dfunc->func_oid, (int) fc.kind));

@@ -403,3 +403,4 @@ if [ "${GISTJOIN3D:-on}" = on ]; then
 	if [ "$pj" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    pg_3d: GiST join over Z, M and ZM geometries (${g#*|} rows)"
 	else echo "  FAIL  pg_3d: GiST join over Z, M and ZM geometries (GPU GiST Join=$pj)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 fi
+. "${0%/*}/postgis_measure_tests.inc"

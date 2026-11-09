@@ -117,7 +117,7 @@
  *            a distance beyond FLT_MAX (PostGIS' initial value) is the backend's. The walker is compiled once, shared with GEOMDIST
  *            (vm_geom_dwdist is the entry of both).
  *
- *   GEOMZM   dst = ST_Z(point) (k0 = 0) or ST_M(point) (k0 = 1): the float8 bits of the coordinate. NULL (as PostGIS) for a point
+ *   GEOMZM   dst = ST_Z(point) (k0 = 0), ST_M(point) (k0 = 1), ST_X(point) (2) or ST_Y(point) (3): the float8 bits of the coordinate. NULL (as PostGIS) for a point
  *            without that dimension, an empty point and a NULL geometry; NaN, Infinity and -0 pass through. Every other
  *            geometry type (PostGIS raises "Argument to ST_Z() must have type POINT"), a geodetic point and a malformed value
  *            return SCANVM_RECHECK_CODE: the backend evaluates the row and raises the error in its own order.
@@ -138,7 +138,13 @@
  *            collection adds what its members return (each member's total first). Points, lines, polygons, their multi-geometries and
  *            a collection of those are read; a collection in a collection, curves, a geodetic value, a malformed one, non-finite
  *            coordinates and an overflow return SCANVM_RECHECK_CODE. Calibrated by the planner like GEOMDIST.
+ *            k0 = 4 is ST_Area (R3): lwgeom_area adds the members' areas, lwpoly_area the exterior ring's |signed area| minus the holes'
+ *            (a ring of fewer than 3 points is skipped), and PostGIS 3.7's ptarray_signed_area is an adaptive determinant sum that
+ *            area_ring.inc reproduces (postgis/area_probe*.sql: 80,000 rings, 0 differences); a ring that needs PostGIS' exact path
+ *            (cancellation), rescaling (products beyond 2^990) or has a non-finite value returns SCANVM_RECHECK_CODE.
  *
+ *   GEOMFLAG (k0 5..11, R3/R4: ST_SRID from the header; ST_NPoints, ST_NumPoints, ST_NumGeometries, ST_NRings, ST_NumInteriorRings, ST_IsEmpty
+ *            by a walk over the members, NULL where PostGIS returns NULL; curves, a collection in a collection: SCANVM_RECHECK_CODE)
  *   GEOMFLAG dst = the flags of a geometry of any type (empty or not): k0 0 ST_HasZ, 1 ST_HasM (boolean), 2 ST_NDims (2 + Z + M),
  *            3 ST_Zmflag (2 * Z + M), 4 ST_CoordDim (= ST_NDims) as smallint. Only the header is read; NULL in, NULL out; a value
  *            shorter than a header returns SCANVM_RECHECK_CODE.
@@ -252,6 +258,15 @@ SCANVM_OP(GFLAG_HASM,     1)
 SCANVM_OP(GFLAG_NDIMS,    2)
 SCANVM_OP(GFLAG_ZMFLAG,   3)
 SCANVM_OP(GFLAG_COORDDIM, 4)
+/* GEOMFLAG kinds 5..11 (R3/R4): ST_SRID (header), then the walks of geom_cnt(): ST_NPoints, ST_NumPoints, ST_NumGeometries, ST_NRings,
+ * ST_NumInteriorRings, ST_IsEmpty (int4 / boolean) */
+SCANVM_OP(GFLAG_SRID,     5)
+SCANVM_OP(GFLAG_NPOINTS,  6)
+SCANVM_OP(GFLAG_NUMPOINTS, 7)
+SCANVM_OP(GFLAG_NUMGEOMS, 8)
+SCANVM_OP(GFLAG_NRINGS,   9)
+SCANVM_OP(GFLAG_NUMINTRINGS, 10)
+SCANVM_OP(GFLAG_ISEMPTY,  11)
 /* returned by an instruction that cannot evaluate this row: the backend evaluates it (not an error) */
 SCANVM_OP(RECHECK_CODE, 0x7ffffffe)
 SCANVM_OP(GIST_NONFINITE_CODE, 0x7ffffffd)  /* A13: a GiST join probe point has a non-finite coordinate (an error, not a recheck) */
