@@ -31,6 +31,11 @@
 // the rows flagged 1 (staged key and argument values) to an overflow list { count, records of OV_REC words } at kparam.total_lps - ...:
 // its position is outb[ovf_base] with ovf_base = kparam.extra (mode 3 only; the flags start at 4).
 // Program header as gagg.slang: [10] aggregates, [11] aggregate table, [12] keys, [13] key registers.
+// String keys (A6): header word 21 has bit i set when key i is a string (text, varchar) and bit 4 + i when it is a bpchar. The
+// staged key of such a key is the string register { offset | length << 32 | source << 60 } of the row's value, which stays valid
+// for the task (the pages are the task's): the tag hashes the bytes (hash_bytes_src, bpchar without the trailing blanks), two
+// keys are equal if their bytes are, and a slot's key words point at the first row that inserted it. The service therefore reads
+// the table and clears it at the end of every task (the pointers do not outlive the pages), and resolves the bytes then.
 #define GTAB 1
 #include "scan_common.slang"
 #ifdef ARROW_SRC
@@ -56,6 +61,8 @@ static const uint AC_MAX        = 5;
 static const uint NONE_REG      = 0xffffffffu;
 static const uint NO_SLOT       = 0xffffffffu;
 
+static uint g_kstr;                                 // header word 21: the string keys (see above)
+
 groupshared uint    sh_hits;
 groupshared uint    st_kn[SCAN_WG];                 // null mask | 0x80000000 if the row qualifies
 groupshared uint    st_hash[SCAN_WG];
@@ -68,11 +75,29 @@ uint hash_key_words(int64_t k, uint bit, uint kn, uint h)
     return (h ^ (uint(k) ^ (uint(k >> 32) * 0x9e3779b1u) ^ (((kn >> bit) & 1u) * 0x85ebca6bu))) * 0x01000193u;
 }
 
-uint hash_keys(int64_t k[GA_NK], uint kn)
+// the bytes of a string key: its source, offset and length (bpchar: without the trailing blanks)
+uint gt_str_len(int64_t k, bool bp)
+{
+    uint len = uint((uint64_t(k) >> 32) & 0x0fffffffu);
+    if (bp)
+        len = str_truelen(uint((uint64_t(k) >> 60) & 3u), uint(uint64_t(k) & 0xffffffffu), len);
+    return len;
+}
+
+uint hash_keys(int64_t k[GA_NK], uint kn, uint kstr)
 {
     uint h = 0x811c9dc5u;
     for (uint i = 0; i < GA_NK; i++)
-        h = hash_key_words(k[i], i, kn, h);
+    {
+        if (((kstr >> i) & 1u) != 0 && ((kn >> i) & 1u) == 0)
+        {
+            uint hv = hash_bytes_src(uint((uint64_t(k[i]) >> 60) & 3u), uint(uint64_t(k[i]) & 0xffffffffu),
+                                     gt_str_len(k[i], ((kstr >> (4 + i)) & 1u) != 0));
+            h = (h ^ hv) * 0x01000193u;
+        }
+        else
+            h = hash_key_words(k[i], i, kn, h);
+    }
     h ^= h >> 15;
     h *= 0x2c1b3c6du;
     h ^= h >> 12;
@@ -122,7 +147,18 @@ uint gt_find(uint tag, uint kn, uint tid, uint mask, uint stride, uint nkeys)
             for (uint i = 0; i < nkeys; i++)          // (the words of the unused keys are 0 on both sides)
             {
                 uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
-                if (gtab[base + 2 + 2 * i] != uint(kv & 0xffffffffu) || gtab[base + 3 + 2 * i] != uint(kv >> 32))
+                if (((g_kstr >> i) & 1u) != 0 && ((kn >> i) & 1u) == 0)
+                {
+                    // a string key: the same bytes (the slot's words point at the first row's value in the task's pages)
+                    bool bp = ((g_kstr >> (4 + i)) & 1u) != 0;
+                    uint64_t sv = uint64_t(gtab[base + 2 + 2 * i]) | (uint64_t(gtab[base + 3 + 2 * i]) << 32);
+                    uint la = gt_str_len(int64_t(sv), bp);
+                    uint lb = gt_str_len(int64_t(kv), bp);
+                    if (la != lb || str_memcmp(uint((sv >> 60) & 3u), uint(sv & 0xffffffffu),
+                                               uint((kv >> 60) & 3u), uint(kv & 0xffffffffu), la) != 0)
+                        same = false;
+                }
+                else if (gtab[base + 2 + 2 * i] != uint(kv & 0xffffffffu) || gtab[base + 3 + 2 * i] != uint(kv >> 32))
                     same = false;
             }
             if (same)
@@ -234,6 +270,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint nkeys   = prog[12];
     uint keyoff  = prog[13];
     uint flags_base = kparam.total_lps;
+    g_kstr       = prog[21];
     uint mask    = gtab[2];
     uint stride  = gtab[3];
     uint a_cls[GA_NA];
@@ -310,7 +347,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     }
                     st_key[tid * GA_NK + i] = kk[i];
                 }
-                st_hash[tid] = hash_keys(kk, kn);
+                st_hash[tid] = hash_keys(kk, kn, g_kstr);
                 st_kn[tid] = kn | 0x80000000u;
                 for (uint k = 0; k < naggs; k++)
                 {

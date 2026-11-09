@@ -13,6 +13,20 @@
 #include "gpuserv/scan_caps.h"
 
 /* static variables */
+/* a text / varchar / bpchar GROUP BY key: a plain column (RelabelType varchar -> text stripped) under a deterministic collation */
+static bool
+pgstrom_group_string_key_ok(Expr *expr)
+{
+	Node	   *node = (Node *) expr;
+
+	while (node && IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+	if (!node || !IsA(node, Var))
+		return false;
+	return (OidIsValid(exprCollation((Node *) expr)) &&
+			get_collation_isdeterministic(exprCollation((Node *) expr)));
+}
+
 static create_upper_paths_hook_type	create_upper_paths_next = NULL;
 static CustomPathMethods	gpupreagg_path_methods;
 static CustomScanMethods	gpupreagg_plan_methods;
@@ -229,6 +243,36 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:fmin_tstz(bytea)",
 	 KAGG_ACTION__PMIN_INT64,
 	 KAGG_FINAL__FMINMAX_TIMESTAMPTZ,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
+	},
+	/*
+	 * BOOL_AND(X) = EVERY(X) = MIN(X), BOOL_OR(X) = MAX(X) of the 0/1 values: the minimum / maximum states of the integers
+	 */
+	{"bool_and(bool)",
+	 "s:min_bool(bytea)",
+	 "s:pmin(bool)",
+	 "s:fmin_bool(bytea)",
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_BOOL,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
+	},
+	{"every(bool)",
+	 "s:min_bool(bytea)",
+	 "s:pmin(bool)",
+	 "s:fmin_bool(bytea)",
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_BOOL,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
+	},
+	{"bool_or(bool)",
+	 "s:max_bool(bytea)",
+	 "s:pmax(bool)",
+	 "s:fmax_bool(bytea)",
+	 KAGG_ACTION__PMAX_INT32,
+	 KAGG_FINAL__FMINMAX_BOOL,
 	 false,
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
@@ -2004,12 +2048,24 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 					 nodeToString(expr));
 				return false;
 			}
-			/* the Vulkan service groups on up to SCAN_GROUP_KEYS integer, bool or numeric (of a known scale) columns */
+			/*
+			 * the Vulkan service groups on up to SCAN_GROUP_KEYS integer, bool or numeric (of a known scale) columns,
+			 * and on text / varchar / bpchar columns of the scanned relation (not over a join): the kernel hashes and
+			 * compares the bytes, which is what the equality of a deterministic collation does
+			 */
 			if ((!scan_vm_groupkey_type_supported(dtype->type_code) &&
 				 !(dtype->type_code == TypeOpCode__numeric &&
 				   con->inner_target_list == NIL &&
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
-				   pgstrom_numeric_static_dscale((Node *) expr) <= 255)) ||
+				   pgstrom_numeric_static_dscale((Node *) expr) <= 255) &&
+				 !((dtype->type_code == TypeOpCode__text ||
+					dtype->type_code == TypeOpCode__bpchar) &&
+				   con->inner_target_list == NIL &&
+				   pgstrom_group_string_key_ok(expr)) &&
+				 /* float4 / float8 keys of the scanned relation: the program groups on x + 0.0 (-0 = +0, NaN = NaN) */
+				 !((dtype->type_code == TypeOpCode__float4 ||
+					dtype->type_code == TypeOpCode__float8) &&
+				   con->inner_target_list == NIL)) ||
 				list_length(con->groupby_keys) >= con->max_keys)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",
@@ -2017,7 +2073,9 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				return false;
 			}
 			coll_oid = exprCollation((Node *)expr);
-			if (devtype_lookup_equal_func(dtype, coll_oid) == NULL)
+			if (dtype->type_code != TypeOpCode__text &&
+				dtype->type_code != TypeOpCode__bpchar &&
+				devtype_lookup_equal_func(dtype, coll_oid) == NULL)
 			{
 				elog(DEBUG2, "GROUP BY contains unsupported device type (%s): %s",
 					 format_type_be(type_oid),
