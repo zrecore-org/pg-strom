@@ -1307,8 +1307,33 @@ __fixup_fallback_expression_walker(Node *node, void *data)
 		}
 	}
 	if (IsA(node, Var))
+	{
+		/*
+		 * The same column with other varnullingrels (a clause that comes from the nullable side of an outer join, such
+		 * as the GiST index clause, against the kernel variable of the column): the same value for the CPU.
+		 */
+		Var		   *var = (Var *) node;
+
+		foreach (lc, kvars_deflist)
+		{
+			codegen_kvar_defitem *kvdef = lfirst(lc);
+			Var		   *kvar = (Var *) kvdef->kv_expr;
+
+			if (IsA(kvar, Var) &&
+				kvar->varno == var->varno &&
+				kvar->varattno == var->varattno &&
+				kvar->vartype == var->vartype &&
+				kvar->varlevelsup == var->varlevelsup)
+				return (Node *)makeVar(INDEX_VAR,
+									   kvdef->kv_fallback,
+									   var->vartype,
+									   var->vartypmod,
+									   var->varcollid,
+									   0);
+		}
 		elog(ERROR, "unexpected Var-node in fallback expression: %s",
 			 nodeToString(node));
+	}
 	return expression_tree_mutator(node, __fixup_fallback_expression_walker, data);
 }
 
@@ -1699,8 +1724,26 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 			List	   *jquals = pp_inner->join_quals;
 
 			if (OidIsValid(pp_inner->gist_index_oid) && pp_inner->gist_clause)
-				jquals = lappend(list_copy(jquals), pp_inner->gist_clause);
-			istate->join_quals = __execInitCpuFallbackQuals(jquals, pts);
+			{
+				MemoryContext oldcxt = CurrentMemoryContext;
+
+				/* a clause that cannot be translated must not fail the query that never needs the CPU run */
+				PG_TRY();
+				{
+					istate->join_quals =
+						__execInitCpuFallbackQuals(lappend(list_copy(jquals), pp_inner->gist_clause), pts);
+				}
+				PG_CATCH();
+				{
+					MemoryContextSwitchTo(oldcxt);
+					FlushErrorState();
+					istate->gist_clause_failed = true;
+					istate->join_quals = __execInitCpuFallbackQuals(jquals, pts);
+				}
+				PG_END_TRY();
+			}
+			else
+				istate->join_quals = __execInitCpuFallbackQuals(jquals, pts);
 		}
 		istate->other_quals = __execInitCpuFallbackQuals(pp_inner->other_quals, pts);
 

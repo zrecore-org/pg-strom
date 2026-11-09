@@ -460,6 +460,7 @@ typedef struct
 	Relation		gist_irel;
 	ExprState	   *gist_clause;
 	AttrNumber		gist_ctid_resno;
+	bool			gist_clause_failed;	/* the index clause has no CPU form: the CPU cannot run this join */
 	BlockNumber		gist_nblocks;	/* blocks of the index the buffer was sized for */
 	/*
 	 * CPU fallback (inner-loading)

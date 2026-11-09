@@ -440,6 +440,11 @@ __execFallbackCpuJoinOneDepth(pgstromTaskState *pts,
 		if (h_kmrels->chunks[depth-1].is_nestloop ||
 			h_kmrels->chunks[depth-1].gist_offset != 0)
 		{
+			if (pts->inners[depth-1].gist_clause_failed)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("%s: the CPU cannot run the GiST join at depth %d (its index clause has no CPU form)",
+								pts->css.methods->CustomName, depth)));
 			__execFallbackCpuNestLoop(pts, kds_in, oj_map, depth, l_state, matched);
 		}
 		else
