@@ -1889,6 +1889,7 @@ typedef struct
 	int			isnull;
 	uint32_t	len;
 	unsigned char data[64];
+	const unsigned char *ext;	/* a string key: the bytes (form_partial_tuple writes the varlena header) */
 } col_value;
 
 static int
@@ -2117,18 +2118,30 @@ form_partial_tuple(const kern_data_store *kds_dst_head, const col_value *cols, u
 
 		if (cols[k].isnull)
 			continue;
+		uint32_t	vlen = cols[k].len + (cols[k].ext ? 4 : 0);
+
 		if (cm->attlen == -1)
 			infomask |= 2;						/* HEAP_HASVARWIDTH */
 		t_next = TYPEALIGN(cm->attalign, t_hoff);
-		if (t_next + cols[k].len + ROWID_SIZE > tupsz)
+		if (t_next + vlen + ROWID_SIZE > tupsz)
 		{
 			snprintf(err, errlen, "the partial aggregate row is too large");
 			return -1;
 		}
-		memcpy(tup + t_next, cols[k].data, cols[k].len);
+		if (t_next > t_hoff)
+			memset(tup + t_hoff, 0, t_next - t_hoff);	/* the padding of a varlena must be zero bytes (heap_deform_tuple) */
+		if (cols[k].ext)
+		{
+			uint32_t	hdr = vlen << 2;		/* a 4-byte varlena header (little endian) */
+
+			memcpy(tup + t_next, &hdr, 4);
+			memcpy(tup + t_next + 4, cols[k].ext, cols[k].len);
+		}
+		else
+			memcpy(tup + t_next, cols[k].data, cols[k].len);
 		if (hasnull)
 			titem->t_bits[k >> 3] |= (1 << (k & 7));
-		t_hoff = t_next + cols[k].len;
+		t_hoff = t_next + vlen;
 	}
 	t_hoff += ROWID_SIZE;
 	if (t_hoff > tupsz)
@@ -2140,6 +2153,171 @@ form_partial_tuple(const kern_data_store *kds_dst_head, const col_value *cols, u
 	titem->t_infomask = infomask;
 	KERN_TUPITEM_SET_ROWID(titem, rowid);
 	return (int) t_hoff;
+}
+
+/* ---------------------------------------------------------------- */
+/*
+ * String GROUP BY keys (A6): the session interns every distinct key value into a dictionary and a group's key is the id, so the
+ * group table below stays a table of int64 keys. A bpchar value is identified by its bytes without the trailing blanks (the
+ * stored value is the first one seen, whole, so a padded char(n) is returned as it is stored).
+ */
+typedef struct str_dict
+{
+	unsigned char *buf;
+	size_t		len, cap;
+	struct str_dict_ent
+	{
+		size_t		off;
+		uint32_t	len;		/* stored bytes */
+		uint32_t	klen;		/* bytes that identify it (bpchar: without trailing blanks) */
+		uint32_t	bp;			/* a bpchar value (a text and a bpchar value never share an id: the stored bytes differ) */
+	}		   *ents;
+	uint32_t	nents, ecap;
+	uint32_t   *htab;
+	uint32_t	hcap;
+	uint32_t	maxlen;
+} str_dict;
+
+static uint32_t
+sd_hash(const unsigned char *p, uint32_t len)
+{
+	uint64_t	h = 0xcbf29ce484222325ULL;
+
+	for (uint32_t i = 0; i < len; i++)
+		h = (h ^ p[i]) * 0x100000001b3ULL;
+	return (uint32_t)(h ^ (h >> 32));
+}
+
+static void
+sd_free(str_dict *d)
+{
+	if (d)
+	{
+		free(d->buf);
+		free(d->ents);
+		free(d->htab);
+		free(d);
+	}
+}
+
+/* the id of a value, -1 on out of memory or when the dictionary alone exceeds the group memory */
+static int64_t
+sd_intern(agg_state *st, const unsigned char *p, uint32_t len, int bpchar)
+{
+	str_dict   *d = st->sdict;
+	uint32_t	klen = len, h, i;
+
+	if (!d)
+	{
+		d = calloc(1, sizeof(*d));
+		if (!d)
+			return -1;
+		st->sdict = d;
+	}
+	if (bpchar)
+		while (klen > 0 && p[klen - 1] == 0x20)
+			klen--;
+	if (d->nents * 2 >= d->hcap)
+	{
+		uint32_t	ncap = d->hcap ? d->hcap * 2 : 1024;
+		uint32_t   *nh = calloc(ncap, sizeof(uint32_t));
+
+		if (!nh)
+			return -1;
+		for (uint32_t e = 0; e < d->nents; e++)
+		{
+			uint32_t	x = (sd_hash(d->buf + d->ents[e].off, d->ents[e].klen) + d->ents[e].bp) & (ncap - 1);
+
+			while (nh[x])
+				x = (x + 1) & (ncap - 1);
+			nh[x] = e + 1;
+		}
+		free(d->htab);
+		d->htab = nh;
+		d->hcap = ncap;
+	}
+	h = (sd_hash(p, klen) + (bpchar ? 1 : 0)) & (d->hcap - 1);
+	for (i = h; d->htab[i]; i = (i + 1) & (d->hcap - 1))
+	{
+		const struct str_dict_ent *e = &d->ents[d->htab[i] - 1];
+
+		if (e->klen == klen && e->bp == (uint32_t) bpchar && !memcmp(d->buf + e->off, p, klen))
+			return (int64_t) d->htab[i] - 1;
+	}
+	if (d->nents == d->ecap)
+	{
+		uint32_t	ncap = d->ecap ? d->ecap * 2 : 256;
+		void	   *ne = realloc(d->ents, sizeof(*d->ents) * ncap);
+
+		if (!ne)
+			return -1;
+		d->ents = ne;
+		d->ecap = ncap;
+	}
+	if (d->len + len > d->cap)
+	{
+		size_t		ncap = d->cap ? d->cap * 2 : 4096;
+		unsigned char *nb;
+
+		while (ncap < d->len + len)
+			ncap *= 2;
+		if (ncap > ((size_t) 1 << 30))
+			return -1;
+		nb = realloc(d->buf, ncap);
+		if (!nb)
+			return -1;
+		d->buf = nb;
+		d->cap = ncap;
+	}
+	memcpy(d->buf + d->len, p, len);
+	d->ents[d->nents].off = d->len;
+	d->ents[d->nents].len = len;
+	d->ents[d->nents].klen = klen;
+	d->ents[d->nents].bp = bpchar ? 1 : 0;
+	d->len += len;
+	if (len > d->maxlen)
+		d->maxlen = len;
+	d->htab[i] = ++d->nents;
+	return (int64_t) d->nents - 1;
+}
+
+static const unsigned char *
+sd_get(const agg_state *st, int64_t id, uint32_t *p_len)
+{
+	const str_dict *d = st->sdict;
+
+	if (!d || id < 0 || id >= (int64_t) d->nents)
+	{
+		*p_len = 0;
+		return (const unsigned char *) "";
+	}
+	*p_len = d->ents[id].len;
+	return d->buf + d->ents[id].off;
+}
+
+/*
+ * The string keys of a group key as the kernel or the CPU VM staged them (string registers { offset | length << 32 | source << 60 })
+ * into dictionary ids. base[s] is the buffer source s names. 0 on success, -1 on out of memory.
+ */
+static int
+group_str_keys(agg_state *st, const scan_prog *prog, int64_t *key, uint32_t knull, const unsigned char *const *base)
+{
+	for (uint32_t k = 0; k < (uint32_t) prog->nkeys && k < SCAN_GROUP_KEYS; k++)
+	{
+		uint64_t	v;
+		int64_t		id;
+
+		if (!prog->key_str[k] || (knull & (1u << k)))
+			continue;
+		v = (uint64_t) key[k];
+		if (!base[(v >> 60) & 3])
+			return -1;
+		id = sd_intern(st, base[(v >> 60) & 3] + (v & 0xffffffffu), (uint32_t)((v >> 32) & 0x0fffffffu), prog->key_str[k] == 2);
+		if (id < 0)
+			return -1;
+		key[k] = id;
+	}
+	return 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -2270,6 +2448,8 @@ agg_state_free(agg_state *st)
 	free(st->rck.buf);
 	st->rck.buf = NULL;
 	st->rck.len = st->rck.cap = st->rck.nitems = 0;
+	sd_free(st->sdict);
+	st->sdict = NULL;
 	if (st->groups)
 	{
 		free(st->groups->ents);
@@ -2443,6 +2623,17 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 				else
 					key[k] = r->v;
 			}
+			if (prog->has_str_key)
+			{
+				/* the CPU VM's string registers are offsets from the tuple header (source 0) */
+				const unsigned char *sb[4] = { page + (lpd & 0x7fff), NULL, NULL, (const unsigned char *) (w + w[20]) };
+
+				if (group_str_keys(st, prog, key, knull, sb) != 0)
+				{
+					snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
+					return -1;
+				}
+			}
 			g = group_lookup(&st->groups, nagg, key, knull);
 			if (!g)
 			{
@@ -2503,6 +2694,7 @@ typedef struct gtab_state
 	uint32_t	cap;				/* slots (a power of 2) */
 	uint32_t	stride;				/* words per slot */
 	uint32_t	maxcap;
+	uint32_t	last_used;			/* slots the last task of a string-key table claimed (read before the flush cleared them) */
 } gtab_state;
 
 static uint32_t
@@ -2549,6 +2741,8 @@ scan_gtab_forced(const agg_state *st, const scan_prog *prog)
 
 		mode = s ? atoi(s) : 2;
 	}
+	if (prog->has_str_key)
+		return 1;				/* the shared-memory kernels hold int64 keys (a string key is compared by its bytes in the table) */
 	if (prog->nkeys > SCAN_GROUP_KEYS_SHARED)
 		return 1;				/* the shared-memory kernels hold two keys */
 	if (mode == 0)
@@ -2661,7 +2855,7 @@ acc_merge_gtab(agg_acc *acc, uint32_t action, const uint32_t *w)
 
 /* merge the device table into the session's groups; 'clear' empties the table */
 static int
-gtab_flush(const scan_prog *prog, agg_state *st, int clear, char *err, size_t errlen)
+gtab_flush(const scan_prog *prog, agg_state *st, int clear, const unsigned char *const *srcs, char *err, size_t errlen)
 {
 	gtab_state *gt = st->gt;
 	uint32_t	nagg = prog->nagg;
@@ -2692,6 +2886,11 @@ gtab_flush(const scan_prog *prog, agg_state *st, int clear, char *err, size_t er
 			continue;
 		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
 			key[i] = (int64_t)((uint64_t) w[2 + 2 * i] | ((uint64_t) w[3 + 2 * i] << 32));
+		if (prog->has_str_key && (!srcs || group_str_keys(st, prog, key, w[1], srcs) != 0))
+		{
+			snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
+			return -1;
+		}
 		e = group_lookup(&st->groups, nagg, key, w[1]);
 		if (!e)
 		{
@@ -2715,7 +2914,7 @@ scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen)
 {
 	if (!st->gt)
 		return 0;
-	if (gtab_flush(prog, st, 0, err, errlen) != 0)
+	if (gtab_flush(prog, st, 0, NULL, err, errlen) != 0)
 		return -1;
 	gtab_destroy(st);
 	return 0;
@@ -2801,17 +3000,28 @@ scan_gtab_buffer(agg_state *st)
 	return &st->gt->buf;
 }
 
+/* a string-key table: the groups of the task into the session's, the table empty for the next task (see scan_exec.h) */
+int
+scan_gtab_task_flush(const scan_prog *prog, agg_state *st, const unsigned char *const *srcs, char *err, size_t errlen)
+{
+	uint32_t   *hdr = (uint32_t *) st->gt->buf.map;
+
+	st->gt->last_used = hdr[0];
+	return gtab_flush(prog, st, 1, srcs, err, errlen);
+}
+
 /* after a task: a table more than half full grows (its groups move to the session's groups, the next task starts a bigger one) */
 int
 scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, char *err, size_t errlen)
 {
 	uint32_t   *hdr = (uint32_t *) st->gt->buf.map;
+	uint32_t	used = prog->has_str_key ? st->gt->last_used : hdr[0];
 
-	if (st->gt->cap < st->gt->maxcap && (uint64_t) hdr[0] * 2 > st->gt->cap)
+	if (st->gt->cap < st->gt->maxcap && (uint64_t) used * 2 > st->gt->cap)
 	{
 		uint32_t	ncap = st->gt->cap * 4;
 
-		if (gtab_flush(prog, st, 0, err, errlen) != 0)
+		if (gtab_flush(prog, st, 0, NULL, err, errlen) != 0)
 			return -1;
 		gtab_destroy(st);
 		if (gtab_create(vk, prog, st, ncap, err, errlen) != 0)
@@ -2822,7 +3032,8 @@ scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, char *
 
 /* rows an Arrow task could not aggregate on the table (mode 3 of agtab: key words, null mask and values staged by the kernel) */
 int
-scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count)
+scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
+						 const unsigned char *const *srcs)
 {
 	uint32_t	nagg = prog->nagg;
 	const uint32_t *w = prog->words;
@@ -2837,6 +3048,8 @@ scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *r
 
 		for (int i = 0; i < SCAN_GROUP_KEYS; i++)
 			key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
+		if (prog->has_str_key && (!srcs || group_str_keys(st, prog, key, rec[0], srcs) != 0))
+			return -1;
 		g = group_lookup(&st->groups, nagg, key, rec[0]);
 		if (!g)
 			return -1;
@@ -2976,6 +3189,13 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	/* the rows that found no slot: on the CPU */
 	if (group_cpu_rows(prog, st, kds_src, &ps, lp_base, npages, total_lps, out + 4, &n_overflow, err, errlen) != 0)
 		goto done;
+	if (prog->has_str_key)
+	{
+		const unsigned char *srcs[4] = { ps.baseF, ps.baseL, NULL, NULL };
+
+		if (scan_gtab_task_flush(prog, st, srcs, err, errlen) != 0)
+			goto done;
+	}
 	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: group task: %u pages, gpu %.1f ms (lookup %.1f), new-key rows %u, table %u/%u slots, overflow rows %llu (%.1f ms)\n",
@@ -3222,7 +3442,8 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 	int			grouped = (session->xpucode_groupby_keyhash != 0);
 	uint32_t	nrows = grouped ? (st->groups ? st->groups->nents : 0) : 1;
 	col_value	cols[SCAN_AGG_MAX];
-	unsigned char tup[sizeof(kern_tupitem) + 64 + SCAN_AGG_MAX * 48];
+	size_t		tupsz = sizeof(kern_tupitem) + 64 + SCAN_AGG_MAX * 48;
+	unsigned char *tup;
 	size_t		head_sz, resp_sz, cap, usage = 0, chunk_len;
 	XpuCommand *resp;
 	kern_data_store *kds;
@@ -3238,10 +3459,17 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 	}
 	head_sz = KDS_HEAD_LENGTH(kds_dst_head);
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
+	if (st->sdict && prog && prog->has_str_key)
+		tupsz += (size_t) SCAN_GROUP_KEYS * (st->sdict->maxlen + 8);	/* the string keys of a row */
 	cap = resp_sz + head_sz + MAXALIGN(sizeof(uint64_t) * nrows) + (size_t) nrows * 96 + 4096;
+	if (st->sdict && prog && prog->has_str_key)
+		cap += (size_t) nrows * (st->sdict->len / (st->sdict->nents ? st->sdict->nents : 1) + 8);
 	resp = calloc(1, cap);
-	if (!resp)
+	tup = malloc(tupsz);
+	if (!resp || !tup)
 	{
+		free(resp);
+		free(tup);
 		snprintf(err, errlen, "out of memory");
 		return NULL;
 	}
@@ -3262,6 +3490,15 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				const kern_colmeta *cm = &kds_dst_head->colmeta[j];
 
 				memset(&cols[j], 0, sizeof(cols[j]));
+				if (k >= 0 && prog->key_str[k] && cm->attlen == -1)
+				{
+					/* a string key: the value the dictionary holds under the group's id */
+					if (g->knull & (1u << k))
+						cols[j].isnull = 1;
+					else
+						cols[j].ext = sd_get(st, g->key[k], &cols[j].len);
+					continue;
+				}
 				if (k >= 0 && prog->key_scale[k] >= 0 && cm->attlen == -1)
 				{
 					/* a numeric key: { unscaled, scale } formed as PostgreSQL stores it */
@@ -3274,7 +3511,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				if (k < 0 || (cm->attlen != 1 && cm->attlen != 2 && cm->attlen != 4 && cm->attlen != 8))
 				{
 					snprintf(err, errlen, "GROUP BY column %u has an unsupported result type", j + 1);
-					free(resp);
+					free(resp); free(tup);
 					return NULL;
 				}
 				if (g->knull & (1u << k))
@@ -3315,31 +3552,31 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				}
 				if (agg_col_value(action, (prog && prog->words && prog->agg_of_col[j] >= 0) ? prog->agg_scale[(int) prog->agg_of_col[j]] : -1, pacc, &cols[j], err, errlen) != 0)
 				{
-					free(resp);
+					free(resp); free(tup);
 					return NULL;
 				}
 			}
 		}
 		/* append the tuple, growing the buffer if necessary */
-		if (resp_sz + head_sz + idx_sz + usage + sizeof(tup) > cap)
+		if (resp_sz + head_sz + idx_sz + usage + tupsz > cap)
 		{
-			size_t		ncap = cap * 2 + sizeof(tup);
+			size_t		ncap = cap * 2 + tupsz;
 			XpuCommand *nr = realloc(resp, ncap);
 
 			if (!nr)
 			{
 				snprintf(err, errlen, "out of memory");
-				free(resp);
+				free(resp); free(tup);
 				return NULL;
 			}
 			resp = nr;
 			cap = ncap;
 			rowindex = (uint64_t *)((char *) resp + resp_sz + head_sz);
 		}
-		sz = form_partial_tuple(kds_dst_head, cols, ncols, tup, sizeof(tup), r, err, errlen);
+		sz = form_partial_tuple(kds_dst_head, cols, ncols, tup, tupsz, r, err, errlen);
 		if (sz < 0)
 		{
-			free(resp);
+			free(resp); free(tup);
 			return NULL;
 		}
 		memcpy((char *) resp + resp_sz + head_sz + idx_sz + usage, tup, sz);
@@ -3377,7 +3614,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 		if (!nr)
 		{
 			snprintf(err, errlen, "out of memory");
-			free(resp);
+			free(resp); free(tup);
 			return NULL;
 		}
 		resp = nr;
@@ -3386,6 +3623,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 		resp->u.results.chunks_nitems++;
 	}
 	*p_len = resp->length;
+	free(tup);
 	return resp;
 }
 

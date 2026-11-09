@@ -51,4 +51,67 @@ tm() { # label, query: milliseconds of three runs on the GPU path, and on the CP
 tm "GPU, aggregation over a join, text key" "select t.n, count(*), sum(d.grp) from tko t join tki d on t.k = d.k group by t.n"
 tm "GPU, aggregation over a join, int key" "select t.n, count(*), sum(d.grp) from tko t join tki d on t.n = d.n group by t.n"
 tm "GPU, join without aggregation, text key" "select count(*) from (select t.i, d.i from tko t join tki d on t.k = d.k) x"
+# ---- GROUP BY a string key (gtab.slang: the table points into the task's pages, flushed after every task; the host interns the values)
+GBIG="set pg_strom.gpupreagg_max_groups=1000000; set pg_strom.gpupreagg_max_groups_heap=2000000;"
+rung() { # label, query-with-%T; the plan must have a GpuPreAgg (no GpuJoin); results equal to the CPU's
+	label=$1; qry=$(printf '%s' "$2" | sed "s/%T/${3:-tko}/g"); set_extra=${4:-}
+	plan=$($PSQL -d scantest -c "$GPU $GBIG $set_extra explain $qry" | grep -c "Custom Scan (GpuPreAgg)")
+	g=$(q "$GPU $GBIG $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
+	elif [ "$ALLOW_CPU" = on ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows; plan differs on this host)"
+	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+for col in k kv kb; do
+	rung "group by $col: count, sum, min, max" "select $col, count(*), sum(n), min(pay), max(pay) from %T group by $col"
+	rung "group by $col: FILTER, count(col)" "select $col, count(*) filter (where n < 10), count(kv), sum(pay) from %T group by $col"
+	rung "group by $col and an int" "select $col, n, count(*), sum(pay) from %T group by $col, n"
+done
+rung "group by two strings" "select k, kv, count(*), sum(pay) from %T group by k, kv"
+rung "group by three keys: text, varchar, bpchar" "select k, kv, kb, count(*) from %T group by k, kv, kb"
+rung "group by four keys: text, varchar, bpchar, int" "select k, kv, kb, n, count(*), sum(pay) from %T group by k, kv, kb, n"
+rung "group by a compressed key (the backend reads the values)" "select big, count(*), sum(pay) from %T group by big"
+rung "group by an out-of-line key" "select ext, count(*), sum(pay) from %T group by ext"
+rung "group by a key and a qual" "select k, count(*), sum(pay) from %T where n < 20 and kv is not null group by k"
+rung "a table with too few slots for its keys (the CPU takes the rest)" "select k, count(*), sum(v), min(v), max(v) from %T group by k" tkm
+rung "several tasks, the same keys in each" "select k, n, count(*), sum(v), min(v), max(v) from %T group by k, n" tkb
+for src in tkoa tkop tkog; do
+	for col in k kv kb; do
+		rung "$src: group by $col" "select $col, count(*), sum(pay), min(n), max(n) from %T group by $col" $src
+		rung "$src: group by $col and an int" "select $col, n, count(*), sum(pay) from %T group by $col, n" $src
+	done
+	rung "$src: group by two strings" "select k, kv, count(*), sum(pay) from %T group by k, kv" $src
+done
+# Timing (informational): GROUP BY a text key against an integer key with the same number of groups (2M rows, 3000 groups)
+tm "GPU, group by a text key, 3000 groups, 2M rows" "$GBIG select k, count(*), sum(v) from tkb group by k"
+tm "GPU, group by an int key, 3000 groups, 2M rows" "$GBIG select (v % 3000)::int4, count(*), sum(v) from tkb group by 1"
+cpu_tm() { t0=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); $PSQL -d scantest -c "$CPU $1" >/dev/null; t1=$(perl -MTime::HiRes=time -e 'printf "%d", time()*1000'); echo "  time  $2: $((t1 - t0)) ms"; }
+cpu_tm "select k, count(*), sum(v) from tkb group by k" "CPU, group by a text key"
+# ---- bool keys (booleq is a device function): hash-join key and GROUP BY key
+for kind in "inner join" "left join" "right join"; do
+	runkj "bool key: $kind" "select t.i, d.w from tbo t $kind tbi d on t.b = d.b"
+done
+runkj "bool key: semi join" "select t.i from tbo t where t.b in (select d.b from tbi d)"
+runkj "bool key: anti join" "select t.i from tbo t where not exists (select 1 from tbi d where d.b = t.b)"
+runkj "bool key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tbo t join tbi d on t.b = d.b group by d.w"
+runkj "bool and int key" "select t.i, d.w from tbo t join tbi d on t.b = d.b and t.n = d.w / 10 % 5"
+rung "group by a bool" "select b, count(*), sum(pay), min(n), max(n) from %T group by b" tbo
+rung "group by a bool and an int" "select b, n, count(*), sum(pay) from %T group by b, n" tbo
+rung "group by three keys with a bool" "select b, n, m, count(*), sum(pay) from %T group by b, n, m" tbo
+rung "group by four keys with a bool" "select b, n, m, o, count(*), sum(pay) from %T group by b, n, m, o" tbo
+# ---- bool_and / bool_or / every (the minimum and the maximum of the 0/1 values)
+rung "bool_and, bool_or, every, ungrouped" "select bool_and(b), bool_or(b), every(b), count(b) from %T" tbo
+rung "bool_and, bool_or, every grouped by an int" "select n, bool_and(b), bool_or(b), every(b), count(*) from %T group by n" tbo
+rung "bool aggregates over a comparison, FILTER" "select m, bool_and(n < 4), bool_or(n = 0) filter (where o > 1), count(*) from %T group by m" tbo
+rung "bool aggregates of a group without any value" "select n, bool_or(b) filter (where m > 100), bool_and(b) filter (where m > 100), count(*) from %T group by n" tbo
+# ---- float4 / float8 keys: -0 = +0, NaN = NaN
+for col in f4 f8; do
+	runkj "$col key: inner join" "select t.i, d.w from tfo t join tfi d on t.${col}j = d.$col"
+	runkj "$col key: LEFT join" "select t.i, d.w from tfo t left join tfi d on t.${col}j = d.$col"
+	runkj "$col key: semi join" "select t.i from tfo t where t.${col}j in (select d.$col from tfi d)"
+	runkj "$col key: anti join" "select t.i from tfo t where not exists (select 1 from tfi d where d.$col = t.${col}j)"
+	runkj "$col key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tfo t join tfi d on t.${col}j = d.$col group by d.w"
+	rung "group by $col" "select ${col}g, count(*), sum(pay), min(n), max(n) from %T group by ${col}g" tfo
+	rung "group by $col and an int" "select ${col}g, n, count(*), sum(pay) from %T group by ${col}g, n" tfo
+done
+rung "group by float4, float8 and two ints" "select f4g, f8g, n, (pay % 3)::int4, count(*), sum(pay) from %T group by f4g, f8g, n, (pay % 3)::int4" tfo
 echo

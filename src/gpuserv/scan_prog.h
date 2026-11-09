@@ -68,6 +68,9 @@ typedef struct scan_prog
 	/* numeric aggregates / keys: the scale the plan derived (every row must have it), or -1 */
 	int16_t			agg_scale[SCAN_AGG_MAX];
 	int16_t			key_scale[SCAN_GROUP_KEYS];
+	/* a string GROUP BY key (A6): 1 text / varchar, 2 bpchar, 0 otherwise; the kernel gets the same as the bitmask of header word 21 */
+	int8_t			key_str[SCAN_GROUP_KEYS];
+	int				has_str_key;
 	/* A6 specialization (specialize.h): the compiled kernel of this program, if any */
 	void		   *spec;				/* a spec_entry owned by the manager (we hold a reference) */
 	void		   *spec_next;			/* GROUP BY: a bigger kernel being compiled (spec_pipe) */

@@ -1423,10 +1423,26 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					goto error;
 				}
 				vt = reg_vtype(kk->exptype, &bytes);
-				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_NUM)
+				if (vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_NUM && vt != SOP_VT_STR &&
+					vt != SOP_VT_FLOAT4 && vt != SOP_VT_FLOAT8)
 				{
 					fail(&b, "GROUP BY key of an unsupported type (opcode type %u)", kk->exptype);
 					goto error;
+				}
+				if (vt == SOP_VT_STR)
+				{
+					/* a string key is a column of the scanned relation (its bytes are compared in the group table) */
+					const kern_expression *k0 = KEXP_FIRST_ARG(kk);
+
+					if (k0->opcode != FuncOpCode__VarExpr || k0->u.v.var_slot_id >= b.nslots ||
+						b.slot_resno[k0->u.v.var_slot_id] <= 0 ||
+						(kk->exptype != TypeOpCode__text && kk->exptype != TypeOpCode__bpchar))
+					{
+						fail(&b, "a GROUP BY string key must be a column");
+						goto error;
+					}
+					prog->key_str[nkeys] = (kk->exptype == TypeOpCode__bpchar) ? 2 : 1;
+					prog->has_str_key = 1;
 				}
 				key_isnum[nkeys] = (vt == SOP_VT_NUM);
 				prog->key_scale[nkeys] = -1;
@@ -1453,6 +1469,20 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 							goto error;
 						r = d;
 					}
+					perm = r + 1;
+				}
+				if (vt == SOP_VT_FLOAT4 || vt == SOP_VT_FLOAT8)
+				{
+					/*
+					 * -0 and +0 are one group (and so are all NaNs, which are equal bit patterns): the key is x + 0.0, which
+					 * turns -0 into +0 and leaves every other value as it is
+					 */
+					int		z = new_reg(&b, &nx), d = new_reg(&b, &nx);
+
+					if (z < 0 || d < 0 || emit(&b, SOP_CONST, z, 0, 0, 0, 0) < 0 ||
+						emit(&b, vt == SOP_VT_FLOAT4 ? SOP_FARITH : SOP_DARITH, d, r, z, SOP_ARITH_PL, 0) < 0)
+						goto error;
+					r = d;
 					perm = r + 1;
 				}
 				slot_reg[kk->u.save.sv_slot_id] = r;
@@ -1841,6 +1871,9 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 	w[12] = nkeys;
 	w[13] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg;	/* keyoff */
 	w[20] = PROG_HDR_WORDS + ncols + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys;	/* constant pool (strings) */
+	for (int k = 0; k < nkeys && k < SCAN_GROUP_KEYS; k++)				/* gtab.slang: the string keys */
+		if (prog->key_str[k])
+			w[21] |= (1u << k) | (prog->key_str[k] == 2 ? (1u << (4 + k)) : 0);
 	for (int c = 0; c < ncols; c++)
 	{
 		const kern_colmeta *cm = &kds_src->colmeta[c];
@@ -1941,14 +1974,18 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 
 		int		is_str = (reg_vtype(karg->exptype, &bytes) == SOP_VT_STR);
 
-		if (!reg_vtype(karg->exptype, &bytes) || karg->exptype == TypeOpCode__float4 || karg->exptype == TypeOpCode__float8 ||
+		if (!reg_vtype(karg->exptype, &bytes) ||
 			reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM || reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
 		*next = acc + 1;
 		r = expr_to_reg(b, karg, next);
-		/* a string key: k0 = 0, k1 = 1 (text) or 2 (bpchar: trailing blanks do not count) */
+		/*
+		 * a string key: k0 = 0, k1 = 1 (text) or 2 (bpchar: trailing blanks do not count); a float4 / float8 key: k1 = 3 / 4
+		 * (-0 hashes as +0, every NaN alike: equal values meet in the hash table)
+		 */
 		if (r < 0 || emit(b, SOP_HASHMERGE, acc, r, 0, is_str ? 0 : bytes,
-						  is_str ? (karg->exptype == TypeOpCode__bpchar ? 2 : 1) : 0) < 0)
+						  is_str ? (karg->exptype == TypeOpCode__bpchar ? 2 : 1) :
+						  karg->exptype == TypeOpCode__float4 ? 3 : karg->exptype == TypeOpCode__float8 ? 4 : 0) < 0)
 			return -1;
 	}
 	if (emit(b, SOP_HASHFIN, acc, 0, 0, 0, 0) < 0)

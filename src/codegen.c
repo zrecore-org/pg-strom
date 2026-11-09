@@ -590,16 +590,38 @@ devtype_float2_hash(bool isnull, Datum value)
 	return __devtype_simple_hash(isnull, value, sizeof(float2_t));
 }
 
+/*
+ * float4 / float8: PostgreSQL's equality has -0 = +0 and NaN = NaN, so equal values must hash alike (as hashfloat4 / hashfloat8
+ * do): zero hashes as +0 and every NaN as the canonical one; the kernel does the same (scan_common.slang, SOP_HASHMERGE k1 = 3, 4)
+ */
 static uint32_t
 devtype_float4_hash(bool isnull, Datum value)
 {
-	return __devtype_simple_hash(isnull, value, sizeof(float4_t));
+	float		f;
+
+	if (isnull)
+		return 0;
+	f = DatumGetFloat4(value);
+	if (f == 0)
+		f = 0.0f;
+	else if (isnan(f))
+		f = get_float4_nan();
+	return hash_any((unsigned char *)&f, sizeof(float));
 }
 
 static uint32_t
 devtype_float8_hash(bool isnull, Datum value)
 {
-	return __devtype_simple_hash(isnull, value, sizeof(float8_t));
+	double		f;
+
+	if (isnull)
+		return 0;
+	f = DatumGetFloat8(value);
+	if (f == 0)
+		f = 0.0;
+	else if (isnan(f))
+		f = get_float8_nan();
+	return hash_any((unsigned char *)&f, sizeof(double));
 }
 
 static uint32_t
