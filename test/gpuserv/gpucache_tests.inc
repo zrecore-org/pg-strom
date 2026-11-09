@@ -144,6 +144,8 @@ for t in gc1 gc2; do
 	gcrun_any $t "uuid qual" "select id from %T where u > '80000000-0000-0000-0000-000000000000'::uuid"
 	gcagg $t "count, sum, min, max, avg of int4 with NULLs" "select count(*), count(b), sum(b), min(b), max(b), avg(b) from %T"
 	gcagg $t "float8: count, min, max, and exact sum and avg" "select count(x), min(x), max(x), sum((a % 100)::float8), avg((a % 100)::float8) from %T"
+	gcagg $t "variance, stddev, corr, regr_slope of float8 columns (A10)" "select round(var_pop(x)::numeric, 3), round(stddev(x)::numeric, 5), round(corr(x, a::float8)::numeric, 8), round(regr_slope(x, a::float8)::numeric, 7), count(*) from %T where x < 'Infinity' and x > '-Infinity'"
+	gcagg $t "variance and covariance per group (A10)" "select a % 5 as k, round(var_samp(x)::numeric, 3), round(covar_pop(x, b::float8)::numeric, 3), count(x) from %T where x < 'Infinity' and x > '-Infinity' group by 1 order by 1"
 	gcagg $t "int2 and int8 columns, quals" "select sum(a), min(a), max(a), sum(c), max(c) from %T where a > 0 and b is not null"
 	gcagg $t "GROUP BY an integer expression" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1"
 	gcagg $t "GROUP BY date and timestamp aggregates" "select b % 5 as k, count(*), min(g), max(h) from %T group by 1 order by 1"

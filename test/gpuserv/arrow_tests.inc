@@ -108,9 +108,14 @@ for t in a1 a2 a3 p1; do
 	aagg_cpu $t "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
 	aagg $t "sum and min of a float4 column cast to float8 (exact in a double)" "select count(*), sum(d::float8), min(d::float8), max(d::float8) from %T where a > 9000"
 	aagg $t "sum(float4): every addition rounded to float4 (A10)" "select count(*), sum(d) from %T where a > 9000"
+	aagg $t "variance, stddev, corr and regr_slope of float8 columns (A10: PostgreSQL's float8_accum state)" "select round(var_pop(x)::numeric, 3), round(stddev(x)::numeric, 5), round(corr(x, a::float8)::numeric, 8), round(regr_slope(x, a::float8)::numeric, 7), round(covar_samp(x, b::float8)::numeric, 3), count(*) from %T where x < 'Infinity' and x > '-Infinity'"
+	aagg $t "variance and corr of a column with NaN and Infinity are NaN" "select var_pop(x), corr(x, a::float8), regr_sxx(x, a::float8) from %T"
+	aagg $t "variance and covariance per group" "select a % 5 as k, round(var_samp(x)::numeric, 3), round(covar_pop(x, b::float8)::numeric, 3), round(corr(x, c::float8)::numeric, 8), count(x) from %T where x < 'Infinity' and x > '-Infinity' group by 1 order by 1"
+	aagg $t "variance per group with overflow groups" "select i % 1500 as k, round(var_pop(x)::numeric, 2), round(corr(x, a::float8)::numeric, 5) from %T where x < 'Infinity' and x > '-Infinity' group by 1 order by 1"
 done
 aagg a1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "$APAR"
 aagg a1 "GROUP BY, parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "$APAR"
+aagg a1 "variance and corr, parallel workers (the Agg node combines the workers' states with float8_combine)" "select round(var_pop(x)::numeric, 3), round(corr(x, a::float8)::numeric, 8), round(regr_slope(x, a::float8)::numeric, 7) from %T where x < 'Infinity' and x > '-Infinity'" "$APAR"
 aagg p1 "GROUP BY, parallel workers (Parquet)" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "$APAR"
 # every process fetches its own partial result (the leader does not scan: the workers' rows must not be lost)
 aagg p1 "parallel workers only, no GROUP BY (Parquet)" "select count(*), sum(a), min(c) from %T" "$APAR set parallel_leader_participation=off;"

@@ -1339,10 +1339,16 @@ __setup_aggfunc_catalog_entry(aggfunc_catalog_entry *entry,
 	/* final agg function (used by Agg node) */
 	Assert(cat->finalfn_agg_signature != NULL);
 	func_oid = __aggfunc_resolve_func_signature(cat->finalfn_agg_signature, false);
-	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(func_oid)) ||
-		get_func_rettype(func_oid) != agg_proc->prorettype)
+	if (!SearchSysCacheExists1(AGGFNOID, ObjectIdGetDatum(func_oid)))
 		elog(ERROR, "Catalog corruption? final function mismatch: %s",
 			 format_procedure(func_oid));
+	if (get_func_rettype(func_oid) != agg_proc->prorettype)
+	{
+		/* regr_count: the catalog's final aggregate returns float8, PostgreSQL's aggregate bigint. Not offered (it used to be an error) */
+		elog(DEBUG2, "the final aggregate %s does not return the type of the original aggregate: not a device aggregate",
+			 format_procedure(func_oid));
+		return;
+	}
 	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
 	if (!HeapTupleIsValid(htup))
 		elog(ERROR, "cache lookup failed for function %u", func_oid);

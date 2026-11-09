@@ -226,8 +226,8 @@ GRPANY=0
 # (N * Sxx - Sx^2) of the earlier catalog loses every digit on them, Youngs-Cramer keeps them.
 echo "variance, stddev, covar, corr, regr (A10)"
 sql "create table f8_var as select i, (i % 5)::int4 as g, (i % 7)::int4 as g2, (i % 300)::int4 as g300,
-	1e9 + (((i::int8 * 7919) % 2001) - 1000) / 1000.0 as xo,
-	2e9 + 3.0 * (((i::int8 * 7919) % 2001) - 1000) / 1000.0 + (((i::int8 * 104729) % 1999) - 999) / 2000.0 as yo,
+	(1e9 + (((i::int8 * 7919) % 2001) - 1000) / 1000.0)::float8 as xo,
+	(2e9 + 3.0 * (((i::int8 * 7919) % 2001) - 1000) / 1000.0 + (((i::int8 * 104729) % 1999) - 999) / 2000.0)::float8 as yo,
 	(((i::int8 * 31) % 10007) / 100.0 - 50)::float8 as xs,
 	((((i::int8 * 31) % 10007) / 100.0 - 50) * 0.7 + ((i * 17) % 101) / 10.0)::float8 as ys,
 	case when i % 11 = 0 then null else (((i::int8 * 31) % 10007) / 100.0 - 50)::float8 end as xn,
@@ -249,7 +249,7 @@ if [ -n "$(f8part agg)" ]; then
 	runagg f8_var "regr_* and corr of ordinary values" "select $REG1 from %T"
 	runagg f8_var "variance, stddev of ordinary values" "select round(var_pop(xs)::numeric, 6), round(var_samp(xs)::numeric, 6), round(stddev(xs)::numeric, 7), round(stddev_pop(ys)::numeric, 7), count(*) from %T"
 	runagg f8_var "NULLs: a pair with a NULL argument is skipped" "select round(covar_pop(yn, xn)::numeric, 5), round(corr(yn, xn)::numeric, 8), round(regr_slope(yn, xn)::numeric, 7), round(regr_avgx(yn, xn)::numeric, 5), round(var_pop(xn)::numeric, 6), round(var_pop(yn)::numeric, 6), round(regr_syy(yn, xn)::numeric, 2) from %T"
-	runagg f8_var "NaN in the data gives NaN" "select var_pop(sp), stddev(sp), covar_pop(sp, xs), corr(xs, sp), regr_sxx(sp, xs) from %T where g = 3"
+	runagg f8_var "NaN in the data gives NaN" "select var_pop(sp), stddev(sp), covar_pop(sp, xs), corr(xs, sp), regr_syy(sp, xs) from %T where g = 3"
 	runagg f8_var "Infinity in the data gives NaN" "select var_samp(sp), stddev_pop(sp), regr_slope(ys, sp), covar_samp(sp, ys) from %T where g = 4"
 	runagg f8_var "-Infinity in the data gives NaN" "select variance(sp), corr(sp, ys) from %T where g = 2"
 	runagg f8_var "data without specials in the same table" "select round(var_pop(sp)::numeric, 6), round(corr(sp, ys)::numeric, 8) from %T where g in (0, 1)"
@@ -295,7 +295,7 @@ if [ -n "$(f8part agg)" ]; then
 fi
 echo "variance and covariance, 1,000,000 rows"
 sql "alter table f8_big add column xo float8, add column yo float8"
-sql "update f8_big set xo = 1e9 + (((i::int8 * 7919) % 2001) - 1000) / 1000.0, yo = 2e9 + 3.0 * (((i::int8 * 7919) % 2001) - 1000) / 1000.0 + (((i::int8 * 104729) % 1999) - 999) / 2000.0"
+sql "update f8_big set xo = (1e9 + (((i::int8 * 7919) % 2001) - 1000) / 1000.0)::float8, yo = (2e9 + 3.0 * (((i::int8 * 7919) % 2001) - 1000) / 1000.0 + (((i::int8 * 104729) % 1999) - 999) / 2000.0)::float8"
 sql "vacuum analyze f8_big"
 runagg f8_big "variance, covariance and regression of values around 1e9, ungrouped" "select round(var_pop(xo)::numeric, 4), round(stddev_samp(xo)::numeric, 5), round(covar_pop(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 6), round(regr_slope(yo, xo)::numeric, 5), round(var_samp(x)::numeric, 5), round(corr(x, w)::numeric, 7) from %T"
 rungrp f8_big "variance and covariance per group" "select g, round(var_pop(xo)::numeric, 4), round(covar_samp(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 6), round(stddev(x)::numeric, 5), round(regr_slope(w, x)::numeric, 8) from %T group by 1 order by 1"
