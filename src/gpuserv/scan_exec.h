@@ -34,6 +34,8 @@ typedef struct scan_map_entry
  */
 #define SCAN_NV3	(3 * SCAN_NTIERS)
 #define SCAN_NV2	(2 * SCAN_NTIERS)
+#define SCAN_JV3	(3 * SCAN_NJTIERS)	/* the join kernel families have the geometry tiers too (scan_caps.h) */
+#define SCAN_JV2	(2 * SCAN_NJTIERS)
 
 typedef struct scan_engine
 {
@@ -44,28 +46,28 @@ typedef struct scan_engine
 	int				pipe_ready[SCAN_NV3];
 	gpu_vk_pipeline	agg_pipe[SCAN_NV3][3];	/* the aggregation kernel: [registers 8/16/32 + 3 * tier][aggregates 4/8/12] */
 	int				agg_pipe_ready[SCAN_NV3][3];
-	gpu_vk_pipeline	join_pipe[SCAN_NV3];	/* the join kernel: [registers 8/16/32 + 3 * tier] */
-	int				join_pipe_ready[SCAN_NV3];
+	gpu_vk_pipeline	join_pipe[SCAN_JV3];	/* the join kernel: [registers 8/16/32 + 3 * tier] */
+	int				join_pipe_ready[SCAN_JV3];
 	gpu_vk_pipeline	gagg_pipe[SCAN_NV2][3];	/* GROUP BY: [registers 16/32 + 2 * tier][aggregates 4/8/12] */
 	int				gagg_pipe_ready[SCAN_NV2][3];
 	gpu_vk_pipeline	gtab_pipe[SCAN_NV2];	/* GROUP BY over many groups: [registers 16/32 + 2 * tier] */
 	int				gtab_pipe_ready[SCAN_NV2];
 	gpu_vk_pipeline	agtab_pipe[SCAN_NV2];	/* the same on an Arrow record batch */
 	int				agtab_pipe_ready[SCAN_NV2];
-	gpu_vk_pipeline	jagg_pipe[SCAN_NV2][3];	/* aggregation over a join: the same */
-	int				jagg_pipe_ready[SCAN_NV2][3];
-	gpu_vk_pipeline	jgagg_pipe[SCAN_NV2][3];	/* GROUP BY over a join: the same */
-	int				jgagg_pipe_ready[SCAN_NV2][3];
+	gpu_vk_pipeline	jagg_pipe[SCAN_JV2][3];	/* aggregation over a join: the same */
+	int				jagg_pipe_ready[SCAN_JV2][3];
+	gpu_vk_pipeline	jgagg_pipe[SCAN_JV2][3];	/* GROUP BY over a join: the same */
+	int				jgagg_pipe_ready[SCAN_JV2][3];
 	gpu_vk_pipeline	arrow_pipe[SCAN_NV3];	/* the Arrow scan kernel: [registers 8/16/32 + 3 * tier] */
 	int				arrow_pipe_ready[SCAN_NV3];
 	gpu_vk_pipeline	sort_pipe;				/* GPU-Sort (gpusort.c) */
 	int				sort_pipe_ready;
 
 	/* Arrow record batches as the outer relation (registers 16/32 + 2 * tier; aggregates 4/8/12) */
-	gpu_vk_pipeline	aagg_pipe[SCAN_NV2][3], agagg_pipe[SCAN_NV2][3], ajagg_pipe[SCAN_NV2][3], ajgagg_pipe[SCAN_NV2][3];
-	int				aagg_ready[SCAN_NV2][3], agagg_ready[SCAN_NV2][3], ajagg_ready[SCAN_NV2][3], ajgagg_ready[SCAN_NV2][3];
-	gpu_vk_pipeline	ajoin_pipe[SCAN_NV2];	/* registers 16/32 + 2 * tier */
-	int				ajoin_ready[SCAN_NV2];
+	gpu_vk_pipeline	aagg_pipe[SCAN_NV2][3], agagg_pipe[SCAN_NV2][3], ajagg_pipe[SCAN_JV2][3], ajgagg_pipe[SCAN_JV2][3];
+	int				aagg_ready[SCAN_NV2][3], agagg_ready[SCAN_NV2][3], ajagg_ready[SCAN_JV2][3], ajgagg_ready[SCAN_JV2][3];
+	gpu_vk_pipeline	ajoin_pipe[SCAN_JV2];	/* registers 16/32 + 2 * tier */
+	int				ajoin_ready[SCAN_JV2];
 	int				trace;
 	int				no_map;			/* PGSTROM_GPUSERV_NO_MAP: always copy the pages */
 	struct spec_mgr *spec;			/* A6: specialized kernels (specialize.h) */

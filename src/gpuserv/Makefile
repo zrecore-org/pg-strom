@@ -64,6 +64,11 @@ SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_S
 SPV_LITE   := $(patsubst build/%.spv,build/%_lite.spv,$(SPV_VMBASE))
 SPV_NOGEOM := $(patsubst build/%.spv,build/%_nogeom.spv,$(SPV_VMBASE))
 SPV_FILES  += $(SPV_LITE) $(SPV_NOGEOM)
+# R15: the geometry tiers of the join kernel families (scan_caps.h SCAN_TIER_GPIP/GDW/GWALK; registers 16/32 only)
+GEO_TIERS  := gpip gdw gwalk
+SPV_JBASE  := $(foreach r,16 32,build/gpujoin$(r).spv) $(foreach r,16 32,$(foreach a,4 12,build/jagg$(r)_$(a).spv build/jgagg$(r)_$(a).spv build/ajagg$(r)_$(a).spv build/ajgagg$(r)_$(a).spv)) $(foreach r,16 32,build/ajoin$(r).spv)
+SPV_GEO    := $(foreach t,$(GEO_TIERS),$(patsubst build/%.spv,build/%_$(t).spv,$(SPV_JBASE)))
+SPV_FILES  += $(SPV_GEO)
 SPV_FILES  += build/gsort.spv
 LIB_OBJS   += gpusort.o gpu_vk_seq.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
@@ -113,7 +118,12 @@ SCAN_SLANGFLAGS ?=
 # The stem of the rules carries the suffix: $(LITE_OF) adds the flags.
 LITE_FLAGS := -DVM_NO_NUM -DVM_NO_JSON -DVM_NO_F8 -DVM_NO_GEOM
 NOGEOM_FLAGS := -DVM_NO_GEOM
-LITE_OF = $(if $(findstring _lite,$*),$(LITE_FLAGS),$(if $(findstring _nogeom,$*),$(NOGEOM_FLAGS)))
+# R15 geometry tiers (join families only): numeric and float8 but no jsonb, and only the geometry groups named by VM_GEOM_MASK
+# (scan_common.slang VM_G_*: PIP 2, DW 4, WALK 8)
+GPIP_FLAGS := -DVM_NO_JSON -DVM_GEOM_MASK=2
+GDW_FLAGS := -DVM_NO_JSON -DVM_GEOM_MASK=4
+GWALK_FLAGS := -DVM_NO_JSON -DVM_GEOM_MASK=8
+LITE_OF = $(if $(findstring _lite,$*),$(LITE_FLAGS),$(if $(findstring _nogeom,$*),$(NOGEOM_FLAGS),$(if $(findstring _gpip,$*),$(GPIP_FLAGS),$(if $(findstring _gdw,$*),$(GDW_FLAGS),$(if $(findstring _gwalk,$*),$(GWALK_FLAGS))))))
 # the GpuScan kernel (heap pages -> VM -> matches); its instruction numbers are shared with scan_prog.c
 # one variant per register-file size: the register count dominates the kernel's speed
 build/gpuscan%.spv: kernels_vm/scan.slang kernels_vm/scan_common.slang kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc | build

@@ -62,6 +62,29 @@ scan_vm_op_feat(uint32_t op)
 	return 0;
 }
 
+uint32_t
+scan_insn_feat(uint32_t op, uint32_t k0)
+{
+	uint32_t	feat = scan_vm_op_feat(op);
+	uint32_t	g = 0;
+
+	if (feat != SCAN_FEAT_GEOM)
+		return feat;
+	switch (op)
+	{
+		case SOP_GEOMBOX:		g = SCAN_G_BOX; break;
+		case SOP_GEOMPIP:		g = SCAN_G_PIP; break;
+		case SOP_GEOMDWITHIN:	g = (k0 & SOP_GDW_NP) ? SCAN_G_WALK : SCAN_G_DW; break;
+		case SOP_GEOM3DDW:		g = (k0 & SOP_GDW_NP) ? SCAN_G_WALK : SCAN_G_DW3; break;
+		case SOP_GEOMDIST:		g = (k0 & SOP_GDW_NP) ? SCAN_G_WALK : SCAN_G_DIST; break;
+		case SOP_GEOMZM:		g = SCAN_G_ZM; break;
+		case SOP_GEOMFLAG:		g = SCAN_G_FLAG; break;
+		case SOP_GEOMLEN:		g = SCAN_G_LEN; break;
+		default:				g = 0; break;
+	}
+	return feat | (g << SCAN_FEAT_GSHIFT);
+}
+
 static int
 int_width_of_digit(char c)
 {

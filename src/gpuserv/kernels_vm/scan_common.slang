@@ -39,7 +39,19 @@
 #define VM_GEOM_MASK 0
 #endif
 #ifndef VM_GEOM_MASK
+#ifdef WITH_INNER
+// the default (full tier) join kernel: what the join programs used before the geometry tiers (a join program has no GEOMBOX, GEOMDIST,
+// GEOMZM, GEOMFLAG or GEOMLEN, and its non-point operand is a poison record)
+#define VM_GEOM_MASK (VM_G_BOX | VM_G_PIP | VM_G_DW | VM_G_DW3)
+#else
 #define VM_GEOM_MASK 511
+#endif
+#endif
+// PostGIS' initial minimum distance is FLT_MAX: the point-to-point decisions check it in every kernel but the default join kernel (whose
+// SPIR-V stays as it was: Metal compiles each distinct kernel for minutes); the walker tier has it, and a join program that needs a
+// distance beyond FLT_MAX is not a case of the full tier (such a row is the backend's)
+#if !defined(WITH_INNER) || (VM_GEOM_MASK & VM_G_WALK) != 0
+#define VM_G_FLTMAX_CHECK 1
 #endif
 
 #ifndef VM_MAX_REGS
@@ -1843,9 +1855,11 @@ uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
             if (f64_nonfinite(q))
                 return SOP_RECHECK_CODE;
+#ifdef VM_G_FLTMAX_CHECK
             // PostGIS starts its minimum at FLT_MAX: a distance beyond it is never seen (ST_DWithin is true for a tolerance >= FLT_MAX, ST_Distance NULL)
             if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
                 return SOP_RECHECK_CODE;
+#endif
             res = f64_le(f64_sqrt(q), tol);
         }
         else
@@ -2853,8 +2867,10 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
         uint64_t q = f64_sqr_add(dz, f64_sqr_add(dx, f64_mul(dy, dy)));
         if (f64_nonfinite(q))
             return SOP_RECHECK_CODE;
+#ifdef VM_G_FLTMAX_CHECK
         if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
             return SOP_RECHECK_CODE;                    // beyond FLT_MAX, PostGIS' initial distance (see vm_geom_dwithin)
+#endif
         res = f64_le(f64_sqrt(q), tol);                 // PostGIS' own double against the tolerance (calibrated by the planner)
     }
     else

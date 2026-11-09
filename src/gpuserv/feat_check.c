@@ -82,6 +82,39 @@ main(void)
 		fprintf(stderr, "feat_check: scan_feat_tier() is wrong\n");
 		nfail++;
 	}
+	/* R15: the geometry groups of an instruction and the join kernel tier */
+	{
+		uint32_t	pip = scan_insn_feat(SOP_GEOMPIP, 0), dw = scan_insn_feat(SOP_GEOMDWITHIN, 0), dwnp = scan_insn_feat(SOP_GEOMDWITHIN, SOP_GDW_NP);
+		uint32_t	dw3 = scan_insn_feat(SOP_GEOM3DDW, 0), dw3np = scan_insn_feat(SOP_GEOM3DDW, SOP_GDW_NP);
+		uint32_t	nf = SCAN_FEAT_F8 | SCAN_FEAT_NUM;
+
+		if (pip != (SCAN_FEAT_GEOM | (SCAN_G_PIP << SCAN_FEAT_GSHIFT)) || dw != (SCAN_FEAT_GEOM | (SCAN_G_DW << SCAN_FEAT_GSHIFT)) ||
+			dwnp != (SCAN_FEAT_GEOM | (SCAN_G_WALK << SCAN_FEAT_GSHIFT)) ||
+			dw3 != (SCAN_FEAT_GEOM | (SCAN_G_DW3 << SCAN_FEAT_GSHIFT)) || dw3np != dwnp ||
+			scan_insn_feat(SOP_GEOMDIST, 0) != (SCAN_FEAT_GEOM | (SCAN_G_DIST << SCAN_FEAT_GSHIFT)) ||
+			scan_insn_feat(SOP_GEOMLEN, 0) != (SCAN_FEAT_GEOM | (SCAN_G_LEN << SCAN_FEAT_GSHIFT)) ||
+			scan_insn_feat(SOP_AND, 0) != 0 || scan_insn_feat(SOP_NUMCONST, 0) != SCAN_FEAT_NUM)
+		{
+			fprintf(stderr, "feat_check: scan_insn_feat() is wrong\n");
+			nfail++;
+		}
+		if (scan_join_tier(0) != SCAN_TIER_LITE || scan_join_tier(nf) != SCAN_TIER_NOGEOM ||
+			scan_join_tier(pip) != SCAN_TIER_GPIP || scan_join_tier(pip | nf) != SCAN_TIER_GPIP ||
+			scan_join_tier(dw | nf) != SCAN_TIER_GDW || scan_join_tier(dwnp) != SCAN_TIER_GWALK ||
+			scan_join_tier(dwnp | dw3np | nf) != SCAN_TIER_GWALK || scan_join_tier(dwnp | dw) != SCAN_TIER_GWALK ||
+			/* groups that no geometry tier has together, jsonb: the full kernel */
+			scan_join_tier(pip | dw) != SCAN_TIER_FULL || scan_join_tier(pip | dwnp) != SCAN_TIER_FULL ||
+			scan_join_tier(dw | dw3) != SCAN_TIER_FULL || scan_join_tier(dw3) != SCAN_TIER_FULL ||
+			scan_join_tier(pip | SCAN_FEAT_JSON) != SCAN_TIER_FULL ||
+			scan_join_tier(dwnp | SCAN_FEAT_JSON) != SCAN_TIER_FULL ||
+			scan_join_tier(SCAN_FEAT_GEOM) != SCAN_TIER_FULL ||
+			scan_join_variant3(8, SCAN_TIER_GPIP) != 1 + 3 * SCAN_TIER_GPIP || scan_join_variant3(8, SCAN_TIER_LITE) != 3 * SCAN_TIER_LITE ||
+			scan_join_variant3(32, SCAN_TIER_GWALK) != 2 + 3 * SCAN_TIER_GWALK)
+		{
+			fprintf(stderr, "feat_check: scan_join_tier() is wrong\n");
+			nfail++;
+		}
+	}
 	if (nopcodes < 40)
 	{
 		fprintf(stderr, "feat_check: only %d opcodes were checked\n", nopcodes);
