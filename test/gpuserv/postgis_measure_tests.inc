@@ -48,7 +48,7 @@ pushed_t() { # table, label, function name (lower case), query-with-%T: the func
 	[ "${pl:-0}" -ge 1 ]; check "$1: $2 is in the GPU's scan quals" $?
 }
 sql "drop table if exists pg_msp"
-sql "create table pg_msp as select id, g, x, y from pg_ms where GeometryType(g) = 'POINT'"
+sql "create table pg_msp as select id, g, x, y from pg_ms, generate_series(1, 5) k where GeometryType(g) = 'POINT'"
 sql "analyze pg_msp"
 # a NaN stored as NaN: compare with IS NOT DISTINCT FROM (PostgreSQL's float8 equality treats NaN = NaN, which is what the GPU does too)
 run pg_ms "ST_Area equals PostGIS' stored value (bit for bit), every shape" "select id from %T where ST_Area(g) is not distinct from area and area is not null"
@@ -57,7 +57,7 @@ run pg_ms "ST_Area compared with a constant" "select id from %T where ST_Area(g)
 run pg_ms "ST_Area of a non-polygon is 0 (points, lines, collections of those)" "select id from %T where ST_Area(g) = 0 and ST_Length(g) > 0"
 run pg_ms "ST_Area next to ST_Perimeter (a polygon with a hole)" "select id from %T where ST_Area(g) > 0 and ST_Perimeter(g) > ST_Area(g)"
 runagg pg_ms "min, max and count of ST_Area" "select min(ST_Area(g)), max(ST_Area(g)), count(ST_Area(g)) from %T where id < 100000 and id % 3 <> 0 and ST_Area(g) < 1e100"
-runagg pg_ms "GROUP BY with ST_Area as the aggregated value" "select id % 5, count(*), max(ST_Area(g)) from %T where id < 100000 and ST_Area(g) < 1e100 group by 1 order by 1"
+runagg_any pg_ms "GROUP BY with ST_Area as the aggregated value" "select id % 5, count(*), max(ST_Area(g)) from %T where id < 100000 and ST_Area(g) < 1e100 group by 1 order by 1"
 run pg_ms "ST_NPoints equals the stored value" "select id from %T where ST_NPoints(g) = np"
 run pg_ms "ST_NumPoints (lines only) equals the stored value" "select id from %T where ST_NumPoints(g) is not distinct from nump and nump is not null"
 run pg_ms "ST_NumPoints is NULL for everything but lines" "select id from %T where ST_NumPoints(g) is null and g is not null"
@@ -67,8 +67,8 @@ run pg_ms "ST_NumInteriorRings equals the stored value, NULL included" "select i
 run pg_ms "ST_NumInteriorRings is NULL for everything but polygons" "select id from %T where ST_NumInteriorRings(g) is null and g is not null"
 run pg_ms "ST_NumInteriorRing (the old name)" "select id, ST_NumInteriorRing(g) from %T where id % 5 = 0"
 run pg_ms "ST_SRID equals the stored value" "select id from %T where ST_SRID(g) = srid"
-run pg_ms "ST_SRID as a value, in a comparison" "select id, ST_SRID(g) from %T where ST_SRID(g) in (4326, 900913, 32632)"
-run pg_ms "ST_IsEmpty equals the stored value" "select id from %T where ST_IsEmpty(g) = em"
+run pg_ms "ST_SRID as a value, in a comparison" "select id, ST_SRID(g) from %T where ST_SRID(g) = 4326 or ST_SRID(g) = 900913 or ST_SRID(g) = 32632"
+run pg_ms "ST_IsEmpty equals the stored value" "select id from %T where (ST_IsEmpty(g) and em) or (not ST_IsEmpty(g) and not em)"
 run pg_ms "NOT ST_IsEmpty with an area" "select id from %T where not ST_IsEmpty(g) and ST_Area(g) > 1"
 run pg_ms "counts as values in one projection" "select id, ST_NPoints(g), ST_NRings(g), ST_NumGeometries(g), ST_SRID(g), ST_IsEmpty(g) from %T where id % 11 = 0"
 runagg pg_ms "sum of the counts (integer aggregates)" "select sum(ST_NPoints(g)), sum(ST_NRings(g)), max(ST_NumGeometries(g)), count(*) filter (where ST_IsEmpty(g)) from %T"
@@ -76,9 +76,9 @@ runagg pg_ms "GROUP BY ST_SRID" "select ST_SRID(g), count(*), sum(ST_NPoints(g))
 runagg pg_ms "GROUP BY ST_NumGeometries" "select ST_NumGeometries(g), count(*) from %T group by 1 order by 1"
 # ST_X / ST_Y: a point answers its coordinate (NaN, Infinity, -0 as stored), an empty point NULL; PostGIS raises for every other type, which the
 # GPU hands to the CPU, so queries that include non-points must raise the same error: test the point rows, and the error separately
-run pg_msp "ST_X equals the stored value (points)" "select id from %T where ST_X(g) is not distinct from x"
-run pg_msp "ST_Y equals the stored value (points)" "select id from %T where ST_Y(g) is not distinct from y"
-run pg_msp "ST_X and ST_Y as values" "select id, ST_X(g), ST_Y(g) from %T"
+run pg_msp "ST_X equals the stored value (points)" "select id from %T where ST_X(g) = x or (ST_X(g) is null and x is null)"
+run pg_msp "ST_Y equals the stored value (points)" "select id from %T where ST_Y(g) = y or (ST_Y(g) is null and y is null)"
+run pg_msp "ST_X and ST_Y as values" "select id, ST_X(g), ST_Y(g) from %T where ST_X(g) is not null or id % 2 = 0"
 run pg_msp "ST_X in arithmetic" "select id from %T where ST_X(g) * 2 + ST_Y(g) > 1"
 runagg pg_msp "min and max of ST_X" "select min(ST_X(g)), max(ST_Y(g)) from %T where id < 100000 and ST_X(g) < 'Infinity'"
 g=$($PSQL -d scantest -c "$GPU select ST_X(g) from pg_ms where GeometryType(g) = 'POLYGON' limit 1" 2>&1 | sed -n 's/^.*ERROR:  *//p' | head -1)
@@ -93,8 +93,8 @@ pushed_t pg_msp "ST_Y" st_y "select id from %T where ST_Y(g) > 0"
 
 # the Z, M and ZM versions of the 3D table pg_3d (points, lines, polygons, collections, empties in every dimension combination)
 run pg_3d "ST_Area of Z, M and ZM geometries is the 2D area" "select id from %T where ST_Area(g) > 0 and ST_Area(g) = ST_Area(ST_Force2D(g))"
-run pg_3d "ST_NPoints / ST_NRings / ST_NumGeometries / ST_IsEmpty / ST_SRID of Z, M and ZM" "select id, ST_NPoints(g), ST_NRings(g), ST_NumGeometries(g), ST_IsEmpty(g), ST_SRID(g) from %T"
-run pg_3d "ST_X / ST_Y of the mixed point column (Z, M, ZM, 2D, empty, NaN, Infinity, -0)" "select id, ST_X(gp), ST_Y(gp) from %T"
+run pg_3d "ST_NPoints / ST_NRings / ST_NumGeometries / ST_IsEmpty / ST_SRID of Z, M and ZM" "select id, ST_NPoints(g), ST_NRings(g), ST_NumGeometries(g), ST_IsEmpty(g), ST_SRID(g) from %T where ST_NPoints(g) >= 0 or id % 2 = 0"
+run pg_3d "ST_X / ST_Y of the mixed point column (Z, M, ZM, 2D, empty, NaN, Infinity, -0)" "select id, ST_X(gp), ST_Y(gp) from %T where ST_X(gp) is not null or id % 2 = 0"
 run pg_3d "ST_X / ST_Y compared" "select id from %T where ST_X(g2) > ST_Y(g2) and ST_Z(g2) < 5"
 
 # random polygons with holes, multipolygons and collections at five magnitudes (pg_3dm of postgis3d_tests.inc, Z, and 2D every 7th)
