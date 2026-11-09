@@ -247,6 +247,36 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KSORT_KEY_KIND__PMINMAX_INT64
 	},
 	/*
+	 * BOOL_AND(X) = EVERY(X) = MIN(X), BOOL_OR(X) = MAX(X) of the 0/1 values: the minimum / maximum states of the integers
+	 */
+	{"bool_and(bool)",
+	 "s:min_bool(bytea)",
+	 "s:pmin(bool)",
+	 "s:fmin_bool(bytea)",
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_BOOL,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
+	},
+	{"every(bool)",
+	 "s:min_bool(bytea)",
+	 "s:pmin(bool)",
+	 "s:fmin_bool(bytea)",
+	 KAGG_ACTION__PMIN_INT32,
+	 KAGG_FINAL__FMINMAX_BOOL,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
+	},
+	{"bool_or(bool)",
+	 "s:max_bool(bytea)",
+	 "s:pmax(bool)",
+	 "s:fmax_bool(bytea)",
+	 KAGG_ACTION__PMAX_INT32,
+	 KAGG_FINAL__FMINMAX_BOOL,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_INT64
+	},
+	/*
 	 * MAX(X) = MAX(PMAX(X))
 	 */
 	{"max(int1)",

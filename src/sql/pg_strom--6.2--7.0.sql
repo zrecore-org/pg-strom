@@ -51,3 +51,49 @@ CREATE FUNCTION pgstrom.gpu_service_ping()
   RETURNS text
   AS 'MODULE_PATHNAME','pgstrom_gpu_service_ping'
   LANGUAGE C STRICT;
+
+---
+--- bool_and / every / bool_or: the minimum and the maximum of the 0/1 values (A6)
+---
+CREATE FUNCTION pgstrom.pmin(bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(bool,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(bool,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_int64'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fminmax_final_bool(bytea)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_bool'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_bool(bytea)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_bool'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_bool(bytea)
+  RETURNS bool
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_bool'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE AGGREGATE pgstrom.min_bool(bytea)
+(
+  sfunc = pgstrom.fmin_trans_int64,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_bool,
+  parallel = safe
+);
+CREATE AGGREGATE pgstrom.max_bool(bytea)
+(
+  sfunc = pgstrom.fmax_trans_int64,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_bool,
+  parallel = safe
+);

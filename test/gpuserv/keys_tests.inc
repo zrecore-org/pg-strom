@@ -98,4 +98,9 @@ rung "group by a bool" "select b, count(*), sum(pay), min(n), max(n) from %T gro
 rung "group by a bool and an int" "select b, n, count(*), sum(pay) from %T group by b, n" tbo
 rung "group by three keys with a bool" "select b, n, m, count(*), sum(pay) from %T group by b, n, m" tbo
 rung "group by four keys with a bool" "select b, n, m, o, count(*), sum(pay) from %T group by b, n, m, o" tbo
+# ---- bool_and / bool_or / every (the minimum and the maximum of the 0/1 values)
+rung "bool_and, bool_or, every, ungrouped" "select bool_and(b), bool_or(b), every(b), count(b) from %T" tbo
+rung "bool_and, bool_or, every grouped by an int" "select n, bool_and(b), bool_or(b), every(b), count(*) from %T group by n" tbo
+rung "bool aggregates over a comparison, FILTER" "select m, bool_and(n < 4), bool_or(n = 0) filter (where o > 1), count(*) from %T group by m" tbo
+rung "bool aggregates of a group without any value" "select n, bool_or(b) filter (where m > 100), bool_and(b) filter (where m > 100), count(*) from %T group by n" tbo
 echo

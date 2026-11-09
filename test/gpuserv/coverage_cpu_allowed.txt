@@ -109,10 +109,6 @@ agg.fn.min_char | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 agg.fn.min_uuid | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 srcfull.*.fn.min_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 aggjoin.type.min_max_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6
-agg.fn.bool_and* | bool_and / bool_or / every: not device aggregates | gap:A6
-agg.fn.bool_or | bool_and / bool_or / every: not device aggregates | gap:A6
-agg.fn.every | bool_and / bool_or / every: not device aggregates | gap:A6
-srcfull.*.fn.bool_and | bool_and / bool_or / every: not device aggregates | gap:A6
 agg.fn.bit_and | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
 agg.fn.bit_or | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
 agg.fn.bit_xor | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
