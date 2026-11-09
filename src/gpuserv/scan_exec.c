@@ -2428,6 +2428,13 @@ scan_gtab_switch_allowed(void)
 }
 
 /* the kernel of the session-wide table: arrow = 0 heap pages (gtab.slang), 1 an Arrow record batch (-DARROW_SRC) */
+gpu_vk_pipeline *
+scan_gtab_vm_pipe(scan_engine *eng, int arrow, int variant)
+{
+	return arrow ? &eng->agtab_pipe[variant] : &eng->gtab_pipe[variant];
+}
+
+/* creates the interpreter's pipeline (the specialized kernel, if there is one, does not need it) */
 int
 scan_gtab_pipeline(scan_engine *eng, int arrow, int variant, gpu_vk_pipeline **p_pipe, char *err, size_t errlen)
 {
@@ -2565,7 +2572,8 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	double		t0 = now_ms(), t1, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
 	uint32_t	hits0;
-	gpu_vk_pipeline *gpipe;
+	gpu_vk_pipeline *gpipe, *sp;
+	spec_shape	sh;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -2574,7 +2582,10 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	if (task->u.task.kds_src_iovec)
 		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
-	if (scan_gtab_pipeline(eng, 0, variant, &gpipe, err, errlen) != 0)
+	gpipe = scan_gtab_vm_pipe(eng, 0, variant);
+	memset(&sh, 0, sizeof(sh));
+	sp = spec_pipe(eng, prog, SPEC_GTAB, 0, 0, NULL, &sh, gpipe);
+	if ((sp == gpipe || spec_check_enabled(eng)) && scan_gtab_pipeline(eng, 0, variant, &gpipe, err, errlen) != 0)
 		return -1;
 	if (scan_gtab_open(vk, session, prog, st, err, errlen) != 0)
 		return -1;
@@ -2647,7 +2658,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 				pc[1] = base | (mode << 28);
 				pc[2] = group_ppw(AGG_PAGES_PER_WG);
 				pc[3] = 4;
-				if (gpu_vk_dispatch(vk, gpipe, bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, SPEC_GTAB, &sh, gpipe, sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto done;

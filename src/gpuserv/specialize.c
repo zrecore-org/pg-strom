@@ -503,13 +503,20 @@ gen_stage(gen_ctx *g, sbuf *o)
 	const uint32_t *w = g->w;
 	uint32_t	naggs = w[10], aggoff = w[11], nkeys = w[12], keyoff = w[13];
 
-	if (nkeys > 2)
+	int			gtab = (g->kind == SPEC_GTAB);
+
+	if (nkeys > (gtab ? 4 : 2))
 	{
-		gen_fail(g, "more than two keys");
+		gen_fail(g, "more than %d keys", gtab ? 4 : 2);
 		return;
 	}
-	sb_printf(o, "void spec_stage(inout Reg regs[VM_MAX_REGS], uint tid)\n{\n"
-				 "    int64_t k0 = 0, k1 = 0;\n    uint kn = 0;\n");
+	if (gtab)
+		sb_printf(o, "void spec_stage(inout Reg regs[VM_MAX_REGS], uint tid)\n{\n"
+					 "    int64_t kk[GA_NK];\n    uint kn = 0;\n"
+					 "    for (uint i = 0; i < GA_NK; i++)\n        kk[i] = 0;\n");
+	else
+		sb_printf(o, "void spec_stage(inout Reg regs[VM_MAX_REGS], uint tid)\n{\n"
+					 "    int64_t k0 = 0, k1 = 0;\n    uint kn = 0;\n");
 	for (uint32_t k = 0; k < nkeys; k++)
 	{
 		uint32_t	r = w[keyoff + k];
@@ -519,11 +526,19 @@ gen_stage(gen_ctx *g, sbuf *o)
 			gen_fail(g, "key %u: register out of range", k);
 			return;
 		}
-		sb_printf(o, "    if (regs[%u].isnull != 0) kn |= %uu; else k%u = regs[%u].v;\n", r, 1u << k, k, r);
+		if (gtab)
+			sb_printf(o, "    if (regs[%u].isnull != 0) kn |= %uu; else kk[%u] = regs[%u].v;\n", r, 1u << k, k, r);
+		else
+			sb_printf(o, "    if (regs[%u].isnull != 0) kn |= %uu; else k%u = regs[%u].v;\n", r, 1u << k, k, r);
 	}
-	sb_printf(o,
-			  "    st_key[tid * GA_NK + 0] = k0;\n    st_key[tid * GA_NK + 1] = k1;\n"
-			  "    st_hash[tid] = hash_keys(k0, k1, kn);\n    st_kn[tid] = kn | 0x80000000u;\n");
+	if (gtab)
+		sb_printf(o,
+				  "    for (uint i = 0; i < GA_NK; i++)\n        st_key[tid * GA_NK + i] = kk[i];\n"
+				  "    st_hash[tid] = hash_keys(kk, kn);\n    st_kn[tid] = kn | 0x80000000u;\n");
+	else
+		sb_printf(o,
+				  "    st_key[tid * GA_NK + 0] = k0;\n    st_key[tid * GA_NK + 1] = k1;\n"
+				  "    st_hash[tid] = hash_keys(k0, k1, kn);\n    st_kn[tid] = kn | 0x80000000u;\n");
 	for (uint32_t k = 0; k < naggs; k++)
 	{
 		uint32_t	cls = w[aggoff + 4 * k], ra = w[aggoff + 4 * k + 1], rf = w[aggoff + 4 * k + 2];
@@ -896,6 +911,10 @@ spec_generate(const spec_shape *shape, const scan_prog *prog, char **p_defs, cha
 		case SPEC_AGG:
 			gen_scales_ok(&g, &body);
 			gen_acc(&g, &body);
+			break;
+		case SPEC_GTAB:
+			gen_scales_ok(&g, &body);
+			gen_stage(&g, &body);
 			break;
 		case SPEC_GAGG:
 			gen_scales_ok(&g, &body);
