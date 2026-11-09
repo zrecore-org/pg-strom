@@ -556,6 +556,7 @@ struct pgstromTaskState
 	/* A14: runtime CPU fallback of the whole node */
 	bool				cpu_fallback_ok;	/* may continue on the CPU if the GPU service fails */
 	bool				cpu_mode;			/* the GPU session is gone, the CPU runs the rest */
+	char			   *cpu_mode_reason;	/* why (the service's message) */
 	bool				defer_fallback;		/* GpuPreAgg: hold back the recheck tuples until Final */
 	bool				drain_fallback;		/* GpuPreAgg: Final is done, emit them */
 	bool				final_is_last;		/* result of pgstromTaskStateEndScan() */

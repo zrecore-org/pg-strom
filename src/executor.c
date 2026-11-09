@@ -1723,7 +1723,8 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		{
 			List	   *jquals = pp_inner->join_quals;
 
-			if (OidIsValid(pp_inner->gist_index_oid) && pp_inner->gist_clause)
+			if (OidIsValid(pp_inner->gist_index_oid) && pp_inner->gist_clause &&
+				!OidIsValid(pp_inner->gist_func_oid))
 			{
 				MemoryContext oldcxt = CurrentMemoryContext;
 
