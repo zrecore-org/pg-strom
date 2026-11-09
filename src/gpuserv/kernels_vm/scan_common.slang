@@ -3527,7 +3527,39 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
             regs[dst].isnull = 0;
             return 0;
         case SOP_HASHMERGE:
-            if (regs[ra].isnull == 0 && k1 != 0)
+            if (regs[ra].isnull == 0 && (k1 == 3 || k1 == 4))
+            {
+                // a float4 (k1 = 3) / float8 (k1 = 4) key: -0 hashes as +0 and every NaN as the canonical one (hashfloat4/8)
+                uint64_t uv = uint64_t(regs[ra].v);
+                uint lo = uint(uv & 0xffffffffu);
+                uint hi = uint(uv >> 32);
+                if (k1 == 3)
+                {
+                    hi = 0;
+                    if ((lo & 0x7fffffffu) == 0)
+                        lo = 0;
+                    else if ((lo & 0x7fffffffu) > 0x7f800000u)
+                        lo = 0x7fc00000u;
+                }
+                else
+                {
+                    uint ah = hi & 0x7fffffffu;
+                    if ((ah | lo) == 0)
+                    {
+                        lo = 0;
+                        hi = 0;
+                    }
+                    else if (ah > 0x7ff00000u || (ah == 0x7ff00000u && lo != 0))
+                    {
+                        lo = 0;
+                        hi = 0x7ff80000u;
+                    }
+                }
+                uint h = hash_any_value(lo, hi, k1 == 3 ? 4u : 8u);
+                uint acc = uint(regs[dst].v);
+                regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
+            }
+            else if (regs[ra].isnull == 0 && k1 != 0)
             {
                 // a string key (k1 = 1 text / varchar, 2 bpchar: trailing blanks do not count)
                 Reg x = regs[ra];

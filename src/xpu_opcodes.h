@@ -283,7 +283,11 @@ FUNC_ALIAS(abs, float4, DEVKIND__ANY, float4abs, 1, NULL)
 FUNC_ALIAS(abs, float8, DEVKIND__ANY, float8abs, 1, NULL)
 
 /* '=' : equal operators */
-__FUNC_OPCODE(booleq,  bool/bool, 1, NULL)
+/*
+ * (not __FUNC_OPCODE: its FUNC_ARGS parameter is macro-expanded before it is stringified, and <stdbool.h>
+ * turns "bool" into "_Bool", so the entry would never match the function's argument types)
+ */
+FUNC_OPCODE(booleq, bool/bool, DEVKIND__ANY, booleq, 1, NULL)
 __FUNC_OPCODE(int1eq,  int1/int1, 1, "pg_strom")
 __FUNC_OPCODE(int12eq, int1/int2, 1, "pg_strom")
 __FUNC_OPCODE(int14eq, int1/int4, 1, "pg_strom")

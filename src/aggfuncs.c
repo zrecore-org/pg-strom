@@ -19,6 +19,7 @@ PG_FUNCTION_INFO_V1(pgstrom_partial_nrows);
 PG_FUNCTION_INFO_V1(pgstrom_partial_nrows_filtered);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int64);
+PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_bool);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp64);
@@ -251,6 +252,16 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
 		elog(ERROR, "min/max(int1) out of range");
 	PG_RETURN_INT32(state->value);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fminmax_final_bool(PG_FUNCTION_ARGS)
+{
+	kagg_state__pminmax_int64_packed *state
+		= (kagg_state__pminmax_int64_packed *)PG_GETARG_BYTEA_P(0);
+	if ((state->attrs & __PAGG_MINMAX_ATTRS__VALID) == 0)
+		PG_RETURN_NULL();
+	PG_RETURN_BOOL(state->value != 0);
 }
 
 PUBLIC_FUNCTION(Datum)

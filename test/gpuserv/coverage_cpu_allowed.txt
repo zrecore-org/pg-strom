@@ -9,12 +9,6 @@
 # Sources: srcfull.arrow / srcfull.parquet hold the cf columns except uuid and the unconstrained numeric (pg2arrow cannot write them).
 
 # Each distinct reason is one row of the gap table printed by the test, so the same gap always carries the same text here.
-join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-aggjoin.key.float4 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-aggjoin.key.float8 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-srcfull.*.join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-srcfull.*.join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
 join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 aggjoin.key.numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 src.*.join.key_numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
@@ -22,9 +16,6 @@ srcfull.*.join.key.numeric.* | hash-join key numeric: numeric_eq is not a device
 join.key.uuid.* | hash-join key uuid: uuid_eq is not a device function | gap:A6
 aggjoin.key.uuid | hash-join key uuid: uuid_eq is not a device function | gap:A6
 srcfull.*.join.key.uuid.* | hash-join key uuid: uuid_eq is not a device function | gap:A6
-join.key.bool.* | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
-aggjoin.key.bool | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
-srcfull.*.join.key.bool.* | hash-join key bool: booleq is 'not supported on the target device' | gap:A6
 join.key.null_safe.inner | IS NOT DISTINCT FROM as a join clause: a DistinctExpr is not an opcode and the clause is not hash-joinable | gap:A14
 join.nl.nonequi.* | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
 join.nl.range.inner | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
@@ -36,53 +27,19 @@ spatial.join.nl_no_index | nest-loop join without a hash or GiST key (non-equi, 
 join.type.not_in_subquery | NOT IN (subquery) is a hashed SubPlan, not an opcode | by-design
 join.type.text_qual | text ordering / LIKE under a non-C collation (the cluster's initdb locale) stay on the CPU | by-design
 src.heap.union_all_agg | UNION ALL / Append below the aggregate: GpuPreAgg does not push below an Append | gap:A14
-agg.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-src.*.agg.group_text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-src.*.agg.group_varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-src.*.agg.group_bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.groups.50000.text.raised | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-aggjoin.type.group_text_key | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+aggjoin.type.group_text_key | GROUP BY a string key over a join: string keys are for the scanned relation only (the join aggregation kernels hold int64 keys) | gap:A6
 agg.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group3.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.gpucache.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.gpucache.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 src.gpucache.agg.group_uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-agg.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-agg.group3.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-srcfull.*.group1.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-srcfull.*.group2.bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-src.*.agg.group_bool | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
-src.*.agg.group_two_keys | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 agg.group.expr_date | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
 aggjoin.type.group_three_keys | GROUP BY with three or more keys over a join: the join kernels hold two (the session-wide table is not ported to the join walk) | gap:A3
-src.*.agg.group_three_keys | GROUP BY key bool: rejected as 'unsupported device type (boolean)' | gap:A6
 agg.group.grouping_sets | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
@@ -115,10 +72,6 @@ agg.fn.min_char | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 agg.fn.min_uuid | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 srcfull.*.fn.min_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 aggjoin.type.min_max_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6
-agg.fn.bool_and* | bool_and / bool_or / every: not device aggregates | gap:A6
-agg.fn.bool_or | bool_and / bool_or / every: not device aggregates | gap:A6
-agg.fn.every | bool_and / bool_or / every: not device aggregates | gap:A6
-srcfull.*.fn.bool_and | bool_and / bool_or / every: not device aggregates | gap:A6
 agg.fn.bit_and | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
 agg.fn.bit_or | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
 agg.fn.bit_xor | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
