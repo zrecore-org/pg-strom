@@ -9,12 +9,6 @@
 # Sources: srcfull.arrow / srcfull.parquet hold the cf columns except uuid and the unconstrained numeric (pg2arrow cannot write them).
 
 # Each distinct reason is one row of the gap table printed by the test, so the same gap always carries the same text here.
-join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-aggjoin.key.float4 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-aggjoin.key.float8 | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-srcfull.*.join.key.float4.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
-srcfull.*.join.key.float8.* | hash-join key float4/float8: gpu_join.c offers a GpuJoin only for scan_vm_groupkey_type_supported() key types (integers, date/time) | gap:A6
 join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 aggjoin.key.numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 src.*.join.key_numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
@@ -33,15 +27,6 @@ spatial.join.nl_no_index | nest-loop join without a hash or GiST key (non-equi, 
 join.type.not_in_subquery | NOT IN (subquery) is a hashed SubPlan, not an opcode | by-design
 join.type.text_qual | text ordering / LIKE under a non-C collation (the cluster's initdb locale) stay on the CPU | by-design
 src.heap.union_all_agg | UNION ALL / Append below the aggregate: GpuPreAgg does not push below an Append | gap:A14
-agg.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 aggjoin.type.group_text_key | GROUP BY a string key over a join: string keys are for the scanned relation only (the join aggregation kernels hold int64 keys) | gap:A6
 agg.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
