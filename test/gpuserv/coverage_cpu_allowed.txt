@@ -45,24 +45,7 @@ agg.group3.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supp
 srcfull.*.group1.float4 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group1.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
 srcfull.*.group2.float8 | GROUP BY key float4/float8: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group2.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.group3.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group1.bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-srcfull.*.group2.text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-src.*.agg.group_text | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-src.*.agg.group_varchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-src.*.agg.group_bpchar | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-agg.groups.50000.text.raised | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
-aggjoin.type.group_text_key | GROUP BY key text/varchar/bpchar: not a scan_vm_groupkey_type_supported() type | gap:A6
+aggjoin.type.group_text_key | GROUP BY a string key over a join: string keys are for the scanned relation only (the join aggregation kernels hold int64 keys) | gap:A6
 agg.group1.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group2.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6
 agg.group3.uuid | GROUP BY key uuid: not a scan_vm_groupkey_type_supported() type | gap:A6

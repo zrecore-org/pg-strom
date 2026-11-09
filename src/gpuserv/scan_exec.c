@@ -1892,6 +1892,7 @@ typedef struct str_dict
 		size_t		off;
 		uint32_t	len;		/* stored bytes */
 		uint32_t	klen;		/* bytes that identify it (bpchar: without trailing blanks) */
+		uint32_t	bp;			/* a bpchar value (a text and a bpchar value never share an id: the stored bytes differ) */
 	}		   *ents;
 	uint32_t	nents, ecap;
 	uint32_t   *htab;
@@ -1947,7 +1948,7 @@ sd_intern(agg_state *st, const unsigned char *p, uint32_t len, int bpchar)
 			return -1;
 		for (uint32_t e = 0; e < d->nents; e++)
 		{
-			uint32_t	x = sd_hash(d->buf + d->ents[e].off, d->ents[e].klen) & (ncap - 1);
+			uint32_t	x = (sd_hash(d->buf + d->ents[e].off, d->ents[e].klen) + d->ents[e].bp) & (ncap - 1);
 
 			while (nh[x])
 				x = (x + 1) & (ncap - 1);
@@ -1957,12 +1958,12 @@ sd_intern(agg_state *st, const unsigned char *p, uint32_t len, int bpchar)
 		d->htab = nh;
 		d->hcap = ncap;
 	}
-	h = sd_hash(p, klen) & (d->hcap - 1);
+	h = (sd_hash(p, klen) + (bpchar ? 1 : 0)) & (d->hcap - 1);
 	for (i = h; d->htab[i]; i = (i + 1) & (d->hcap - 1))
 	{
 		const struct str_dict_ent *e = &d->ents[d->htab[i] - 1];
 
-		if (e->klen == klen && !memcmp(d->buf + e->off, p, klen))
+		if (e->klen == klen && e->bp == (uint32_t) bpchar && !memcmp(d->buf + e->off, p, klen))
 			return (int64_t) d->htab[i] - 1;
 	}
 	if (d->nents == d->ecap)
@@ -1994,6 +1995,7 @@ sd_intern(agg_state *st, const unsigned char *p, uint32_t len, int bpchar)
 	d->ents[d->nents].off = d->len;
 	d->ents[d->nents].len = len;
 	d->ents[d->nents].klen = klen;
+	d->ents[d->nents].bp = bpchar ? 1 : 0;
 	d->len += len;
 	if (len > d->maxlen)
 		d->maxlen = len;
