@@ -2068,7 +2068,11 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				 !((dtype->type_code == TypeOpCode__text ||
 					dtype->type_code == TypeOpCode__bpchar) &&
 				   con->inner_target_list == NIL &&
-				   pgstrom_group_string_key_ok(expr))) ||
+				   pgstrom_group_string_key_ok(expr)) &&
+				 /* float4 / float8 keys of the scanned relation: the program groups on x + 0.0 (-0 = +0, NaN = NaN) */
+				 !((dtype->type_code == TypeOpCode__float4 ||
+					dtype->type_code == TypeOpCode__float8) &&
+				   con->inner_target_list == NIL)) ||
 				list_length(con->groupby_keys) >= con->max_keys)
 			{
 				elog(DEBUG2, "GROUP BY key not supported by the Vulkan service: %s",

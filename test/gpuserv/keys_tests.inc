@@ -103,4 +103,15 @@ rung "bool_and, bool_or, every, ungrouped" "select bool_and(b), bool_or(b), ever
 rung "bool_and, bool_or, every grouped by an int" "select n, bool_and(b), bool_or(b), every(b), count(*) from %T group by n" tbo
 rung "bool aggregates over a comparison, FILTER" "select m, bool_and(n < 4), bool_or(n = 0) filter (where o > 1), count(*) from %T group by m" tbo
 rung "bool aggregates of a group without any value" "select n, bool_or(b) filter (where m > 100), bool_and(b) filter (where m > 100), count(*) from %T group by n" tbo
+# ---- float4 / float8 keys: -0 = +0, NaN = NaN
+for col in f4 f8; do
+	runkj "$col key: inner join" "select t.i, d.w from tfo t join tfi d on t.${col}j = d.$col"
+	runkj "$col key: LEFT join" "select t.i, d.w from tfo t left join tfi d on t.${col}j = d.$col"
+	runkj "$col key: semi join" "select t.i from tfo t where t.${col}j in (select d.$col from tfi d)"
+	runkj "$col key: anti join" "select t.i from tfo t where not exists (select 1 from tfi d where d.$col = t.${col}j)"
+	runkj "$col key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tfo t join tfi d on t.${col}j = d.$col group by d.w"
+	rung "group by $col" "select ${col}g, count(*), sum(pay), min(n), max(n) from %T group by ${col}g" tfo
+	rung "group by $col and an int" "select ${col}g, n, count(*), sum(pay) from %T group by ${col}g, n" tfo
+done
+rung "group by float4, float8 and two ints" "select f4g, f8g, n, (pay % 3)::int4, count(*), sum(pay) from %T group by f4g, f8g, n, (pay % 3)::int4" tfo
 echo

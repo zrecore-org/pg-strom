@@ -74,6 +74,21 @@ sql "vacuum analyze tko"; sql "vacuum analyze tki"
 sql "create table tbo as select i, case when i % 13 = 0 then null else (i % 3 = 0) end as b, (i % 5)::int4 as n, (i % 7)::int4 as m, (i % 4)::int4 as o, i::int8 as pay from generate_series(1, 3000) i"
 sql "create table tbi as select * from (values (true, 10), (false, 20), (null::bool, 30), (true, 40)) v(b, w)"
 sql "analyze tbo"; sql "analyze tbi"
+# float keys: -0 = +0 and NaN = NaN for the join keys (f4j / f8j), distinct values without -0 for the GROUP BY keys (f4g / f8g)
+sql "create table tfo as select i,
+	(case i % 12 when 0 then 0::float4 when 1 then '-0'::float4 when 2 then 'NaN'::float4 when 3 then 'Infinity'::float4 when 4 then '-Infinity'::float4 when 5 then null
+	 when 6 then 1.5::float4 when 7 then -1.5::float4 when 8 then 1e-45::float4 when 9 then 3.4e38::float4 else ((i % 5) / 4.0)::float4 end) as f4j,
+	(case i % 12 when 0 then 0::float8 when 1 then '-0'::float8 when 2 then 'NaN'::float8 when 3 then 'Infinity'::float8 when 4 then '-Infinity'::float8 when 5 then null
+	 when 6 then 1.5::float8 when 7 then -1.5::float8 when 8 then 5e-324::float8 when 9 then 1.7e308::float8 else ((i % 5) / 4.0)::float8 end) as f8j,
+	(case i % 10 when 0 then 0::float4 when 1 then 'NaN'::float4 when 2 then 'Infinity'::float4 when 3 then '-Infinity'::float4 when 4 then null
+	 when 5 then 1e-45::float4 else ((i % 7) / 8.0)::float4 end) as f4g,
+	(case i % 10 when 0 then 0::float8 when 1 then 'NaN'::float8 when 2 then 'Infinity'::float8 when 3 then '-Infinity'::float8 when 4 then null
+	 when 5 then 5e-324::float8 else ((i % 7) / 8.0)::float8 end) as f8g,
+	(i % 4)::int4 as n, i::int8 as pay from generate_series(1, 6000) i"
+sql "create table tfi as select * from (values (0::float4, 0::float8, 1), (-0.0::float4, -0.0::float8, 2), ('NaN'::float4, 'NaN'::float8, 3),
+	('Infinity'::float4, 'Infinity'::float8, 4), (1.5::float4, 1.5::float8, 5), (null::float4, null::float8, 6), (-1.5::float4, -1.5::float8, 7),
+	(1e-45::float4, 5e-324::float8, 8), (0.25::float4, 0.25::float8, 9), (0.5::float4, 0.5::float8, 10)) v(f4, f8, w)"
+sql "analyze tfo"; sql "analyze tfi"
 # GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
 # table is sized for the estimate and overflows); tkb is big enough for several tasks
 sql "create table tkm as select md5((i % 100)::text) as k, (i % 7)::int4 as n, i::int8 as v from generate_series(1, 20000) i"
