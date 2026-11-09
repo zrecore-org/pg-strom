@@ -24,7 +24,7 @@ typedef struct
 	uint32_t	n;
 } wbuf;
 
-static const char *kfile[] = {NULL, "scan.slang", "agg.slang", "gagg.slang", "join.slang", "jagg.slang", "jgagg.slang"};
+static const char *kfile[] = {NULL, "scan.slang", "agg.slang", "gagg.slang", "join.slang", "jagg.slang", "jgagg.slang", "gtab.slang"};
 
 static void
 insn(wbuf *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0, uint32_t k1)
@@ -177,10 +177,10 @@ emit(const char *outdir, const char *name, int kind, int mode, int agg_max, int 
 	FILE	   *f;
 
 	memset(&prog, 0, sizeof(prog));
-	if (kind >= SPEC_JOIN)
+	if (kind >= SPEC_JOIN && kind != SPEC_GTAB)
 		build_join(mode, &prog);
 	else
-		build(kind - 1, &prog);
+		build(kind == SPEC_GTAB ? 2 : kind - 1, &prog);
 	memset(&sh, 0, sizeof(sh));
 	if (g_dm)
 	{
@@ -248,5 +248,8 @@ main(int argc, char **argv)
 	rc |= emit(out, "ajoin", SPEC_JOIN, 0, 0, 0, 1);
 	rc |= emit(out, "ajagg", SPEC_JAGG, 1, 4, 0, 1);
 	rc |= emit(out, "ajgagg", SPEC_JGAGG, 2, 4, 128, 1);
+	/* GROUP BY into the session-wide table */
+	rc |= emit(out, "gtab", SPEC_GTAB, 0, 12, 0, 0);
+	rc |= emit(out, "agtab", SPEC_GTAB, 0, 12, 0, 1);
 	return rc ? 1 : 0;
 }

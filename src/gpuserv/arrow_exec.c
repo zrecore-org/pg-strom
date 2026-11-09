@@ -1848,7 +1848,8 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 	gpu_vk_ctx *vk = eng->vk;
 	arrow_task	at;
 	gpu_vk_buffer bout;
-	gpu_vk_pipeline *gpipe;
+	gpu_vk_pipeline *gpipe, *sp;
+	spec_shape	sh;
 	int			have_out = 0, variant, rv = -1;
 	uint32_t	nrows, ppw = ARROW_AGG_PAGES_PER_WG;
 	uint64_t	n_overflow = 0;
@@ -1861,7 +1862,10 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		return -1;
 	nrows = at.nrows;
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
-	if (scan_gtab_pipeline(eng, 1, variant, &gpipe, err, errlen) != 0)
+	gpipe = scan_gtab_vm_pipe(eng, 1, variant);
+	memset(&sh, 0, sizeof(sh));
+	sp = spec_pipe(eng, prog, SPEC_GTAB | SPEC_ARROW, 0, 0, NULL, &sh, gpipe);
+	if ((sp == gpipe || spec_check_enabled(eng)) && scan_gtab_pipeline(eng, 1, variant, &gpipe, err, errlen) != 0)
 		goto done;
 	if (scan_gtab_open(vk, session, prog, st, err, errlen) != 0)
 		goto done;
@@ -1944,7 +1948,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 				pc[2] = ppw;
 				pc[3] = 4;							/* flags_base */
 				pc[4] = 4 + pages * ARROW_VP;		/* mode 3: the overflow list */
-				if (gpu_vk_dispatch(vk, gpipe, bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, SPEC_GTAB | SPEC_ARROW, &sh, gpipe, sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto done;
@@ -2146,7 +2150,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 			ovf_count = grouped ? out[ovf_base] : 0;
 			/* most rows found no slot (many groups): run the task again on the session-wide table (the first pass only: nothing
 			 * of this task is merged yet) */
-			if (grouped && first == 0 && ovf_count > ovf_cap && scan_gtab_switch_allowed())
+			if (grouped && first == 0 && ovf_count > ovf_cap && scan_gtab_switch_allowed() && !scan_prog_has_float_agg(prog))
 			{
 				st->nitems_raw -= nrows;
 				redo = 1;

@@ -317,6 +317,22 @@ static uint64_t h_err_f32(uint64_t a, uint64_t b, uint32_t m)
 	return 0;
 }
 
+/* sum(float4): float4pl on operands widened to float8 (prep() makes them float4 values), result widened back */
+static uint64_t s_addf4(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_addf4(a, b); }
+static uint64_t h_addf4(uint64_t a, uint64_t b, uint32_t m)
+{
+	(void) m;
+	return d2u((double)((float) u2d(a) + (float) u2d(b)));
+}
+static uint64_t s_err_addf4(uint64_t a, uint64_t b, uint32_t m) { (void) m; return f64_arith_err(0, a, b, f64_addf4(a, b)); }
+static uint64_t h_err_addf4(uint64_t a, uint64_t b, uint32_t m)
+{
+	float r = (float) u2d(a) + (float) u2d(b);
+
+	(void) m;
+	return (isinf(r) && !isinf(u2d(a)) && !isinf(u2d(b))) ? 3 : 0;
+}
+
 /* kind: 0 plain 64-bit, 1 value compared only where the guard (the previous op) is true, 2 32-bit result */
 static const f64op ops[] = {
 	{ "add",    s_add,    h_add,    0, 0 },
@@ -352,6 +368,8 @@ static const f64op ops[] = {
 	{ "math_rint", s_math_rint, h_rint, 0, 0 },
 	{ "sqr_add", s_sqr_add, h_sqr_add, 0, 0 },			/* index 31 in kernels_check/f64soft_check.slang */
 	{ "fma", s_fma, h_fma, 0, 0 },						/* index 32 */
+	{ "addf4", s_addf4, h_addf4, 0, 0 },				/* index 33 */
+	{ "err_addf4", s_err_addf4, h_err_addf4, 0, 0 },	/* index 34 */
 };
 
 /* the error numbers of the library are those of the VM */
@@ -390,6 +408,14 @@ prep(int op, uint64_t *a, uint64_t *b)
 			if (eb > 2046) eb = 2046;
 			*b = (*b & 0x800FFFFFFFFFFFFFull) | (((uint64_t) eb) << 52);
 		}
+	}
+	else if (strcmp(nm, "addf4") == 0 || strcmp(nm, "err_addf4") == 0)
+	{
+		/* two float4 values widened to float8 (a NaN stays a NaN, an overflow to infinity cannot occur in the widening) */
+		*a = f64_from_f32((uint32_t)(*a >> (rnd() % 2 ? 0 : 32)));
+		*b = f64_from_f32((uint32_t)(*b >> (rnd() % 2 ? 0 : 32)));
+		if (rnd() % 4 == 0)
+			*b = (*b & F64_SIGN) | (*a & ~F64_SIGN);			/* the same magnitude: x + x, x - x */
 	}
 	else if (strcmp(nm, "from_f32") == 0)
 	{

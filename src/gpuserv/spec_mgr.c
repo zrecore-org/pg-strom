@@ -155,6 +155,7 @@ kind_name(int kind)
 		case SPEC_JOIN:		return "join";
 		case SPEC_JAGG:		return "join agg";
 		case SPEC_JGAGG:	return "join group";
+		case SPEC_GTAB:		return "group table";
 	}
 	return "?";
 }
@@ -170,6 +171,7 @@ kind_entry(int kind)
 		case SPEC_JOIN:		return "join_main";
 		case SPEC_JAGG:		return "jagg_main";
 		case SPEC_JGAGG:	return "jgagg_main";
+		case SPEC_GTAB:		return "gagg_main";
 	}
 	return "main";
 }
@@ -185,6 +187,7 @@ kind_file(int kind)
 		case SPEC_JOIN:		return "join.slang";
 		case SPEC_JAGG:		return "jagg.slang";
 		case SPEC_JGAGG:	return "jgagg.slang";
+		case SPEC_GTAB:		return "gtab.slang";
 	}
 	return "scan.slang";
 }
@@ -612,7 +615,8 @@ build_entry(spec_mgr *m, spec_entry *e)
 	/* the bindings and the push constants of the kernel: the join kernels have the inner buffer and a fifth word, so do
 	 * the aggregations of an Arrow record batch (arrow_exec.c) */
 	uint32_t	nbind = (e->kind >= SPEC_JOIN ? 6 : 5);
-	uint32_t	pcs = (e->kind >= SPEC_JOIN || (e->arrow && (e->kind == SPEC_AGG || e->kind == SPEC_GAGG))) ? 20 : 16;
+	uint32_t	pcs = (e->kind == SPEC_GTAB ? (e->arrow ? 20 : 16) :
+					   (e->kind >= SPEC_JOIN || (e->arrow && (e->kind == SPEC_AGG || e->kind == SPEC_GAGG))) ? 20 : 16);
 	char		perr[256];
 
 	spv = cache_load(m, e, &len);
@@ -1207,15 +1211,29 @@ spec_pipe(scan_engine *eng, scan_prog *prog, int kind, int agg_max, int ga_c, co
 	in.ga_c = ga_c;
 	if (out_shape)
 		*out_shape = in;
+	if (prog->spec && (((spec_entry *) prog->spec)->kind != kind || ((spec_entry *) prog->spec)->arrow != arrow))
+	{
+		/* the session changed kernel family (a GROUP BY that moved to the session-wide table): the old kernel is not this one's */
+		spec_release(prog);
+		prog->spec_state = 0;
+		prog->spec_grow_failed = 0;
+	}
 	if (!m || m->mode == SPECM_OFF || !m->thr_started || prog->spec_state == 2)
+	{
+		if (m && m->mode != SPECM_OFF)
+			spec_log(m, 0, "%s: no specialization (thread %d, state %d)", kind_name(kind), m->thr_started, prog->spec_state);
 		return vm_pipe;
+	}
 	if (!prog->spec)
 	{
 		char	   *defs = NULL, *body = NULL, err[256];
 
 		prog->spec_tasks++;
 		if (m->mode == SPECM_AUTO && prog->spec_tasks < m->threshold && prog->spec_state == 1)
-			return vm_pipe;				/* looked at in the first task: not on the disk */
+			{
+				spec_log(m, 0, "%s: task %d of the session stays on the VM (auto: the compilation starts with task %d)", kind_name(kind), prog->spec_tasks, m->threshold);
+				return vm_pipe;				/* looked at in the first task: not on the disk */
+			}
 		pick_shape(m, prog, kind, &in, ks, &sh);
 		if (spec_generate(&sh, prog, &defs, &body, err, sizeof(err)) != 0)
 		{

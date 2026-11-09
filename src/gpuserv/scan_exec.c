@@ -1246,6 +1246,56 @@ ensure_agg_pipeline(scan_engine *eng, int variant, int avariant, char *err, size
 }
 
 /*
+ * float8 aggregates (A10): classes 6 (sum, avg), 7 (min), 8 (max), 9 (sum of float4) of scan_common.slang's fagg_merge(), on the
+ * host: add the partial (n2, a2) (the bits of a double) into (n, val). A sum of finite values that overflows sets *ovf (PostgreSQL
+ * raises "value out of range: overflow" for it).
+ */
+static void
+fagg_host_merge(uint32_t cls, uint64_t *n, int64_t *val, uint8_t *ovf, uint64_t n2, int64_t a2)
+{
+	if (n2 == 0)
+		return;
+	if (*n == 0)
+	{
+		*n = n2;
+		*val = a2;
+		return;
+	}
+	if (cls == 6 || cls == 9)
+	{
+		uint64_t	r = (cls == 9) ? f64_addf4((uint64_t) *val, (uint64_t) a2) : f64_add((uint64_t) *val, (uint64_t) a2);
+
+		if (f64_arith_err(0, (uint64_t) *val, (uint64_t) a2, r) != 0)
+			*ovf = 1;
+		*val = (int64_t) r;
+		*n += n2;
+		return;
+	}
+	{
+		uint64_t	kn = f64_key((uint64_t) a2), ko = f64_key((uint64_t) *val);
+
+		if (cls == 7 ? kn < ko : kn > ko)
+			*val = a2;
+		*n = 1;
+	}
+}
+
+/* the class of a float8 aggregate action (0: not one) */
+static uint32_t
+fagg_class_of_action(uint32_t action)
+{
+	switch (action)
+	{
+		case KAGG_ACTION__PSUM_FP:
+		case KAGG_ACTION__PAVG_FP:		return 6;
+		case KAGG_ACTION__PMIN_FP64:	return 7;
+		case KAGG_ACTION__PMAX_FP64:	return 8;
+		case KAGG_ACTION__PSUM_FP32:	return 9;
+		default:						return 0;
+	}
+}
+
+/*
  * Add the per-workgroup records of an aggregation kernel without GROUP BY (agg.slang, jagg.slang) to
  * the session's aggregates: 6 words per aggregate and workgroup, from word 4 of the output.
  */
@@ -1287,32 +1337,10 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 					break;
 				case KAGG_ACTION__PSUM_FP:		/* A10: float8, the partial of a workgroup is the bits of a double */
 				case KAGG_ACTION__PAVG_FP:
-					if (rec[0])
-					{
-						if (st->n[k])
-						{
-							uint64_t	r = f64_add((uint64_t) st->val[k], (uint64_t) a);
-
-							if (f64_arith_err(0, (uint64_t) st->val[k], (uint64_t) a, r) != 0)
-								st->fovf[k] = 1;
-							st->val[k] = (int64_t) r;
-						}
-						else
-							st->val[k] = a;
-						st->n[k] += rec[0];
-					}
-					break;
+				case KAGG_ACTION__PSUM_FP32:
 				case KAGG_ACTION__PMIN_FP64:
 				case KAGG_ACTION__PMAX_FP64:
-					if (rec[0])
-					{
-						uint64_t	kn = f64_key((uint64_t) a), ko = f64_key((uint64_t) st->val[k]);
-
-						if (!st->n[k] ||
-							(prog->agg_action[k] == KAGG_ACTION__PMIN_FP64 ? kn < ko : kn > ko))
-							st->val[k] = a;
-						st->n[k] = 1;
-					}
+					fagg_host_merge(fagg_class_of_action(prog->agg_action[k]), &st->n[k], &st->val[k], &st->fovf[k], rec[0], a);
 					break;
 				default:		/* PMAX_* */
 					if (rec[0] && (!st->n[k] || a > st->val[k]))
@@ -1588,6 +1616,19 @@ acc_merge_group_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
 			acc->sum += u - ((__int128) rec[0] << 63);
 			break;
 		}
+		case KAGG_ACTION__PSUM_FP:		/* A10: the slot holds the bits of a double (words 2, 3), see gagg.slang */
+		case KAGG_ACTION__PAVG_FP:
+		case KAGG_ACTION__PSUM_FP32:
+		case KAGG_ACTION__PMIN_FP64:
+		case KAGG_ACTION__PMAX_FP64:
+		{
+			uint8_t		ovf = (uint8_t) acc->fovf;
+
+			fagg_host_merge(fagg_class_of_action(action), &acc->n, &acc->val, &ovf, rec[0],
+							(int64_t)((uint64_t) rec[2] | ((uint64_t) rec[3] << 32)));
+			acc->fovf = ovf;
+			break;
+		}
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
 		{
@@ -1658,6 +1699,17 @@ acc_add_value(agg_acc *acc, uint32_t cls, int64_t v)
 				acc->val = v;
 			acc->n = 1;
 			break;
+		case 6:			/* float8 sum, avg; 7 min, 8 max; 9 sum(float4) (A10) */
+		case 7:
+		case 8:
+		case 9:
+		{
+			uint8_t		ovf = (uint8_t) acc->fovf;
+
+			fagg_host_merge(cls, &acc->n, &acc->val, &ovf, 1, v);
+			acc->fovf = ovf;
+			break;
+		}
 		default:		/* max */
 			if (!acc->n || v > acc->val)
 				acc->val = v;
@@ -1750,6 +1802,7 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 
 		case KAGG_ACTION__PSUM_FP:
 		case KAGG_ACTION__PAVG_FP:
+		case KAGG_ACTION__PSUM_FP32:
 		{
 			kagg_state__psum_fp_packed *r = (kagg_state__psum_fp_packed *) cv->data;
 
@@ -2236,9 +2289,21 @@ gt_stride(const scan_prog *prog)
  * its rows overflow (scan_exec_group_task), the session uses the table. The planner's estimate is no guide (PostgreSQL
  * estimates an expression such as a % 10 by the distinct values of a), it only sizes the table.
  */
+/* float aggregates (A10) are accumulated in order by the slot owners of gagg.slang / jgagg.slang, not with the atomics of gtab.slang */
+int
+scan_prog_has_float_agg(const scan_prog *prog)
+{
+	for (uint32_t a = 0; a < prog->nagg; a++)
+		if (prog->words[prog->words[11] + 4 * a] >= 6)
+			return 1;
+	return 0;
+}
+
 int
 scan_gtab_forced(const agg_state *st, const scan_prog *prog)
 {
+	if (scan_prog_has_float_agg(prog))
+		return 0;				/* (the planner offers float aggregates with at most SCAN_GROUP_KEYS_SHARED keys) */
 	static int	mode = -1;
 
 	if (mode < 0)
@@ -2428,6 +2493,13 @@ scan_gtab_switch_allowed(void)
 }
 
 /* the kernel of the session-wide table: arrow = 0 heap pages (gtab.slang), 1 an Arrow record batch (-DARROW_SRC) */
+gpu_vk_pipeline *
+scan_gtab_vm_pipe(scan_engine *eng, int arrow, int variant)
+{
+	return arrow ? &eng->agtab_pipe[variant] : &eng->gtab_pipe[variant];
+}
+
+/* creates the interpreter's pipeline (the specialized kernel, if there is one, does not need it) */
 int
 scan_gtab_pipeline(scan_engine *eng, int arrow, int variant, gpu_vk_pipeline **p_pipe, char *err, size_t errlen)
 {
@@ -2565,7 +2637,8 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	double		t0 = now_ms(), t1, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
 	uint32_t	hits0;
-	gpu_vk_pipeline *gpipe;
+	gpu_vk_pipeline *gpipe, *sp;
+	spec_shape	sh;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -2574,7 +2647,10 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	if (task->u.task.kds_src_iovec)
 		iovec = (const io_vector *)((const char *) task + task->u.task.kds_src_iovec);
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
-	if (scan_gtab_pipeline(eng, 0, variant, &gpipe, err, errlen) != 0)
+	gpipe = scan_gtab_vm_pipe(eng, 0, variant);
+	memset(&sh, 0, sizeof(sh));
+	sp = spec_pipe(eng, prog, SPEC_GTAB, 0, 0, NULL, &sh, gpipe);
+	if ((sp == gpipe || spec_check_enabled(eng)) && scan_gtab_pipeline(eng, 0, variant, &gpipe, err, errlen) != 0)
 		return -1;
 	if (scan_gtab_open(vk, session, prog, st, err, errlen) != 0)
 		return -1;
@@ -2647,7 +2723,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 				pc[1] = base | (mode << 28);
 				pc[2] = group_ppw(AGG_PAGES_PER_WG);
 				pc[3] = 4;
-				if (gpu_vk_dispatch(vk, gpipe, bufs, pc, groups, 1, 1, NULL) != 0)
+				if (spec_dispatch(eng, prog, SPEC_GTAB, &sh, gpipe, sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
 					goto done;
@@ -2847,7 +2923,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	 * Most rows found no slot in the workgroups' tables (many groups): the CPU would aggregate them one by one. Run the task
 	 * again on the session-wide table (gtab.slang) and keep using it. (The groups so far, if any, stay in the session's groups.)
 	 */
-	if (scan_gtab_switch_allowed())
+	if (scan_gtab_switch_allowed() && !scan_prog_has_float_agg(prog))
 	{
 		const uint32_t *flags = out + 4 + (size_t) ngroups_total * blk_words;
 		uint64_t	nov = 0, nhits = 0;
