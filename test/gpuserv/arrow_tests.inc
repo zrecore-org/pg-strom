@@ -163,6 +163,8 @@ for t in a1 a2 a3 p1; do
 	ajagg $t "NULL values from the inner side, duplicate keys" "select count(*), count(d.pay), sum(d.pay), min(d.pay), max(d.pay), avg(d.pay) from %T t join %D d on t.b = d.k"
 	ajagg $t "empty join result" "select count(*), count(d.pay), sum(d.pay), min(t.a), max(d.grp), avg(t.b) from %T t join %D d on t.b = d.k + 1000000"
 	ajagg $t "quals and FILTER on both sides" "select count(*) filter (where d.grp < 8), sum(t.b) filter (where t.a < 0), max(d.pay) filter (where t.e) from %T t join %D d on t.b = d.k where t.a > -9000"
+	ajagg $t "variance, corr and regr_slope over a join (A10)" "select round(var_pop(d.pay::float8)::numeric, 3), round(stddev(t.a::float8)::numeric, 5), round(corr(t.b::float8, d.pay::float8)::numeric, 8), round(regr_slope(d.pay::float8, t.a::float8)::numeric, 7), count(*) from %T t join %D d on t.b = d.k"
+	ajagg $t "variance and covariance over a join per group (A10)" "select d.grp, round(var_samp(t.a::float8)::numeric, 3), round(covar_pop(d.pay::float8, t.b::float8)::numeric, 2), count(*) from %T t join %D d on t.b = d.k group by 1 order by 1" "set pg_strom.gpupreagg_max_groups=100000;"
 	ajagg $t "sum beyond 64 bits" "select sum(t.c + 9000000000000000000), avg(d.pay + 9000000000000000000) from %T t join %D d on t.b = d.k"
 	ajagg $t "text qual on the Arrow side" "select count(*), sum(d.grp) from %T t join %D d on t.b = d.k where t.f like 'a%'"
 	ajagg $t "LEFT JOIN: count(*) against count(inner column)" "select count(*), count(d.grp), sum(d.grp), max(d.pay), sum(t.a) from %T t left join %D d on t.b = d.k + 20000"
