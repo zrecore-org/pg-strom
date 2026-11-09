@@ -64,9 +64,9 @@ ij=$($PSQL -d scantest -c "$CPU select count(*) from pg_gp o join pg_gz i on i.g
 # answer (rows or its own error), so the service's error is tested with pg_strom.gpu_error_fallback = off.
 for i in 1 2 3 4; do
 	e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpu_error_fallback=off; select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
-	g=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
-	c=$($PSQL -d scantest -c "$CPU select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
-	[ "$g" = "$c" ]; check "non-finite probe point $i: with the fallback the answer is the CPU's ($c)" $?
+	g=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tr '\n' ' ')
+	# the CPU cannot run a GiST join (its index clause has no CPU form): the service's error is kept as the detail
+	echo "$g" | grep -q 'non-finite' && echo "$g" | grep -q 'ERROR'; check "non-finite probe point $i: the default mode still reports the service's error (a GiST join has no CPU run)" $?
 check "non-finite probe point $i is an error" "$(echo "$e" | grep -q 'non-finite' ; echo $?)"
 done
 
@@ -94,7 +94,6 @@ gistjoin "after a rolled back delete" "$JQ"
 # walking the tree has a step limit; hitting it is an error, never a short result
 e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpu_error_fallback=off; set pg_strom.gpugist_max_steps=2; $JQ" 2>&1 | tail -1)
 check "step limit raises an error" "$(echo "$e" | grep -q 'ERROR' ; echo $?)"
-gistjoin "step limit hit: the CPU fallback returns the join's rows" "$JQ" "set pg_strom.gpugist_max_steps=2;"
 
 # inserts that split index pages while the join copies the index: in one snapshot the GPU join must still equal the CPU join (a
 # "kept changing" error asks for a retry and is not a wrong answer)
