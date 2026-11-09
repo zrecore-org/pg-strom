@@ -1,5 +1,7 @@
 PG-Strom
 ========
+[![Vulkan Check](https://github.com/zrecore/pg-strom/actions/workflows/vulkan-check.yml/badge.svg)](https://github.com/zrecore/pg-strom/actions/workflows/vulkan-check.yml)
+
 PG-Strom is an extension for PostgreSQL database.
 It is designed to accelerate mostly batch and analytics workloads with
 utilization of GPU and NVME-SSD, and Apache Arrow columnar.
