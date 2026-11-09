@@ -2150,7 +2150,7 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 			ovf_count = grouped ? out[ovf_base] : 0;
 			/* most rows found no slot (many groups): run the task again on the session-wide table (the first pass only: nothing
 			 * of this task is merged yet) */
-			if (grouped && first == 0 && ovf_count > ovf_cap && scan_gtab_switch_allowed())
+			if (grouped && first == 0 && ovf_count > ovf_cap && scan_gtab_switch_allowed() && !scan_prog_has_float_agg(prog))
 			{
 				st->nitems_raw -= nrows;
 				redo = 1;

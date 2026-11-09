@@ -44,6 +44,7 @@ static const uint AC_COUNT_COND = 2;
 static const uint AC_SUM        = 3;
 static const uint AC_MIN        = 4;
 static const uint AC_MAX        = 5;
+static const uint AC_FSUM       = 6;            // 6 float8 sum / avg, 7 min, 8 max, 9 sum(float4): fagg_acc()
 static const uint NONE_REG      = 0xffffffffu;
 static const uint COMMITTED     = 0x8000u;
 static const uint NO_SLOT       = 0xffffffffu;
@@ -111,6 +112,10 @@ void jgagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint a_cls[GA_NA];
     for (uint k = 0; k < GA_NA; k++)
         a_cls[k] = (k < naggs) ? prog[aggoff + 4 * k] : 0;
+    bool has_f = false;                             // some aggregate is a float8 sum, min or max (class >= AC_FSUM)
+    for (uint k = 0; k < GA_NA; k++)
+        if (a_cls[k] >= AC_FSUM)
+            has_f = true;
 
     // empty table
     for (uint s = tid; s < GA_C; s += SCAN_WG)

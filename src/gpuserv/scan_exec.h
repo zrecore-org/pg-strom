@@ -165,6 +165,7 @@ int		scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, c
 int		scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count);
 int		scan_gtab_forced(const agg_state *st, const scan_prog *prog);
 int		scan_gtab_switch_allowed(void);
+int		scan_prog_has_float_agg(const scan_prog *prog);	/* a float8 aggregate (class 6 - 9): the session-wide table (gtab) has no float accumulators */
 int		scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen);
 
 /*

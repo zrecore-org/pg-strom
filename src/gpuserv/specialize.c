@@ -461,7 +461,7 @@ gen_acc(gen_ctx *g, sbuf *o)
 	{
 		uint32_t	cls = w[aggoff + 4 * k], ra = w[aggoff + 4 * k + 1], rf = w[aggoff + 4 * k + 2];
 
-		if (cls < 1 || cls > 8 || (cls != 1 && reg_ok(g, ra)) || (rf != 0xffffffffu && reg_ok(g, rf)))
+		if (cls < 1 || cls > 9 || (cls != 1 && reg_ok(g, ra)) || (rf != 0xffffffffu && reg_ok(g, rf)))
 		{
 			gen_fail(g, "aggregate %u: unexpected class %u or register", k, cls);
 			return;

@@ -313,11 +313,11 @@ for s, m in SRC.items():
     if s == "gpucache":
         add(p + "agg.sum_numeric", "agg", "agg", "select a %% 5, sum(n), min(n), max(n) from %s group by 1" % t)
         add(p + "agg.minmax_float8", "agg", "agg", "select a %% 5, min(x), max(x) from %s group by 1" % t)
-        add(p + "agg.sum_float8", "agg", "agg", "select a %% 5, sum(x) from %s group by 1" % t)
+        add(p + "agg.sum_float8", "agg", "agg", "select a %% 5, round(sum(x)::numeric, 4) from %s group by 1" % t)   # a float8 sum of inexact values: the GPU adds in another order (A10), so rounded as the float tests do
         add(p + "join.key_numeric", "join", "join", "select t.id, d.grp from %s t join sdn2 d on t.n = d.kn" % t)
 # the Arrow table with float8 / dates / times
 add("src.arrow.types.agg_float8", "agg", "agg", "select g, count(*), sum(v), min(x), max(x) from at1 group by 1")
-add("src.arrow.types.agg_sum_float8", "agg", "agg", "select g, sum(x) from at1 group by 1")
+add("src.arrow.types.agg_sum_float8", "agg", "agg", "select g, round(sum(x)::numeric, 4) from at1 group by 1")   # (rounded: summation order)
 add("src.parquet.dim.join", "join", "join", "select t.i, d.grp from a1 t join adp d on t.b = d.k")
 add("src.arrow.dim.join_parquet_outer", "join", "join", "select t.i, d.grp from p1 t join ad d on t.b = d.k")
 # the heap fact table in the same shapes (baseline for the source rows above)

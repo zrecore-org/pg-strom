@@ -88,35 +88,13 @@ agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take groupi
 agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.composite_key | GROUP BY a row value or an array: not hashable on the device | by-design
 agg.group.array_key | GROUP BY a row value or an array: not hashable on the device | by-design
-agg.fn.sum.vf4* | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-srcfull.*.fn.sum.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.avg.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.min.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.max.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-srcfull.*.fn.max.vf4 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.sum.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.avg.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.min.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.max.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-srcfull.*.fn.sum.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-srcfull.*.fn.max.vf8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.sum_float_product | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.avg_filter_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.having_avg | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.multi_mix | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-src.gpucache.agg.sum_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-src.gpucache.agg.minmax_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-src.arrow.types.agg_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-src.arrow.types.agg_sum_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-aggjoin.type.sum_float8 | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-spatial.agg.sum_distance | float4/float8 aggregates (sum(float4); avg/min/max/sum(float8) and min/max(float4) with GROUP BY) are not device aggregates | gap:A10
-agg.fn.stddev_float8* | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
-agg.fn.stddev_int | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
-agg.fn.variance_int | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
-agg.fn.var_pop_float8 | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
-agg.fn.corr | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
-agg.fn.regr_slope | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
-agg.fn.covar_pop | variance / stddev / corr / regr_* / covar_*: no device transition function | gap:A10
+agg.fn.stddev_float8* | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
+agg.fn.stddev_int | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
+agg.fn.variance_int | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
+agg.fn.var_pop_float8 | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
+agg.fn.corr | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
+agg.fn.regr_slope | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
+agg.fn.covar_pop | variance / stddev / corr / regr_* / covar_*: no device transition function; the catalog's partial states (sum x, sum x^2) are not PostgreSQL's Youngs-Cramer float8_accum state, so they need new partial/combine/final functions first (A10 part 5 in the plan) | gap:A10
 agg.fn.sum.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.avg.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.min.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
@@ -161,6 +139,7 @@ agg.fn.mode* | ordered-set aggregate (percentile_*, mode) | by-design
 spatial.join.box_outer | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
 spatial.join.box_intersects_geom_outer | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
 spatial.join.distance_no_index | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
+spatial.agg.sum_distance | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
 spatial.join.geometry_equality | spatial join outside the GiST forms (geometry column as the outer operand, ST_Intersects/ST_Distance between columns, geometry = geometry) | gap:A13
 spatial.agg.semi | GpuPreAgg over a GiST semi join: the path is built and loses on cost | gap:A13
 spatial.agg.group_geometry | GROUP BY a geometry column or st_x(geom)::numeric | gap:A13
@@ -176,3 +155,4 @@ srcfull.parquet.group1.numeric | numeric (Decimal) column of an Arrow / Parquet 
 srcfull.parquet.group2.numeric | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
 srcfull.parquet.fn.sum.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
 srcfull.parquet.fn.max.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+agg.fn.multi_mix | aggregates without a device path in the same query: count(distinct), sum/min/max of a numeric whose scale is not fixed, bool_or (the float aggregates in it run on the GPU) | gap:A14
