@@ -1690,7 +1690,18 @@ pgstromExecInitTaskState(CustomScanState *node, EState *estate, int eflags)
 		istate->depth = dindex + 1;
 		istate->join_type = pp_inner->join_type;
 
-		istate->join_quals = __execInitCpuFallbackQuals(pp_inner->join_quals, pts);
+		/*
+		 * A GiST-index join: the index clause is not part of join_quals (the device walks the index), but the CPU
+		 * has no index walk in its nest loop and must test it, or the CPU run of the join (A14, and the poison
+		 * records) would pair every outer row with every inner row.
+		 */
+		{
+			List	   *jquals = pp_inner->join_quals;
+
+			if (OidIsValid(pp_inner->gist_index_oid) && pp_inner->gist_clause)
+				jquals = lappend(list_copy(jquals), pp_inner->gist_clause);
+			istate->join_quals = __execInitCpuFallbackQuals(jquals, pts);
+		}
 		istate->other_quals = __execInitCpuFallbackQuals(pp_inner->other_quals, pts);
 
 		foreach (cell, pp_inner->hash_outer_keys)
