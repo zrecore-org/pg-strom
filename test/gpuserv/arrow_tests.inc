@@ -107,7 +107,7 @@ for t in a1 a2 a3 p1; do
 	aagg_any $t "timestamp key" "select ts, count(*) from %T where a > 9995 group by 1 order by 1"
 	aagg_cpu $t "text key stays on the CPU" "select f, count(*) from %T group by f order by 1 limit 20"
 	aagg $t "sum and min of a float4 column cast to float8 (exact in a double)" "select count(*), sum(d::float8), min(d::float8), max(d::float8) from %T where a > 9000"
-	aagg_cpu $t "sum(float4) stays on the CPU (it adds in float4)" "select count(*), sum(d) from %T where a > 9000"
+	aagg $t "sum(float4): every addition rounded to float4 (A10)" "select count(*), sum(d) from %T where a > 9000"
 done
 aagg a1 "parallel workers" "select count(*), sum(b), min(c), max(a), avg(b) from %T where a > -5000" "$APAR"
 aagg a1 "GROUP BY, parallel workers" "select a % 10 as k, count(*), sum(b), max(c) from %T group by 1 order by 1" "$APAR"
