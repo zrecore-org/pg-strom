@@ -4141,8 +4141,8 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		*p_len = resp->length;
 	}
 	if (eng->trace)
-		fprintf(stderr, "pgstrom-gpuserv: join task: %u pages, pages-in %.1f ms, gpu %.1f ms, results %.1f ms (%u matches)\n",
-				npages, t1 - t0, t2 - t1, now_ms() - t2, nmatch);
+		fprintf(stderr, "pgstrom-gpuserv: join task: kernel tier %d, %u pages, pages-in %.1f ms, gpu %.1f ms, results %.1f ms (%u matches)\n",
+				scan_join_tier(prog->feat), npages, t1 - t0, t2 - t1, now_ms() - t2, nmatch);
 	free(pz);
 	free(rck.buf);
 	gpu_vk_buffer_destroy(vk, &bprog);
