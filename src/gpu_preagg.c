@@ -518,7 +518,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -527,7 +527,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -536,7 +536,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -545,7 +545,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -581,7 +581,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -593,7 +593,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -602,7 +602,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -611,7 +611,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -620,7 +620,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -656,7 +656,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_SAMP,
 	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -668,7 +668,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP,
@@ -677,7 +677,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -686,7 +686,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -695,7 +695,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -731,7 +731,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:stddev_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fstddev_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FSTDDEV_POP,
 	 true,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -743,7 +743,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -752,7 +752,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -761,7 +761,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -770,7 +770,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -806,7 +806,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -818,7 +818,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -827,7 +827,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -836,7 +836,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -845,7 +845,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMPF,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -881,7 +881,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_samp(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_samp(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_SAMP,
 	 true,
 	 KSORT_KEY_KIND__PVARIANCE_SAMP
@@ -893,7 +893,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -902,7 +902,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -911,7 +911,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -920,7 +920,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_POP,
 	 false,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -956,7 +956,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:var_pop(bytea)",
 	 "s:pvariance(float8)",
 	 "s:fvar_pop(bytea)",
-	 KAGG_ACTION__STDDEV,
+	 KAGG_ACTION__STDDEV_NUM,
 	 KAGG_FINAL__FVAR_POP,
 	 true,
 	 KSORT_KEY_KIND__PVARIANCE_POP
@@ -1022,7 +1022,7 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 "s:regr_count(bytea)",
 	 "s:pcovar(float8,float8)",
 	 "s:fregr_count(bytea)",
-	 KAGG_ACTION__COVAR,
+	 KAGG_ACTION__COVAR_CNT,
 	 KAGG_FINAL__FREGR_COUNT,
 	 false,
 	 KSORT_KEY_KIND__PCOVAR_COUNT
@@ -1250,11 +1250,13 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			break;
 
 		case KAGG_ACTION__STDDEV:
+		case KAGG_ACTION__STDDEV_NUM:
 			func_nargs = 1;
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__stddev_packed);
 			break;
 		case KAGG_ACTION__COVAR:
+		case KAGG_ACTION__COVAR_CNT:
 			func_nargs = 2;
 			type_oid = BYTEAOID;
 			partfn_bufsz = sizeof(kagg_state__covar_packed);
@@ -2801,6 +2803,8 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 				case KAGG_ACTION__PSUM_FP:
 				case KAGG_ACTION__PAVG_FP:
 				case KAGG_ACTION__PSUM_FP32:
+				case KAGG_ACTION__STDDEV:
+				case KAGG_ACTION__COVAR:
 					has_float = true;
 					break;
 				default:

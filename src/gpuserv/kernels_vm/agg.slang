@@ -40,6 +40,9 @@ static const uint AC_MAX        = 5;
 static const uint AC_FSUM       = 6;            // float8 sum / avg, min, max (A10): see fagg_acc()
 static const uint AC_FMIN       = 7;
 static const uint AC_FMAX       = 8;
+static const uint AC_VAR        = 10;           // variance / stddev (n, Sx, Sxx), regr head (11) + continuation (12): see vs_acc()
+static const uint AC_REG        = 11;
+static const uint AC_VCONT      = 12;
 static const uint NONE_REG      = 0xffffffffu;
 
 groupshared uint    sh_h[SCAN_WG];
@@ -143,6 +146,35 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
                 if (rf != NONE_REG && (regs[rf].isnull != 0 || regs[rf].v == 0))
                     continue;                           // FILTER (WHERE ...) is not true
+#ifndef VM_NO_F8
+                if (cls >= AC_VAR)
+                {
+                    if (cls == AC_VCONT)
+                        continue;
+                    bool isreg = (cls == AC_REG);
+                    uint rb = isreg ? prog[aggoff + 4 * (k + 1) + 1] : ra;         // the Y register of regr(Y, X)
+                    if (regs[ra].isnull != 0 || (isreg && regs[rb].isnull != 0))
+                        continue;
+                    VS s;
+                    s.n = an[k]; s.a0 = aa[k]; s.b0 = ab[k];
+                    s.a1 = 0; s.b1 = 0; s.a2 = 0;
+                    if (isreg)
+                    {
+                        s.a1 = aa[k + 1]; s.b1 = ab[k + 1]; s.a2 = aa[k + 2];
+                    }
+                    uint ae = 0u;
+                    s = vs_acc(cls, s, uint64_t(regs[ra].v), uint64_t(regs[rb].v), ae);
+                    an[k] = s.n; aa[k] = s.a0; ab[k] = s.b0;
+                    if (isreg)
+                    {
+                        an[k + 1] = s.n; aa[k + 1] = s.a1; ab[k + 1] = s.b1;
+                        an[k + 2] = s.n; aa[k + 2] = s.a2;
+                    }
+                    if (ae != 0u)
+                        report_error(page, lp, ae);
+                    continue;
+                }
+#endif
                 if (cls == AC_COUNT_ANY)
                     an[k] += 1;
                 else if (regs[ra].isnull == 0)
@@ -200,6 +232,34 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint x = k * SCAN_WG + lid.x;
                 uint y = x + stride;
 
+#ifndef VM_NO_F8
+                if (cls >= AC_VAR)
+                {
+                    if (cls == AC_VCONT)
+                        continue;
+                    bool isreg = (cls == AC_REG);
+                    uint x1 = x + SCAN_WG, x2 = x + 2 * SCAN_WG;
+                    VS sa, sb;
+                    sa.n = sh_n[x]; sa.a0 = sh_a[x]; sa.b0 = sh_b[x]; sa.a1 = 0; sa.b1 = 0; sa.a2 = 0;
+                    sb.n = sh_n[y]; sb.a0 = sh_a[y]; sb.b0 = sh_b[y]; sb.a1 = 0; sb.b1 = 0; sb.a2 = 0;
+                    if (isreg)
+                    {
+                        sa.a1 = sh_a[x1]; sa.b1 = sh_b[x1]; sa.a2 = sh_a[x2];
+                        sb.a1 = sh_a[y + SCAN_WG]; sb.b1 = sh_b[y + SCAN_WG]; sb.a2 = sh_a[y + 2 * SCAN_WG];
+                    }
+                    uint ae = 0u;
+                    sa = vs_merge(cls, sa, sb, ae);
+                    sh_n[x] = sa.n; sh_a[x] = sa.a0; sh_b[x] = sa.b0;
+                    if (isreg)
+                    {
+                        sh_n[x1] = sa.n; sh_a[x1] = sa.a1; sh_b[x1] = sa.b1;
+                        sh_n[x2] = sa.n; sh_a[x2] = sa.a2;
+                    }
+                    if (ae != 0u)
+                        report_error(0u, 0u, ae);
+                    continue;
+                }
+#endif
                 if (cls >= AC_FSUM)
                 {
                     uint nx = sh_n[x];
