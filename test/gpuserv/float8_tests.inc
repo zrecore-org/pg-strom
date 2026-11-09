@@ -215,3 +215,97 @@ for t in $(f8part joinagg); do
 	GRPANY=0
 done
 GRPANY=0
+
+# variance / stddev / covar / corr / regr_* (A10 part 5). The device accumulates PostgreSQL's own transition state (float8_accum:
+# N, Sx, Sxx by the Youngs-Cramer update; float8_regr_accum: N, Sx, Sxx, Sy, Syy, Sxy), per thread in row order, merges the
+# threads and workgroups with float8_combine / float8_regr_combine, and the Agg node finalizes with PostgreSQL's own functions
+# (kernels_vm/vagg.inc; test/gpuserv/vagg_check.sh proves the arithmetic bit for bit against the server). The order of the rows
+# differs from a serial scan, so for inexact data the last bits can differ (as between PostgreSQL's own parallel workers): the
+# tests round to the digits that data supports, and use exactly representable data (multiples of 1/16, constants) where the
+# result is bit-equal in any order. xo / yo have a mean of 1e9 / 2e9 and a variance of 1/3 / 3: the sum-of-squares formula
+# (N * Sxx - Sx^2) of the earlier catalog loses every digit on them, Youngs-Cramer keeps them.
+echo "variance, stddev, covar, corr, regr (A10)"
+sql "create table f8_var as select i, (i % 5)::int4 as g, (i % 7)::int4 as g2, (i % 300)::int4 as g300,
+	(1e9 + (((i::int8 * 7919) % 2001) - 1000) / 1000.0)::float8 as xo,
+	(2e9 + 3.0 * (((i::int8 * 7919) % 2001) - 1000) / 1000.0 + (((i::int8 * 104729) % 1999) - 999) / 2000.0)::float8 as yo,
+	(((i::int8 * 31) % 10007) / 100.0 - 50)::float8 as xs,
+	((((i::int8 * 31) % 10007) / 100.0 - 50) * 0.7 + ((i * 17) % 101) / 10.0)::float8 as ys,
+	case when i % 11 = 0 then null else (((i::int8 * 31) % 10007) / 100.0 - 50)::float8 end as xn,
+	case when i % 13 = 0 then null else ((((i::int8 * 31) % 10007) / 100.0 - 50) * -0.4 + ((i * 17) % 101) / 10.0)::float8 end as yn,
+	case when i % 5 = 3 and i % 1000 = 3 then 'NaN'::float8 when i % 5 = 4 and i % 1000 = 4 then 'Infinity'::float8
+	     when i % 5 = 2 and i % 1000 = 2 then '-Infinity'::float8 else (((i::int8 * 31) % 10007) / 100.0 - 50)::float8 end as sp,
+	(((i::int8 * 31) % 10007) / 100.0 - 50)::float4 as k,
+	(((i * 37) % 1000) / 16.0)::float8 as dy,
+	3.25::float8 as c3
+	from generate_series(1, $F8ROWS) i"
+sql "analyze f8_var"
+VAR1="round(var_pop(xo)::numeric, 4), round(var_samp(xo)::numeric, 4), round(variance(xo)::numeric, 4), round(stddev_pop(xo)::numeric, 5), round(stddev_samp(xo)::numeric, 5), round(stddev(xo)::numeric, 5), count(xo)"
+COV1="round(covar_pop(yo, xo)::numeric, 3), round(covar_samp(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 6), round(regr_slope(yo, xo)::numeric, 5), round(regr_r2(yo, xo)::numeric, 6), round(regr_sxx(yo, xo)::numeric, 1), round(regr_syy(yo, xo)::numeric, 0), round(regr_sxy(yo, xo)::numeric, 0), round(regr_avgx(yo, xo)::numeric, 3), round(regr_avgy(yo, xo)::numeric, 3)"
+REG1="round(regr_slope(ys, xs)::numeric, 6), round(regr_intercept(ys, xs)::numeric, 5), round(regr_r2(ys, xs)::numeric, 8), round(regr_sxx(ys, xs)::numeric, 1), round(regr_syy(ys, xs)::numeric, 1), round(regr_sxy(ys, xs)::numeric, 1), round(regr_avgx(ys, xs)::numeric, 5), round(regr_avgy(ys, xs)::numeric, 5), round(corr(ys, xs)::numeric, 8), round(covar_pop(ys, xs)::numeric, 5), round(covar_samp(ys, xs)::numeric, 5)"
+if [ -n "$(f8part agg)" ]; then
+	echo "variance and covariance, table f8_var"
+	runagg f8_var "variance and stddev of values around 1e9 (cancellation-prone)" "select $VAR1 from %T"
+	runagg f8_var "covariance, correlation and regression of values around 1e9 and 2e9" "select $COV1 from %T"
+	runagg f8_var "regr_* and corr of ordinary values" "select $REG1 from %T"
+	runagg f8_var "variance, stddev of ordinary values" "select round(var_pop(xs)::numeric, 6), round(var_samp(xs)::numeric, 6), round(stddev(xs)::numeric, 7), round(stddev_pop(ys)::numeric, 7), count(*) from %T"
+	runagg f8_var "NULLs: a pair with a NULL argument is skipped" "select round(covar_pop(yn, xn)::numeric, 5), round(corr(yn, xn)::numeric, 8), round(regr_slope(yn, xn)::numeric, 7), round(regr_avgx(yn, xn)::numeric, 5), round(var_pop(xn)::numeric, 6), round(var_pop(yn)::numeric, 6), round(regr_syy(yn, xn)::numeric, 2) from %T"
+	runagg f8_var "NaN in the data gives NaN" "select var_pop(sp), stddev(sp), covar_pop(sp, xs), corr(xs, sp), regr_syy(sp, xs) from %T where g = 3"
+	runagg f8_var "Infinity in the data gives NaN" "select var_samp(sp), stddev_pop(sp), regr_slope(ys, sp), covar_samp(sp, ys) from %T where g = 4"
+	runagg f8_var "-Infinity in the data gives NaN" "select variance(sp), corr(sp, ys) from %T where g = 2"
+	runagg_any f8_var "data without specials in the same table (an OR in FILTER keeps the plan on the CPU)" "select round(var_pop(sp) filter (where g = 0 or g = 1)::numeric, 6), round(stddev(sp) filter (where g = 0 or g = 1)::numeric, 6), count(*) from %T"
+	runagg f8_var "one row: var_samp is NULL, var_pop is 0" "select var_samp(xo) filter (where i = 17), var_pop(xo) filter (where i = 17), stddev_samp(xo) filter (where i = 17), stddev_pop(xo) filter (where i = 17), covar_samp(yo, xo) filter (where i = 17), covar_pop(yo, xo) filter (where i = 17), corr(yo, xo) filter (where i = 17), regr_slope(yo, xo) filter (where i = 17), regr_sxx(yo, xo) filter (where i = 17), regr_avgx(yo, xo) filter (where i = 17) from %T"
+	runagg f8_var "one row with NaN" "select var_pop(sp) filter (where i = 3), corr(sp, xs) filter (where i = 3), covar_pop(sp, xs) filter (where i = 3), regr_sxx(sp, xs) filter (where i = 3) from %T"
+	runagg f8_var "two rows (rounded: the order of the two rows changes the last bits of non-dyadic data)" "select round(var_samp(xs) filter (where i = 17 or i = 18)::numeric, 9), round(var_pop(xs) filter (where i = 17 or i = 18)::numeric, 9), round(covar_samp(ys, xs) filter (where i = 17 or i = 18)::numeric, 9), round(corr(ys, xs) filter (where i = 17 or i = 18)::numeric, 9) from %T"
+	runagg f8_var "no row qualifies: NULL" "select var_pop(xs), stddev(xs), covar_pop(ys, xs), corr(ys, xs), regr_slope(ys, xs), regr_r2(ys, xs), regr_avgx(ys, xs), count(*) from %T where i < 0"
+	runagg f8_var "constant values: variance 0, correlation NULL" "select var_pop(c3), var_samp(c3), stddev(c3), covar_pop(c3, c3), corr(c3, xs), regr_slope(c3, xs), regr_r2(xs, c3), regr_sxx(c3, c3) from %T"
+	runagg f8_var "multiples of 1/16 and constants: exact in any order" "select regr_avgx(dy, dy), regr_avgy(dy, dy), covar_pop(c3, c3), var_pop(c3) from %T"
+	runagg f8_var "FILTER" "select round(var_pop(xo) filter (where i % 3 = 0)::numeric, 4), round(corr(yo, xo) filter (where i % 4 = 1)::numeric, 6), round(stddev(xs) filter (where g = 2)::numeric, 7), round(covar_pop(ys, xs) filter (where false)::numeric, 3) from %T"
+	runagg f8_var "a qual" "select round(var_pop(xo)::numeric, 4), round(regr_slope(yo, xo)::numeric, 5), count(*) from %T where i % 7 = 1 and xs > 0"
+	runagg f8_var "float4 arguments" "select round(variance(k)::numeric, 5), round(stddev_pop(k)::numeric, 6), round(corr(k, ys)::numeric, 8), round(regr_slope(ys, k)::numeric, 7), round(covar_pop(k, k)::numeric, 5) from %T"
+	runagg f8_var "computed arguments" "select round(var_pop(xs * 2 + 1)::numeric, 5), round(covar_pop(xs, ys * 3 - xs)::numeric, 4), round(corr(xs + ys, xs - ys)::numeric, 8) from %T where i % 5 = 2"
+	runagg_any f8_var "variance and stddev of integers stay on the CPU (exact numeric state) and agree" "select var_pop(g2), stddev(g2), variance(g) from %T"
+	runagg f8_var "variance together with sum, count, min and max" "select count(*), round(sum(xs)::numeric, 3), min(xo), max(yo), round(var_pop(xs)::numeric, 6), round(corr(ys, xs)::numeric, 8), round(avg(ys)::numeric, 6) from %T"
+	runagg f8_var "four regression aggregates at once (twelve accumulators)" "select round(regr_slope(ys, xs)::numeric, 6), round(regr_intercept(ys, xs)::numeric, 5), round(corr(yn, xn)::numeric, 8), round(covar_pop(yo, xo)::numeric, 3) from %T"
+	runagg_any f8_var "regr_count stays on the CPU" "select regr_count(ys, xs), regr_count(yn, xn) from %T"
+	runerr_agg f8_1 "variance of finite values that overflows" "select var_pop(z) from %T where z = 1.7976931348623157e308 or z = -1.7976931348623157e308" "value out of range: overflow"
+	runerr_agg f8_1 "covariance of finite values that overflows" "select covar_pop(z, z) from %T where z = 1.7976931348623157e308 or z = -1.7976931348623157e308" "value out of range: overflow"
+fi
+if [ -n "$(f8part agg)" ]; then
+	echo "variance and covariance with GROUP BY, table f8_var"
+	rungrp f8_var "variance, stddev around 1e9 per group" "select g, round(var_pop(xo)::numeric, 4), round(var_samp(xo)::numeric, 4), round(stddev(xo)::numeric, 5), round(stddev_pop(xo)::numeric, 5), count(xo) from %T group by 1"
+	rungrp f8_var "covariance, correlation and regression around 1e9 and 2e9 per group" "select g2, round(covar_pop(yo, xo)::numeric, 3), round(covar_samp(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 6), round(regr_slope(yo, xo)::numeric, 5), round(regr_r2(yo, xo)::numeric, 6), round(regr_sxx(yo, xo)::numeric, 1), round(regr_avgx(yo, xo)::numeric, 3) from %T group by 1"
+	rungrp f8_var "regr_* of ordinary values per group" "select g, round(regr_slope(ys, xs)::numeric, 6), round(regr_intercept(ys, xs)::numeric, 5), round(regr_r2(ys, xs)::numeric, 8), round(regr_sxy(ys, xs)::numeric, 1), round(corr(ys, xs)::numeric, 8), round(regr_avgy(ys, xs)::numeric, 5) from %T group by 1"
+	rungrp f8_var "NULL pairs per group" "select g2, round(covar_pop(yn, xn)::numeric, 5), round(corr(yn, xn)::numeric, 8), round(var_pop(xn)::numeric, 6), round(var_samp(yn)::numeric, 6) from %T group by 1"
+	rungrp f8_var "NaN and Infinity per group (groups 2, 3 and 4 have them)" "select g, round(var_pop(sp)::numeric, 6), round(stddev(sp)::numeric, 6), round(corr(sp, xs)::numeric, 9), round(covar_pop(xs, sp)::numeric, 6) from %T group by 1"
+	
+	rungrp f8_var "FILTER per group" "select g, round(var_pop(xo) filter (where i % 3 = 0)::numeric, 4), round(corr(yo, xo) filter (where i % 4 = 1)::numeric, 6), round(var_samp(xs) filter (where g2 = 2)::numeric, 6) from %T group by 1"
+	rungrp f8_var "groups of one row and of two rows, and groups with no qualifying row" "select i / 2, round(var_samp(xs)::numeric, 8), round(var_pop(xs)::numeric, 8), round(covar_pop(ys, xs)::numeric, 8), round(corr(ys, xs)::numeric, 9), var_samp(xs) filter (where i % 2 = 0), var_pop(xs) filter (where i % 2 = 0), covar_samp(ys, xs) filter (where i % 2 = 1 and i < 0) from %T group by 1"
+	rungrp f8_var "groups with no qualifying row" "select g, var_pop(xs) filter (where false), corr(ys, xs) filter (where i < 0), round(var_pop(xo)::numeric, 4) from %T group by 1"
+	rungrp f8_var "multiples of 1/16 in groups of two (exact in any order)" "select i / 2, var_pop(dy), var_samp(dy), covar_pop(dy, dy), regr_sxy(dy, dy), regr_avgx(dy, dy) from %T group by 1"
+	rungrp f8_var "constants per group" "select g, var_pop(c3), stddev(c3), corr(c3, xs), regr_slope(xs, c3), covar_samp(c3, c3) from %T group by 1"
+	rungrp f8_var "two group keys" "select g, g2, round(var_pop(xs)::numeric, 5), round(corr(ys, xs)::numeric, 8) from %T group by 1, 2 order by 1, 2"
+	rungrp f8_var "more groups than the table holds (overflow rows aggregated by the service)" "select g300, round(var_pop(xo)::numeric, 4), round(covar_pop(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 5), round(stddev_samp(xs)::numeric, 6) from %T group by 1"
+	rungrp f8_var "variance next to other float8 and integer aggregates" "select g, count(*), round(sum(xs)::numeric, 3), min(xo), max(yo), round(var_pop(xs)::numeric, 6), round(regr_slope(ys, xs)::numeric, 6), round(avg(xs)::numeric, 6) from %T group by 1"
+	rungrp f8_var "float4 arguments per group" "select g, round(variance(k)::numeric, 5), round(corr(k, ys)::numeric, 8) from %T group by 1"
+	GRPANY=1
+	rungrp f8_var "variance of integers per group (CPU)" "select g, var_pop(g2), stddev(g300) from %T group by 1"
+	GRPANY=0
+	runerr_agg f8_1 "variance overflows in a group" "select g5, var_pop(z) from %T where z = 1.7976931348623157e308 or z = -1.7976931348623157e308 group by 1" "value out of range: overflow"
+	runerr_agg f8_1 "covariance overflows in a group" "select g5, covar_samp(z, z) from %T where z = 1.7976931348623157e308 or z = -1.7976931348623157e308 group by 1" "value out of range: overflow"
+fi
+echo "variance and covariance, 1,000,000 rows"
+sql "alter table f8_big add column xo float8, add column yo float8"
+sql "update f8_big set xo = (1e9 + (((i::int8 * 7919) % 2001) - 1000) / 1000.0)::float8, yo = (2e9 + 3.0 * (((i::int8 * 7919) % 2001) - 1000) / 1000.0 + (((i::int8 * 104729) % 1999) - 999) / 2000.0)::float8"
+sql "vacuum analyze f8_big"
+runagg f8_big "variance, covariance and regression of values around 1e9, ungrouped" "select round(var_pop(xo)::numeric, 4), round(stddev_samp(xo)::numeric, 5), round(covar_pop(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 6), round(regr_slope(yo, xo)::numeric, 5), round(var_samp(x)::numeric, 5), round(corr(x, w)::numeric, 7) from %T"
+rungrp f8_big "variance and covariance per group" "select g, round(var_pop(xo)::numeric, 4), round(covar_samp(yo, xo)::numeric, 3), round(corr(yo, xo)::numeric, 6), round(stddev(x)::numeric, 5), round(regr_slope(w, x)::numeric, 8) from %T group by 1 order by 1"
+rungrp f8_big "300 groups (above the table capacity)" "select g2, round(var_pop(xo)::numeric, 3), round(corr(yo, xo)::numeric, 5), round(regr_slope(w, x)::numeric, 7) from %T group by 1 order by 1"
+echo "variance and covariance over a join"
+for t in $(f8part joinagg); do
+	rungrp $t "variance and covariance over a join" "select round(var_pop(d.v)::numeric, 5), round(stddev(t.x)::numeric, 5), round(corr(t.x, d.v)::numeric, 8), round(covar_pop(t.y, d.u)::numeric, 5), round(regr_slope(d.v, t.x)::numeric, 7), count(*) from %T t join f8_dim d on t.b = d.k" "$JOINSET"
+	rungrp $t "variance over a join with a FILTER and a float8 qual" "select round(var_samp(d.v) filter (where d.grp < 3)::numeric, 5), round(corr(t.y, t.x)::numeric, 8) from %T t join f8_dim d on t.b = d.k where t.x > d.v" "$JOINSET"
+	rungrp $t "variance and covariance over a join per group" "select d.grp, round(var_pop(d.v)::numeric, 5), round(stddev(t.x)::numeric, 5), round(corr(t.x, d.v)::numeric, 8), round(covar_samp(t.y, d.u)::numeric, 5), count(*) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
+	GRPANY=1
+	rungrp $t "variance over a join, many groups (overflow rows)" "select d.k, round(var_pop(t.x)::numeric, 3), round(corr(t.x, d.v)::numeric, 5), round(covar_pop(t.x, d.v)::numeric, 3) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
+	GRPANY=0
+done

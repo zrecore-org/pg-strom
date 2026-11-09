@@ -62,7 +62,8 @@ typedef struct scan_prog
 	int				nagg;			/* number of aggregates (not counting key columns) */
 	int				nkeys;			/* GROUP BY keys (0: aggregation without GROUP BY) */
 	uint16_t		agg_action[SCAN_AGG_MAX];	/* KAGG_ACTION__* of each output column */
-	int8_t			agg_of_col[SCAN_AGG_MAX];	/* output column -> aggregate index, or -1 */
+	int8_t			agg_of_col[SCAN_AGG_MAX];	/* output column -> aggregate index (its first accumulator), or -1 */
+	uint16_t		agg_ent_action[SCAN_AGG_MAX];	/* accumulator -> KAGG_ACTION__* of its output column; 0xffff: the continuation of the one before (covar, corr, regr_* use three) */
 	int8_t			key_of_col[SCAN_AGG_MAX];	/* output column -> key index, or -1 */
 	/* numeric aggregates / keys: the scale the plan derived (every row must have it), or -1 */
 	int16_t			agg_scale[SCAN_AGG_MAX];

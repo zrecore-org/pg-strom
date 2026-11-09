@@ -23,6 +23,9 @@
 #define SCANVM_OP(n, v) static const uint SOP_##n = v;
 #include "scan_vm_ops.inc"
 #include "f64_soft.inc"         // A10: float8 in 64-bit integer arithmetic (the device has no fp64)
+#ifndef VM_NO_F8
+#include "vagg.inc"             // A10: PostgreSQL's float8_accum / float8_regr_accum / ..._combine on it (variance, stddev, covar, corr, regr_*)
+#endif
 
 #ifndef VM_MAX_REGS
 #define VM_MAX_REGS 32
@@ -1410,6 +1413,98 @@ uint fagg_merge(uint cls, uint n2, int64_t a2, inout uint n, inout int64_t a)
     n = 1u;
     return 0u;
 }
+
+#ifndef VM_NO_F8
+// variance / stddev / covar / corr / regr_* (A10): classes 10 (var: one aggregate entry holds n, Sx = a0, Sxx = b0 of float8_accum),
+// 11 (regr head: the same for X, plus the entries k + 1 = (n, Sy, Syy) and k + 2 = (n, Sxy) of float8_regr_accum) and 12 (the
+// continuation entries, which the loops skip; the head updates them). The state of an entry is (n, a, b) as in every class: the record
+// format of the kernels is unchanged. A row adds with vs_acc (the row's value order is the serial order of a thread, or of the
+// slot's owner), partials merge with vs_merge (float8_combine / float8_regr_combine). err: SOP_ERR_FLTOVER << 16, as float8pl.
+struct VS
+{
+    uint    n;
+    int64_t a0;
+    int64_t b0;
+    int64_t a1;
+    int64_t b1;
+    int64_t a2;
+};
+
+[noinline] VS vs_acc(uint cls, VS s, uint64_t x, uint64_t y, inout uint err)
+{
+    VS r = s;
+    if (cls == 10u)
+    {
+        VAcc t;
+        t.n = uint64_t(s.n);
+        t.sx = uint64_t(s.a0);
+        t.sxx = uint64_t(s.b0);
+        t.err = 0u;
+        t = vacc_add(t, x);
+        r.n = uint(t.n);
+        r.a0 = int64_t(t.sx);
+        r.b0 = int64_t(t.sxx);
+        if (t.err != 0u)
+            err = SOP_ERR_FLTOVER << 16;
+    }
+    else
+    {
+        RAcc t;
+        t.n = uint64_t(s.n);
+        t.sx = uint64_t(s.a0);
+        t.sxx = uint64_t(s.b0);
+        t.sy = uint64_t(s.a1);
+        t.syy = uint64_t(s.b1);
+        t.sxy = uint64_t(s.a2);
+        t.err = 0u;
+        t = racc_add(t, y, x);
+        r.n = uint(t.n);
+        r.a0 = int64_t(t.sx);
+        r.b0 = int64_t(t.sxx);
+        r.a1 = int64_t(t.sy);
+        r.b1 = int64_t(t.syy);
+        r.a2 = int64_t(t.sxy);
+        if (t.err != 0u)
+            err = SOP_ERR_FLTOVER << 16;
+    }
+    return r;
+}
+
+[noinline] VS vs_merge(uint cls, VS a, VS b, inout uint err)
+{
+    VS r = a;
+    if (cls == 10u)
+    {
+        VAcc ta, tb;
+        ta.n = uint64_t(a.n); ta.sx = uint64_t(a.a0); ta.sxx = uint64_t(a.b0); ta.err = 0u;
+        tb.n = uint64_t(b.n); tb.sx = uint64_t(b.a0); tb.sxx = uint64_t(b.b0); tb.err = 0u;
+        ta = vacc_merge(ta, tb);
+        r.n = uint(ta.n);
+        r.a0 = int64_t(ta.sx);
+        r.b0 = int64_t(ta.sxx);
+        if (ta.err != 0u)
+            err = SOP_ERR_FLTOVER << 16;
+    }
+    else
+    {
+        RAcc ta, tb;
+        ta.n = uint64_t(a.n); ta.sx = uint64_t(a.a0); ta.sxx = uint64_t(a.b0);
+        ta.sy = uint64_t(a.a1); ta.syy = uint64_t(a.b1); ta.sxy = uint64_t(a.a2); ta.err = 0u;
+        tb.n = uint64_t(b.n); tb.sx = uint64_t(b.a0); tb.sxx = uint64_t(b.b0);
+        tb.sy = uint64_t(b.a1); tb.syy = uint64_t(b.b1); tb.sxy = uint64_t(b.a2); tb.err = 0u;
+        ta = racc_merge(ta, tb);
+        r.n = uint(ta.n);
+        r.a0 = int64_t(ta.sx);
+        r.b0 = int64_t(ta.sxx);
+        r.a1 = int64_t(ta.sy);
+        r.b1 = int64_t(ta.syy);
+        r.a2 = int64_t(ta.sxy);
+        if (ta.err != 0u)
+            err = SOP_ERR_FLTOVER << 16;
+    }
+    return r;
+}
+#endif
 
 // PostGIS (A11): a geometry register is a string register over a GSERIALIZED payload (v1 and v2, xpu_postgis.h).
 // The 2D float box of a geometry as gserialized_datum_get_box2df_p() makes it: the cached box if there is one, the
