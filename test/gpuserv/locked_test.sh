@@ -86,6 +86,13 @@ PKGLIB=$("$PG_CONFIG" --pkglibdir)
 # Kernels whose SPIR-V changed with this build are compiled by the driver once, here, instead of at the first query
 # of the test (PREWARM=off skips it; the service keeps the result in its pipeline cache file).
 case "$TEST" in perf_bench.sh) ;; *) PREWARM_FOR=$(basename "$TEST") sh "$TREE/test/gpuserv/prewarm_kernels.sh" "$TREE" "${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv}" ;; esac
+# The installed module (and service) is shared with everybody who runs "make install" without this lock, and the prewarm above
+# can take hours behind cold compiles: put this tree's module back (by rename: a copy over a loaded dylib breaks its signature)
+# if it was overwritten meanwhile.
+if ! cmp -s "$TREE/src/pg_strom.dylib" "$PKGLIB/pg_strom.dylib"; then
+	echo "locked_test: the installed pg_strom module was replaced by another install; putting $TREE's back"
+	cp "$TREE/src/pg_strom.dylib" "$PKGLIB/pg_strom.dylib.new" && mv -f "$PKGLIB/pg_strom.dylib.new" "$PKGLIB/pg_strom.dylib"
+fi
 case "$TEST" in */*) SCRIPT=$TREE/$TEST;; *) SCRIPT=$TREE/test/gpuserv/$TEST;; esac
 
 # Where the throwaway cluster goes (an explicit ROOT is used as is and never removed). The local drive is nearly
