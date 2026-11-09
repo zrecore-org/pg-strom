@@ -23,6 +23,24 @@
 #define SCANVM_OP(n, v) static const uint SOP_##n = v;
 #include "scan_vm_ops.inc"
 #include "f64_soft.inc"         // A10: float8 in 64-bit integer arithmetic (the device has no fp64)
+// Geometry groups (R15): VM_GEOM_MASK says which geometry instructions this kernel interprets (the host picks, per program, the
+// smallest kernel tier that has them: scan_caps.h SCAN_FEAT_G_*). VM_NO_GEOM is the empty mask, the default is all of them.
+#define VM_G_BOX   1
+#define VM_G_PIP   2
+#define VM_G_DW    4        // ST_DWithin of two points
+#define VM_G_WALK  8        // ST_DWithin / ST_3DDWithin / ST_Distance with a line, polygon or multi-geometry operand (all three of them, points too)
+#define VM_G_ZM    16
+#define VM_G_FLAG  32
+#define VM_G_LEN   64
+#define VM_G_DW3   128      // ST_3DDWithin of two points
+#define VM_G_DIST  256      // ST_Distance / ST_3DDistance of two points
+#ifdef VM_NO_GEOM
+#undef VM_GEOM_MASK
+#define VM_GEOM_MASK 0
+#endif
+#ifndef VM_GEOM_MASK
+#define VM_GEOM_MASK 511
+#endif
 
 #ifndef VM_MAX_REGS
 #define VM_MAX_REGS 32
@@ -1825,12 +1843,9 @@ uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             uint64_t q = f64_sqr_add(dx, f64_mul(dy, dy));
             if (f64_nonfinite(q))
                 return SOP_RECHECK_CODE;
-#ifndef WITH_INNER
             // PostGIS starts its minimum at FLT_MAX: a distance beyond it is never seen (ST_DWithin is true for a tolerance >= FLT_MAX, ST_Distance NULL)
-            // (not in the join kernels: any change there makes Metal compile them again, ~5 minutes each; probe: postgis/fltmax_probe.sql)
             if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
                 return SOP_RECHECK_CODE;
-#endif
             res = f64_le(f64_sqrt(q), tol);
         }
         else
@@ -2294,7 +2309,6 @@ uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[V
 // ST_DWithin forms need SOP_GDW_NP (the planner's calibration) and SOP_GDW_EXACT; PostGIS decides them as "distance <= tolerance" with the distance of
 // ST_Distance / ST_3DDistance (lwgeom_mindistance2d_tolerance, initial value FLT_MAX), an empty geometry is false. The 3D forms measure lines, points
 // and multi-geometries of those that have a Z; a polygon is the backend's.
-#ifndef WITH_INNER
 uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     bool isdw = (op == SOP_GEOMDWITHIN || op == SOP_GEOM3DDW);
@@ -2328,10 +2342,8 @@ uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout
     {
         if (op == SOP_GEOM3DDW)
             return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
-#ifndef WITH_INNER
         if (!isdw)
             return vm_geom_dist(dst, ra, rb, k0, k1, regs);
-#endif
         return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
     }
     if (ta != 1u && tb != 1u)
@@ -2394,7 +2406,6 @@ uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout
     }
     return 0u;
 }
-#endif
 
 // ST_Length / ST_Length2D / ST_3DLength (k0 0 / 1) and ST_Perimeter / ST_Perimeter2D / ST_3DPerimeter (k0 2 / 3) of a geometry (GEOMLEN),
 // the same as geom_len() of cpu_vm.c. PostGIS adds up per geometry: a line's length is the sum of its segment lengths
@@ -2842,10 +2853,8 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
         uint64_t q = f64_sqr_add(dz, f64_sqr_add(dx, f64_mul(dy, dy)));
         if (f64_nonfinite(q))
             return SOP_RECHECK_CODE;
-#ifndef WITH_INNER
         if (f64_lt(0x47EFFFFFE0000000ull, f64_sqrt(q)))
             return SOP_RECHECK_CODE;                    // beyond FLT_MAX, PostGIS' initial distance (see vm_geom_dwithin)
-#endif
         res = f64_le(f64_sqrt(q), tol);                 // PostGIS' own double against the tolerance (calibrated by the planner)
     }
     else
@@ -3188,36 +3197,45 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
         if (op >= SOP_CMPD && op <= SOP_D2F)
             return vm_f8(op, dst, ra, rb, k0, k1, regs);
 #endif
-#ifndef VM_NO_GEOM
+#if (VM_GEOM_MASK & VM_G_BOX) != 0
         if (op == SOP_GEOMBOX)
             return vm_geom(op, dst, ra, rb, k0, k1, regs);
+#endif
+#if (VM_GEOM_MASK & VM_G_PIP) != 0
         if (op == SOP_GEOMPIP)
             return vm_geom_pip(dst, ra, rb, k0, k1, regs);
-#ifdef WITH_INNER
-        // A join kernel has no point-to-geometry walker: geometry is already 8.8 of its 9.6 MB, Metal's compiler takes 294 s for it and
-        // gave up (or ran past 900 s) with the walker added (plan, A13 slice 4). A non-point operand is a poison record there.
-        if (op == SOP_GEOMDWITHIN)
-            return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
-        // A13 slice 3: ST_3DDWithin(inner point, fused point, tolerance) of a GiST join (the only 3D function a join program runs)
-        if (op == SOP_GEOM3DDW)
-            return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
-#else
+#endif
+#if (VM_GEOM_MASK & VM_G_WALK) != 0
         // ONE call site for the three: the walker inside is a real function ([noinline]) and is called from vm_geom_dwdist only
         if (op == SOP_GEOMDWITHIN || op == SOP_GEOM3DDW || op == SOP_GEOMDIST)
             return vm_geom_dwdist(op, dst, ra, rb, k0, k1, regs);
+#else
+        // point and point only (a non-point operand is SOP_RECHECK_CODE / a poison record): each instruction is a tier of its own,
+        // their soft-float code is 1-2 MB of SPIR-V apiece (plan R15)
+#if (VM_GEOM_MASK & VM_G_DW) != 0
+        if (op == SOP_GEOMDWITHIN)
+            return vm_geom_dwithin(dst, ra, rb, k0, k1, regs);
+#endif
+#if (VM_GEOM_MASK & VM_G_DW3) != 0
+        if (op == SOP_GEOM3DDW)
+            return vm_geom_3ddwithin(dst, ra, rb, k0, k1, regs);
+#endif
+#if (VM_GEOM_MASK & VM_G_DIST) != 0
+        if (op == SOP_GEOMDIST)
+            return vm_geom_dist(dst, ra, rb, k0, k1, regs);
 #endif
 #endif
-#if !defined(WITH_INNER) && !defined(VM_NO_GEOM)    // the planner keeps these out of join programs; their soft-float code made Metal take minutes
+#if (VM_GEOM_MASK & VM_G_ZM) != 0
         if (op == SOP_GEOMZM)
             return vm_geom_zm(dst, ra, k0, regs);
+#endif
+#if (VM_GEOM_MASK & VM_G_FLAG) != 0
         if (op == SOP_GEOMFLAG)
             return vm_geom_flag(dst, ra, k0, regs);
-#ifndef VM_NO_GEOMDIST
 #endif
-#ifndef VM_NO_GEOMLEN
+#if (VM_GEOM_MASK & VM_G_LEN) != 0
         if (op == SOP_GEOMLEN)
             return vm_geom_len(dst, ra, k0, regs);
-#endif
 #endif
         if (op == SOP_NULLMRG)
         {
