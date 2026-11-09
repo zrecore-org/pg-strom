@@ -288,7 +288,8 @@ spec_dispatch(scan_engine *eng, scan_prog *prog, int kind, const spec_shape *sh,
 {
 	gpu_vk_ctx *vk = eng->vk;
 
-	if (!sp || sp == vm || !spec_check_enabled(eng))
+	/* the session table is updated by every dispatch: a check mode comparison would apply a task twice (the tests compare with the CPU) */
+	if (!sp || sp == vm || !spec_check_enabled(eng) || (kind & ~SPEC_ARROW) == SPEC_GTAB)
 		return gpu_vk_dispatch(vk, sp ? sp : vm, bufs, pc, groups, 1, 1, NULL);
 	{
 		gpu_vk_buffer *ob = bufs[1];			/* the kernels write only their output buffer */

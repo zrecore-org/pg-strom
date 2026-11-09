@@ -1616,6 +1616,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				/* A10: float8 (sum, avg, min, max): classes 6 - 8, without GROUP BY (checked below) */
 				case KAGG_ACTION__PSUM_FP:
 				case KAGG_ACTION__PAVG_FP:		cls = 6; break;
+				case KAGG_ACTION__PSUM_FP32:	cls = 9; break;
 				case KAGG_ACTION__PMIN_FP64:	cls = 7; break;
 				case KAGG_ACTION__PMAX_FP64:	cls = 8; break;
 				default:
@@ -1674,10 +1675,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			}
 		for (int k = 0; k < nagg && nkeys > 0; k++)
 			if (agg_tab[4 * k] >= 6)
-			{
-				fail(&b, "a float8 aggregate with GROUP BY is not implemented by the Vulkan service");
-				goto error;
-			}
+				b.feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
 		prog->agg_mode = 1;
 		prog->nagg = nagg;
 		prog->nkeys = nkeys;
@@ -1994,6 +1992,7 @@ join_agg_class(uint32_t action)
 		case KAGG_ACTION__PMAX_INT64:	return 5;
 		case KAGG_ACTION__PSUM_FP:
 		case KAGG_ACTION__PAVG_FP:		return 6;
+		case KAGG_ACTION__PSUM_FP32:	return 9;
 		case KAGG_ACTION__PMIN_FP64:	return 7;
 		case KAGG_ACTION__PMAX_FP64:	return 8;
 		default:
@@ -2138,7 +2137,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 	}
 	for (int k = 0; k < nagg && nkeys > 0; k++)
 		if (agg_tab[4 * k] >= 6)
-			return fail(b, "a float8 aggregate with GROUP BY is not implemented by the Vulkan service");
+			b->feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
 	prog->agg_mode = 1;
 	prog->nagg = nagg;
 	prog->nkeys = nkeys;

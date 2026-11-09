@@ -939,9 +939,17 @@ assign_custom_cscan_tlist(List *tlist_dev, pgstromPlanInfo *pp_info)
 		{
 			codegen_kvar_defitem *kvdef = lfirst(lc2);
 
+			/*
+			 * Only a plain column is loaded from the source tuple by the CPU fallback (resorigtbl/resorigcol name a
+			 * column of the relation of that depth).  A computed value that the kernel keeps in a variable of the
+			 * same depth (kv_resno is then its position in the target list, e.g. ST_Area(g) used as a qual and as
+			 * an aggregate argument) must be evaluated by the CPU: copying column number 'resno' of the base tuple
+			 * made the replay of rechecked rows count NULLs (A14).
+			 */
 			if (kvdef->kv_depth >= 0 &&
 				kvdef->kv_depth <= pp_info->num_inner_rels &&
 				kvdef->kv_resno != InvalidAttrNumber &&
+				IsA(kvdef->kv_expr, Var) &&
 				equal(tle->expr, kvdef->kv_expr))
 			{
 				kvdef->kv_fallback = tle->resno;

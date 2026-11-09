@@ -307,7 +307,9 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
             Reg  regs[VM_MAX_REGS];
             bool hit = false;
-#if defined(ARROW_SRC)
+#if defined(ARROW_SRC) && defined(SPEC_PROG)
+            hit = spec_arrow_eval_row(row0 + lp, page, lp, false, regs);
+#elif defined(ARROW_SRC)
             hit = arrow_eval_row(row0 + lp, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);
 #elif defined(SPEC_PROG)
             hit = spec_eval_row(pbase, page, lp, false, regs);

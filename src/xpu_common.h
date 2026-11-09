@@ -2386,6 +2386,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
 #define KAGG_ACTION__PSUM_INT64		502		/* <int8>,<int8+8> */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
+#define KAGG_ACTION__PSUM_FP32		505		/* <float8> - sum of float4 values, each addition rounded to float4 (A10, Vulkan service) */
 #define KAGG_ACTION__PSUM_NUMERIC	504		/* <int4>,<int8+8> - sum of values */
 #define KAGG_ACTION__PAVG_INT		601		/* <int4>,<int8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_INT64		602		/* <int8>,<int8+8> */

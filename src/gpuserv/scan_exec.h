@@ -158,6 +158,7 @@ XpuCommand *scan_exec_agg_final_sorted(scan_engine *eng, const XpuCommand *sessi
 									   const agg_state *st, size_t *p_len, char *err, size_t errlen);
 void	agg_state_free(agg_state *st);
 /* GROUP BY over many groups: the session-wide hash table (scan_exec.c, kernels_vm/gtab.slang) used by the Arrow task too */
+gpu_vk_pipeline *scan_gtab_vm_pipe(scan_engine *eng, int arrow, int variant);
 int		scan_gtab_pipeline(scan_engine *eng, int arrow, int variant, gpu_vk_pipeline **p_pipe, char *err, size_t errlen);
 int		scan_gtab_open(gpu_vk_ctx *vk, const kern_session_info *session, const scan_prog *prog, agg_state *st, char *err, size_t errlen);
 gpu_vk_buffer *scan_gtab_buffer(agg_state *st);
@@ -171,6 +172,7 @@ int		scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32
 								 const unsigned char *const *srcs);
 int		scan_gtab_forced(const agg_state *st, const scan_prog *prog);
 int		scan_gtab_switch_allowed(void);
+int		scan_prog_has_float_agg(const scan_prog *prog);	/* a float8 aggregate (class 6 - 9): the session-wide table (gtab) has no float accumulators */
 int		scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen);
 
 /*

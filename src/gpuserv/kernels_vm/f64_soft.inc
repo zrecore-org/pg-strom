@@ -775,6 +775,14 @@ F64S_FN uint64_t f64_arith(uint op, uint64_t a, uint64_t b)
 	return f64_div(a, b);
 }
 
+// sum(float4) (float4pl on operands widened to float8): the binary32 sum, widened back. The double sum of two float4 values is
+// exact (or its sticky bits stay below half an ulp of the binary32 result), so the second rounding is the correct one. The
+// overflow error is f64_arith_err(0, a, b, result).
+F64S_FN uint64_t f64_addf4(uint64_t a, uint64_t b)
+{
+	return f64_from_f32(f64_to_f32(f64_add(a, b), 0u));
+}
+
 // 0, or the error PostgreSQL raises for a op b = r: division by zero (not for a NaN dividend: NaN / 0 is NaN), then
 // overflow (an infinite result from finite operands), then underflow (mul, div: a zero result from non-zero operands)
 F64S_FN uint f64_arith_err(uint op, uint64_t a, uint64_t b, uint64_t r)
