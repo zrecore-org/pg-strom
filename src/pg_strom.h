@@ -546,6 +546,9 @@ struct pgstromTaskState
 	char			   *fallback_buffer;
 	TupleTableSlot	   *fallback_slot;		/* host-side kvars-slot */
 	List			   *fallback_proj;
+	List			   *fallback_pre_dst;	/* resno of computed, unreturned entries the base quals read */
+	List			   *fallback_pre_expr;	/* their ExprState */
+	MemoryContext		fallback_pre_cxt;
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */
 	bytea			   *kern_fallback_desc;

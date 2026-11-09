@@ -473,6 +473,43 @@ execCpuFallbackOneTuple(pgstromTaskState *pts,
 	{
 		Assert(l_state == 0 && !matched);
 		econtext->ecxt_scantuple = scan_slot;
+		/* the quals refer to computed entries of the scan tuple (an expression shared with an aggregate argument) */
+		if (pts->base_quals && pts->fallback_pre_expr != NIL)
+		{
+			ListCell   *lc1, *lc2;
+
+			ResetExprContext(econtext);
+			if (pts->fallback_pre_cxt)
+				MemoryContextReset(pts->fallback_pre_cxt);
+			forboth (lc1, pts->fallback_pre_dst,
+					 lc2, pts->fallback_pre_expr)
+			{
+				int			dst = lfirst_int(lc1) - 1;
+				bool		isnull;
+				Datum		datum = ExecEvalExpr((ExprState *) lfirst(lc2), econtext, &isnull);
+
+				if (!isnull)
+				{
+					Form_pg_attribute attr = TupleDescAttr(scan_slot->tts_tupleDescriptor, dst);
+
+					/* the quals reset the expression context: keep a by-reference value in a context of our own */
+					if (!attr->attbyval)
+					{
+						MemoryContext oldcxt;
+
+						if (!pts->fallback_pre_cxt)
+							pts->fallback_pre_cxt = AllocSetContextCreate(pts->css.ss.ps.state->es_query_cxt,
+																		  "CPU fallback computed values",
+																		  ALLOCSET_SMALL_SIZES);
+						oldcxt = MemoryContextSwitchTo(pts->fallback_pre_cxt);
+						datum = datumCopy(datum, attr->attbyval, attr->attlen);
+						MemoryContextSwitchTo(oldcxt);
+					}
+				}
+				scan_slot->tts_isnull[dst] = isnull;
+				scan_slot->tts_values[dst] = isnull ? 0 : datum;
+			}
+		}
 		if (pts->base_quals)
 		{
 			ResetExprContext(econtext);

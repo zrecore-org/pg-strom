@@ -59,10 +59,15 @@ rj=$($PSQL -d scantest -c "$CPU select count(*) from pg_gp o right join pg_gz i 
 ij=$($PSQL -d scantest -c "$CPU select count(*) from pg_gp o join pg_gz i on i.geom && st_makepoint(o.x, o.y)" | tail -1)
 [ "$fj" = "$((lj + rj - ij))" ]; check "full join: left + right - inner rows ($fj = $lj + $rj - $ij)" $?
 
-# a probe point with a non-finite coordinate is an error (the CPU answers by its own rules), never a wrong result
+# a probe point with a non-finite coordinate is an error (the CPU answers by its own rules), never a wrong result.
+# The service reports it; with the CPU fallback (A14, the default) the node re-runs on the CPU and returns the CPU's
+# answer (rows or its own error), so the service's error is tested with pg_strom.gpu_error_fallback = off.
 for i in 1 2 3 4; do
-	e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
-	check "non-finite probe point $i is an error" "$(echo "$e" | grep -q 'non-finite' ; echo $?)"
+	e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpu_error_fallback=off; select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
+	g=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
+	c=$($PSQL -d scantest -c "$CPU select count(*) from pg_gnf o join pg_gz i on i.geom && st_makepoint(o.x, o.y) where o.id = $i" 2>&1 | tail -1)
+	[ "$g" = "$c" ]; check "non-finite probe point $i: with the fallback the answer is the CPU's ($c)" $?
+check "non-finite probe point $i is an error" "$(echo "$e" | grep -q 'non-finite' ; echo $?)"
 done
 
 # the index has more than one level
@@ -87,8 +92,9 @@ $PSQL -d scantest -c "begin; delete from pg_gz where id % 2 = 0; $GPU $JOINSET $
 gistjoin "after a rolled back delete" "$JQ"
 
 # walking the tree has a step limit; hitting it is an error, never a short result
-e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpugist_max_steps=2; $JQ" 2>&1 | tail -1)
+e=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON set pg_strom.gpu_error_fallback=off; set pg_strom.gpugist_max_steps=2; $JQ" 2>&1 | tail -1)
 check "step limit raises an error" "$(echo "$e" | grep -q 'ERROR' ; echo $?)"
+gistjoin "step limit hit: the CPU fallback returns the join's rows" "$JQ" "set pg_strom.gpugist_max_steps=2;"
 
 # inserts that split index pages while the join copies the index: in one snapshot the GPU join must still equal the CPU join (a
 # "kept changing" error asks for a retry and is not a wrong answer)
