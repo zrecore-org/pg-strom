@@ -219,7 +219,7 @@ JAGGPAT='Full Outer Join Quals \[1\]'
 runjagg rkt "recheck: FULL JOIN" "select count(*), count(t.i), count(d.k), sum(d.grp) from %T t full join %D d on t.b = d.k and t.d * 2::float4 > 0::float4"
 runjagg rkt "recheck: FULL JOIN, GROUP BY" "select d.grp % 4, count(*), count(t.i), count(d.k) from %T t full join %D d on t.b = d.k and t.d * 2::float4 > 0::float4 group by 1 order by 1"
 JAGGPAT='GPU Join Quals \[1\]'
-runjagg_cpu s1 "float aggregate over a join" "select count(*), sum(t.d), max(d.grp) from %T t join %D d on t.b = d.k where t.a > 9000"
+runjagg s1 "float aggregate over a join (sum(float4) adds in float4 on the GPU too)" "select count(*), sum(t.d), max(d.grp) from %T t join %D d on t.b = d.k where t.a > 9000"
 runjagg_cpu s1 "text key" "select d.txt, count(*) from %T t join %D d on t.b = d.k group by 1 order by 1 limit 20"
 runjagg_cpu s1 "too many estimated groups" "select t.i, count(*) from %T t join %D d on t.b = d.k where t.i < 50000 group by 1 order by 1 limit 50" "set pg_strom.gpupreagg_max_groups=16;"
 JOINSET="$JAGGSET_SAVE"

@@ -460,6 +460,7 @@ typedef struct
 	Relation		gist_irel;
 	ExprState	   *gist_clause;
 	AttrNumber		gist_ctid_resno;
+	bool			gist_clause_failed;	/* the index clause has no CPU form: the CPU cannot run this join */
 	BlockNumber		gist_nblocks;	/* blocks of the index the buffer was sized for */
 	/*
 	 * CPU fallback (inner-loading)
@@ -555,6 +556,7 @@ struct pgstromTaskState
 	/* A14: runtime CPU fallback of the whole node */
 	bool				cpu_fallback_ok;	/* may continue on the CPU if the GPU service fails */
 	bool				cpu_mode;			/* the GPU session is gone, the CPU runs the rest */
+	char			   *cpu_mode_reason;	/* why (the service's message) */
 	bool				defer_fallback;		/* GpuPreAgg: hold back the recheck tuples until Final */
 	bool				drain_fallback;		/* GpuPreAgg: Final is done, emit them */
 	bool				final_is_last;		/* result of pgstromTaskStateEndScan() */
