@@ -154,3 +154,4 @@ srcfull.parquet.group1.numeric | numeric (Decimal) column of an Arrow / Parquet 
 srcfull.parquet.group2.numeric | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
 srcfull.parquet.fn.sum.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
 srcfull.parquet.fn.max.vn | numeric (Decimal) column of an Arrow / Parquet file: the scan stays a plain Foreign Scan, no GpuScan path | gap:A5
+agg.fn.multi_mix | aggregates without a device path in the same query: count(distinct), sum/min/max of a numeric whose scale is not fixed, bool_or (the float aggregates in it run on the GPU) | gap:A14
