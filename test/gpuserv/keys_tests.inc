@@ -138,5 +138,5 @@ rung "min, max of numeric(12,3), ungrouped" "select min(nc), max(nc), count(nc) 
 rung "min, max of numeric(12,3), grouped" "select n, min(nc), max(nc), count(*) from %T group by n" tno
 rung "min, max of numeric(12,3) with FILTER and a qual" "select n, min(nc) filter (where pay % 3 = 0), max(nc), sum(nc) from %T where pay > 100 group by n" tno
 rung "min, max of numeric(12,3) of a group without any value" "select n, min(nc) filter (where pay < 0), max(nc) filter (where pay < 0) from %T group by n" tno
-rung "min, max of numeric(12,3) by a text key" "select i % 7 as g, min(nc), max(nc) from %T group by 1" tno
+rung "min, max of numeric(12,3) with a qual on another column" "select n, count(*), min(nc), max(nc) from %T where pay % 2 = 0 group by n" tno
 echo
