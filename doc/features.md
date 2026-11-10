@@ -95,7 +95,7 @@ through** (copied from the source tuple on the CPU) and can appear in the result
 - Without GROUP BY (`count`, `sum`, `avg`, `min`, `max` of integers): 2.6x to 4x faster than 8-process
   PostgreSQL on a 16.8M-row table (plan A3).
 - With GROUP BY on **up to two** keys of type `int1/2/4/8`, `date`, `time`, `timestamp` or
-  `timestamptz`, or `numeric` (keys of type bool, float, text, varchar, bpchar and uuid, and three or more keys, are not offloaded). **GROUP BY is only worth it for up to about a hundred
+  `timestamptz`, `bool`, `numeric` (scans), `float4` / `float8` (-0 and +0 are one group, NaN is one group; the key is returned normalized, so a -0 prints as 0), text, varchar, bpchar and uuid (scans only, not over a join). Over a join up to **four** keys (integer, date/time, bool, float; the workgroup tables of `jgagg` hold four), over a scan up to four. **GROUP BY is only worth it for up to about a hundred
   groups:** with the specialized kernels (plan A6) 5.7x faster than 8-process PostgreSQL at 7 groups and 3.9x at
   100 (dense integer keys; a direct-mapped table), 3.5x for a GROUP BY over a join; with the interpreter
   alone 1.2x, 0.8x and 0.3x at 7, 100 and 1,000 groups (most rows overflow to a CPU path). The planner keeps
