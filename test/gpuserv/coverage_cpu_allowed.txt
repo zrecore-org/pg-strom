@@ -39,13 +39,7 @@ agg.fn.avg.vnu* | numeric aggregates without a device path: min/max(numeric), su
 agg.fn.min.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.max.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 srcfull.gpucache.fn.sum.vnu | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-srcfull.gpucache.fn.max.vnu | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-agg.fn.min.vn | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-agg.fn.max.vn | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-agg.fn.min.vn.ungrouped | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-agg.fn.max.vn.ungrouped | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.max_numeric_expr | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-srcfull.gpucache.fn.max.vn | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 aggjoin.type.sum_numeric | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.min_text* | min/max of text/varchar/bpchar: not device aggregates | gap:A6
 agg.fn.max_text* | min/max of text/varchar/bpchar: not device aggregates | gap:A6

@@ -97,7 +97,9 @@ sql "create table tno as select i,
 	(case i % 20 when 0 then null when 1 then 'NaN'::numeric when 2 then 123456789012345678901234567890::numeric when 3 then 1.5
 	 when 4 then 1.50 when 5 then 1.500 when 6 then -0.25 when 7 then 0 when 8 then 0.00 when 9 then 100 when 10 then 1e2::numeric
 	 else (i % 9)::numeric / 4 end) as nm,
-	(i % 4)::int4 as n, i::int8 as pay from generate_series(1, 6000) i"
+	(i % 4)::int4 as n, i::int8 as pay,
+	case when i % 17 = 0 then null else (((i * 37) % 20011 - 5000) / 8.0)::numeric(12,3) end as nc
+	from generate_series(1, 6000) i"
 sql "create table tni as select * from (values (1.5, 1), (1.50, 2), ('NaN'::numeric, 3), (123456789012345678901234567890::numeric, 4), (0.0, 5),
 	(-0.25, 6), (100.000, 7), (null::numeric, 8), (0.5, 9), (2.25, 10), (0.75, 11), (1.000, 12)) v(nm, w)"
 sql "analyze tno"; sql "analyze tni"

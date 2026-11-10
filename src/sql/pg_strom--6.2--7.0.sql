@@ -97,3 +97,57 @@ CREATE AGGREGATE pgstrom.max_bool(bytea)
   finalfunc = pgstrom.fminmax_final_bool,
   parallel = safe
 );
+
+---
+--- min / max of a numeric of a known scale: the partial state is the numeric in a bytea (A6)
+---
+CREATE FUNCTION pgstrom.pmin(numeric)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(numeric,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_numeric'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(numeric)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_numeric'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(numeric,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_numeric'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_trans_numeric(bytea,bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fmin_trans_numeric'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_trans_numeric(bytea,bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fmax_trans_numeric'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fminmax_final_numx(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_numx'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_numx(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_numx'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_numx(bytea)
+  RETURNS numeric
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_numx'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE AGGREGATE pgstrom.min_numx(bytea)
+(
+  sfunc = pgstrom.fmin_trans_numeric,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_numx,
+  parallel = safe
+);
+CREATE AGGREGATE pgstrom.max_numx(bytea)
+(
+  sfunc = pgstrom.fmax_trans_numeric,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_numx,
+  parallel = safe
+);

@@ -1632,9 +1632,18 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					cls = 3;
 					break;
 				case KAGG_ACTION__PMIN_INT32:
-				case KAGG_ACTION__PMIN_INT64:	cls = 4; break;
+				case KAGG_ACTION__PMIN_INT64:
 				case KAGG_ACTION__PMAX_INT32:
-				case KAGG_ACTION__PMAX_INT64:	cls = 5; break;
+				case KAGG_ACTION__PMAX_INT64:
+					cls = (d->action == KAGG_ACTION__PMIN_INT32 || d->action == KAGG_ACTION__PMIN_INT64) ? 4 : 5;
+					/*
+					 * min / max of a numeric of one known scale (the planner passes a numeric typmod: 38 << 16 and up; the
+					 * typmods of the temporal types are small): the extreme of the unscaled int64 values, every row must have
+					 * the scale (as a sum of numerics), and the reply carries the numeric
+					 */
+					if (d->typmod >= (int32_t) (38 << 16))
+						prog->agg_scale[nagg] = (int) (((uint32_t)(d->typmod - 4)) & 0x7ffU);
+					break;
 				/* A10: float8 (sum, avg, min, max): classes 6 - 8, without GROUP BY (checked below) */
 				case KAGG_ACTION__PSUM_FP:
 				case KAGG_ACTION__PAVG_FP:		cls = 6; break;

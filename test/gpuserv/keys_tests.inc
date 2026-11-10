@@ -133,4 +133,10 @@ runkj "numeric key: semi join" "select t.i from tno t where t.nm in (select d.nm
 runkj "numeric key: anti join" "select t.i from tno t where not exists (select 1 from tni d where d.nm = t.nm)"
 runkj "numeric key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tno t join tni d on t.nm = d.nm group by d.w"
 runkj "numeric key and an int key" "select t.i, d.w from tno t join tni d on t.nm = d.nm and t.n = d.w % 4"
+# ---- min / max of a numeric of a known scale (numeric(12,3)): the extreme of the unscaled values, the state is the numeric
+rung "min, max of numeric(12,3), ungrouped" "select min(nc), max(nc), count(nc) from %T" tno
+rung "min, max of numeric(12,3), grouped" "select n, min(nc), max(nc), count(*) from %T group by n" tno
+rung "min, max of numeric(12,3) with FILTER and a qual" "select n, min(nc) filter (where pay % 3 = 0), max(nc), sum(nc) from %T where pay > 100 group by n" tno
+rung "min, max of numeric(12,3) of a group without any value" "select n, min(nc) filter (where pay < 0), max(nc) filter (where pay < 0) from %T group by n" tno
+rung "min, max of numeric(12,3) by a text key" "select i % 7 as g, min(nc), max(nc) from %T group by 1" tno
 echo

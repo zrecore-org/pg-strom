@@ -2072,6 +2072,16 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 		{
 			kagg_state__pminmax_int64_packed *r = (kagg_state__pminmax_int64_packed *) cv->data;
 
+			if (scale >= 0)
+			{
+				/* min / max of a numeric of a known scale: the state is the numeric in a bytea (an empty one: no value) */
+				uint32_t	nl = acc->n ? scan_vm_numeric_encode(acc->val, (uint32_t) scale, cv->data + 4) : 0;
+				uint32_t	hdr = (4 + nl) << 2;
+
+				memcpy(cv->data, &hdr, 4);
+				cv->len = 4 + nl;
+				break;
+			}
 			if (!acc->n)
 			{
 				cv->isnull = 1;
