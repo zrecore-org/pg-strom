@@ -27,12 +27,38 @@ enum {
 #define SCAN_FEAT_F8	0x4			/* float8 (software binary64) */
 #define SCAN_FEAT_GEOM	0x8			/* geometry */
 #define SCAN_FEAT_ALL	0xf
+/*
+ * R15, geometry groups: bits 4 and up of prog->feat carry the geometry instruction groups a program uses (the same numbers as
+ * VM_G_* of kernels_vm/scan_common.slang, whose -DVM_GEOM_MASK picks the groups a kernel interprets), on top of SCAN_FEAT_GEOM.
+ * Only the join kernel families have geometry tiers (below): a geometry join program runs on the smallest kernel with its groups.
+ */
+#define SCAN_FEAT_GSHIFT	4
+#define SCAN_G_BOX		1
+#define SCAN_G_PIP		2
+#define SCAN_G_DW		4			/* ST_DWithin of two points */
+#define SCAN_G_WALK		8			/* ST_DWithin / 3DDWithin / Distance with a non-point operand (SOP_GDW_NP): includes DW, DW3, DIST */
+#define SCAN_G_ZM		16
+#define SCAN_G_FLAG		32
+#define SCAN_G_LEN		64
+#define SCAN_G_DW3		128			/* ST_3DDWithin of two points */
+#define SCAN_G_DIST		256			/* ST_Distance of two points */
 
 /* kernel tiers; the index into the engine's pipeline arrays is (register/aggregate variant) + (variants per tier) * tier */
 #define SCAN_TIER_FULL		0
 #define SCAN_TIER_LITE		1
 #define SCAN_TIER_NOGEOM	2
 #define SCAN_NTIERS			3
+/*
+ * The join kernel families (join, jagg, jgagg and their Arrow twins) have three more tiers, with the geometry groups a join program can
+ * use and numeric / float8 but no jsonb: "gpip" (point in polygon, about 4 MB of SPIR-V instead of the full tier's 9.8), "gdw" (ST_DWithin of
+ * points, 3.2 MB) and "gwalk" (the point-to-line / polygon / multi-geometry walker, 7.4 MB; the full join kernel has none). The tier of a
+ * program is scan_join_tier(); the pipeline arrays of these families have SCAN_NJTIERS tiers. The geometry tiers have no 8-register
+ * kernel (a program with 8 registers or fewer runs the 16-register one).
+ */
+#define SCAN_TIER_GPIP		3
+#define SCAN_TIER_GDW		4
+#define SCAN_TIER_GWALK		5
+#define SCAN_NJTIERS		6
 
 /* PGSTROM_GPUSERV_TIERS=full: every program runs on the full kernels (what the service did before the tiers; for measurements) */
 extern int scan_tier_full_only;
@@ -47,6 +73,44 @@ scan_feat_tier(uint32_t feat)
 	return (feat & SCAN_FEAT_GEOM) ? SCAN_TIER_FULL : SCAN_TIER_NOGEOM;
 }
 
+/* the VM_GEOM_MASK of a geometry tier of the join kernels (0: not one) */
+static inline int
+scan_join_tier_gmask(int tier)
+{
+	return tier == SCAN_TIER_GPIP ? SCAN_G_PIP : tier == SCAN_TIER_GDW ? SCAN_G_DW : tier == SCAN_TIER_GWALK ? SCAN_G_WALK : 0;
+}
+
+/* the kernel tier of a join program (join, jagg, jgagg, and the Arrow ones): the smallest kernel that has its groups */
+static inline int
+scan_join_tier(uint32_t feat)
+{
+	int			tier = scan_feat_tier(feat);
+	uint32_t	g = feat >> SCAN_FEAT_GSHIFT;
+
+	if (tier != SCAN_TIER_FULL || scan_tier_full_only || (feat & SCAN_FEAT_GEOM) == 0 || (feat & SCAN_FEAT_JSON) != 0)
+		return tier;
+	if (g == SCAN_G_PIP)
+		return SCAN_TIER_GPIP;
+	if (g == SCAN_G_DW)
+		return SCAN_TIER_GDW;
+	/* the walker tier has the point-point instructions too; a program that needs more (a polygon test and a non-point distance) runs on
+	 * the full kernel, where a non-point operand is a poison record and the backend decides it (the behaviour before the tiers) */
+	if ((g & SCAN_G_WALK) != 0 && (g & ~(uint32_t) (SCAN_G_WALK | SCAN_G_DW | SCAN_G_DW3 | SCAN_G_DIST)) == 0)
+		return SCAN_TIER_GWALK;
+	return SCAN_TIER_FULL;
+}
+
+/* the register variant (8/16/32 -> 0/1/2) of a join kernel family with 3 variants, with its tier */
+static inline int
+scan_join_variant3(int nregs, int tier)
+{
+	int			v = (nregs <= 8 ? 0 : nregs <= 16 ? 1 : 2);
+
+	if (tier >= SCAN_TIER_GPIP && v == 0)
+		v = 1;
+	return v + 3 * tier;
+}
+
 typedef struct
 {
 	int		cls;			/* 0: unsupported, else SOP_CMPI / SOP_CMPF / SOP_ARITH / ..., or
@@ -59,6 +123,8 @@ scan_func_class scan_vm_classify_func(uint32_t opcode);
 const char *scan_vm_opcode_name(uint32_t opcode);
 /* the optional instruction group of an opcode (SCAN_FEAT_* of scan_prog.h, 0 for the always compiled ones); test/gpuserv feat_check.c */
 uint32_t scan_vm_op_feat(uint32_t op);
+/* the same for an emitted instruction: SCAN_FEAT_GEOM plus the geometry group bits (SCAN_G_* << SCAN_FEAT_GSHIFT) of (op, k0) */
+uint32_t scan_insn_feat(uint32_t op, uint32_t k0);
 /* A6: see scan_caps.c. Returns SOP_LIKE_*, or -1 if the VM cannot match the pattern */
 int		scan_vm_like_shape(const unsigned char *pat, int plen, unsigned char *lit, int *p_litlen);
 /* true if the VM implements this function opcode */

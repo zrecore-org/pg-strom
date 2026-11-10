@@ -40,6 +40,11 @@ else
 			 jagg32_4 jgagg32_4 ajagg32_4 ajgagg32_4; do
 		LIST="$LIST $k ${k}_lite ${k}_nogeom"
 	done
+	# R15: the geometry tiers of the join kernel families (3-8 MB, a fraction of the full kernel's compile time); the register-8 join kernel
+	# has none (a program with 8 registers uses the 16-register one)
+	for k in gpujoin16 jagg16_4 jgagg16_4 ajoin16 ajagg16_4 ajgagg16_4 jagg32_4 jgagg32_4 ajagg32_4 ajgagg32_4; do
+		LIST="$LIST ${k}_gpip ${k}_gdw ${k}_gwalk"
+	done
 fi
 # Only what the test script needs (PREWARM_FOR=<script name>, set by locked_test.sh): a script whose programs use no
 # geometry never runs the full tier of a kernel (its programs use the lite or the nogeom variant), and the full tier is
@@ -51,6 +56,19 @@ case "${PREWARM_SET:-$PREWARM_FOR}" in
 	nongeom|float8_dev.sh|arrow_dev.sh|keys_dev.sh|fallback_dev.sh|gtab_dev.sh|spec_dev.sh|joinagg_dev.sh|gpucache_dev.sh|gpusort_dev.sh|hash_check.sh)
 		FILTERED=
 		for k in $LIST; do case "$k" in *_lite|*_nogeom) FILTERED="$FILTERED $k";; esac; done
+		LIST=$FILTERED ;;
+esac
+# The geometry scripts of the join families run their geometry programs on the geometry tiers (point in polygon, ST_DWithin, the walker);
+# the full join kernel (9.8 MB, 5 minutes cold) is only for a program that mixes groups (compiled at its first use, as any variant the set leaves out)
+case "${PREWARM_SET:-$PREWARM_FOR}" in
+	gist_dev.sh|postgis_dev.sh|postgis3d_dev.sh|recheck_dev.sh)
+		FILTERED=
+		for k in $LIST; do
+			case "$k" in
+				gpujoin8|jagg16_4|jgagg16_4|ajoin16|ajagg16_4|ajgagg16_4|jagg32_4|jgagg32_4|ajagg32_4|ajgagg32_4) ;;
+				*) FILTERED="$FILTERED $k";;
+			esac
+		done
 		LIST=$FILTERED ;;
 esac
 # PREWARM_LIST_ONLY=1: print the kernels that would be checked and stop (test of the sets)

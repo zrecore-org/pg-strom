@@ -2220,8 +2220,11 @@ arrow_ensure_join_pipeline(scan_engine *eng, int variant, char *err, size_t errl
 		{kspv_ajoin16, &kspv_ajoin16_len}, {kspv_ajoin32, &kspv_ajoin32_len},
 		{kspv_ajoin16_lite, &kspv_ajoin16_lite_len}, {kspv_ajoin32_lite, &kspv_ajoin32_lite_len},
 		{kspv_ajoin16_nogeom, &kspv_ajoin16_nogeom_len}, {kspv_ajoin32_nogeom, &kspv_ajoin32_nogeom_len},
+		{kspv_ajoin16_gpip, &kspv_ajoin16_gpip_len}, {kspv_ajoin32_gpip, &kspv_ajoin32_gpip_len},
+		{kspv_ajoin16_gdw, &kspv_ajoin16_gdw_len}, {kspv_ajoin32_gdw, &kspv_ajoin32_gdw_len},
+		{kspv_ajoin16_gwalk, &kspv_ajoin16_gwalk_len}, {kspv_ajoin32_gwalk, &kspv_ajoin32_gwalk_len},
 	};
-	_Static_assert(sizeof(jtab) / sizeof(jtab[0]) == SCAN_NV2, "jtab: one entry per register variant and tier");
+	_Static_assert(sizeof(jtab) / sizeof(jtab[0]) == SCAN_JV2, "jtab: one entry per register variant and tier");
 	const unsigned char *spv = jtab[variant].spv;
 	size_t		spv_len = *jtab[variant].len;
 
@@ -2289,7 +2292,7 @@ scan_exec_arrow_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_
 	ncomp = prog->ncomp;
 	rec_words = 2 + prog->ndepth + 3 * ncomp;
 	/* variant: 0-1 the registers (16/32), + 2 * tier (scan_caps.h) */
-	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
+	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_join_tier(prog->feat);
 	memset(&sh, 0, sizeof(sh));
 	sp = spec_pipe(eng, prog, SPEC_JOIN | SPEC_ARROW, 0, 0, NULL, NULL, &eng->ajoin_pipe[variant]);
 	if ((sp == &eng->ajoin_pipe[variant] || spec_check_enabled(eng)) &&
@@ -2583,8 +2586,20 @@ arrow_ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int av
 		 {kspv_ajagg16_12_nogeom, &kspv_ajagg16_12_nogeom_len}},
 		{{kspv_ajagg32_4_nogeom, &kspv_ajagg32_4_nogeom_len}, {kspv_ajagg32_12_nogeom, &kspv_ajagg32_12_nogeom_len},
 		 {kspv_ajagg32_12_nogeom, &kspv_ajagg32_12_nogeom_len}},
+		{{kspv_ajagg16_4_gpip, &kspv_ajagg16_4_gpip_len}, {kspv_ajagg16_12_gpip, &kspv_ajagg16_12_gpip_len},
+		 {kspv_ajagg16_12_gpip, &kspv_ajagg16_12_gpip_len}},
+		{{kspv_ajagg32_4_gpip, &kspv_ajagg32_4_gpip_len}, {kspv_ajagg32_12_gpip, &kspv_ajagg32_12_gpip_len},
+		 {kspv_ajagg32_12_gpip, &kspv_ajagg32_12_gpip_len}},
+		{{kspv_ajagg16_4_gdw, &kspv_ajagg16_4_gdw_len}, {kspv_ajagg16_12_gdw, &kspv_ajagg16_12_gdw_len},
+		 {kspv_ajagg16_12_gdw, &kspv_ajagg16_12_gdw_len}},
+		{{kspv_ajagg32_4_gdw, &kspv_ajagg32_4_gdw_len}, {kspv_ajagg32_12_gdw, &kspv_ajagg32_12_gdw_len},
+		 {kspv_ajagg32_12_gdw, &kspv_ajagg32_12_gdw_len}},
+		{{kspv_ajagg16_4_gwalk, &kspv_ajagg16_4_gwalk_len}, {kspv_ajagg16_12_gwalk, &kspv_ajagg16_12_gwalk_len},
+		 {kspv_ajagg16_12_gwalk, &kspv_ajagg16_12_gwalk_len}},
+		{{kspv_ajagg32_4_gwalk, &kspv_ajagg32_4_gwalk_len}, {kspv_ajagg32_12_gwalk, &kspv_ajagg32_12_gwalk_len},
+		 {kspv_ajagg32_12_gwalk, &kspv_ajagg32_12_gwalk_len}},
 	};
-	_Static_assert(sizeof(jtab) / sizeof(jtab[0]) == SCAN_NV2, "jtab: one entry per register variant and tier");
+	_Static_assert(sizeof(jtab) / sizeof(jtab[0]) == SCAN_JV2, "jtab: one entry per register variant and tier");
 	static const struct { const unsigned char *spv; const unsigned int *len; } gtab[][3] = {
 		{{kspv_ajgagg16_4, &kspv_ajgagg16_4_len}, {kspv_ajgagg16_12, &kspv_ajgagg16_12_len},
 		 {kspv_ajgagg16_12, &kspv_ajgagg16_12_len}},
@@ -2598,8 +2613,20 @@ arrow_ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int av
 		 {kspv_ajgagg16_12_nogeom, &kspv_ajgagg16_12_nogeom_len}},
 		{{kspv_ajgagg32_4_nogeom, &kspv_ajgagg32_4_nogeom_len}, {kspv_ajgagg32_12_nogeom, &kspv_ajgagg32_12_nogeom_len},
 		 {kspv_ajgagg32_12_nogeom, &kspv_ajgagg32_12_nogeom_len}},
+		{{kspv_ajgagg16_4_gpip, &kspv_ajgagg16_4_gpip_len}, {kspv_ajgagg16_12_gpip, &kspv_ajgagg16_12_gpip_len},
+		 {kspv_ajgagg16_12_gpip, &kspv_ajgagg16_12_gpip_len}},
+		{{kspv_ajgagg32_4_gpip, &kspv_ajgagg32_4_gpip_len}, {kspv_ajgagg32_12_gpip, &kspv_ajgagg32_12_gpip_len},
+		 {kspv_ajgagg32_12_gpip, &kspv_ajgagg32_12_gpip_len}},
+		{{kspv_ajgagg16_4_gdw, &kspv_ajgagg16_4_gdw_len}, {kspv_ajgagg16_12_gdw, &kspv_ajgagg16_12_gdw_len},
+		 {kspv_ajgagg16_12_gdw, &kspv_ajgagg16_12_gdw_len}},
+		{{kspv_ajgagg32_4_gdw, &kspv_ajgagg32_4_gdw_len}, {kspv_ajgagg32_12_gdw, &kspv_ajgagg32_12_gdw_len},
+		 {kspv_ajgagg32_12_gdw, &kspv_ajgagg32_12_gdw_len}},
+		{{kspv_ajgagg16_4_gwalk, &kspv_ajgagg16_4_gwalk_len}, {kspv_ajgagg16_12_gwalk, &kspv_ajgagg16_12_gwalk_len},
+		 {kspv_ajgagg16_12_gwalk, &kspv_ajgagg16_12_gwalk_len}},
+		{{kspv_ajgagg32_4_gwalk, &kspv_ajgagg32_4_gwalk_len}, {kspv_ajgagg32_12_gwalk, &kspv_ajgagg32_12_gwalk_len},
+		 {kspv_ajgagg32_12_gwalk, &kspv_ajgagg32_12_gwalk_len}},
 	};
-	_Static_assert(sizeof(gtab) / sizeof(gtab[0]) == SCAN_NV2, "gtab: one entry per register variant and tier");
+	_Static_assert(sizeof(gtab) / sizeof(gtab[0]) == SCAN_JV2, "gtab: one entry per register variant and tier");
 	int		   *ready = (grouped ? &eng->ajgagg_ready[variant][avariant] : &eng->ajagg_ready[variant][avariant]);
 	gpu_vk_pipeline *pipe = (grouped ? &eng->ajgagg_pipe[variant][avariant] : &eng->ajagg_pipe[variant][avariant]);
 
@@ -2658,7 +2685,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	nagg = prog->nagg;
 	grouped = (prog->nkeys > 0);
 	scan_agg_state_prepare(st, nagg);
-	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
+	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_join_tier(prog->feat);
 	avariant = scan_agg_variant(nagg);
 	if (grouped)
 		scan_group_variant(avariant, &cap, &rec_words, &ov_rec);
@@ -2714,7 +2741,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		pages = (n + ARROW_VP - 1) / ARROW_VP;
 		ngroups = (pages + ppw - 1) / ppw;
 		arrow_task_pass(&at, first, n);
-		if (gist && arrow_join_scout(eng, ji, prog, &at, (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat), first, n,
+		if (gist && arrow_join_scout(eng, ji, prog, &at, (prog->nregs <= 16 ? 0 : 1) + 2 * scan_join_tier(prog->feat), first, n,
 									 &st->rck, err, errlen) != 0)
 			goto done;
 		bufs[0] = &at.bg;

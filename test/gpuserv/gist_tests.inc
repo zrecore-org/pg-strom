@@ -280,8 +280,10 @@ gistjoin "after delete and updates" "$J3 st_dwithin(i.geom, st_makepoint(o.x, o.
 # ST_Distance decides "distance <= tolerance" (2D; Z and M of the geometry ignored) and the 3D forms for lines, points and multi-geometries with a Z
 # (PostGIS' lw_dist3d_pt_seg: postgis/seg3d_probe.c). A row the kernel cannot decide (a point within 2^-40 of a segment's end projection in 2D, a point that
 # the winding test cannot place against an edge, non-finite values, a distance beyond FLT_MAX, mixed SRIDs, a bad tolerance, a 3D polygon) is rechecked
-# by the backend. In a GiST JOIN the join kernel has no walker (Metal could not compile it: plan, A13 slice 4): a line or polygon inner row is a poison record and
-# PostGIS answers on the CPU; the join tests below check that the answers stay PostGIS'.
+# by the backend. In a GiST JOIN (R15) the walker is in its own kernel tier (SCAN_TIER_GWALK, 7 MB of SPIR-V, chosen when the program's ST_DWithin may meet a
+# non-point inner value: a plain "geometry" column); the full join kernel has none, and a program that needs the walker and something else outside that tier
+# (jsonb, a point-in-polygon test) runs on it, where a line or polygon inner row is a poison record that PostGIS answers on the CPU. The join tests below
+# check that the answers are PostGIS' either way.
 echo "GiST spatial join, ST_DWithin of lines and polygons (A13 slice 4)"
 sql "drop table if exists pg_g5z; drop table if exists pg_g5p; drop table if exists pg_g5q; drop table if exists pg_g5q3; drop table if exists pg_g5r; drop table if exists pg_g5s; drop table if exists pg_g5m; drop table if exists pg_g5n"
 sql "create table pg_g5z (id int4, geom geometry, a int4)"
@@ -341,13 +343,13 @@ gistjoin "line/polygon: anti join" "select o.id from pg_g5p o where not exists (
 gistjoin "line/polygon: count per outer row" "select o.id, count(i.id) from pg_g5p o join pg_g5z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) group by o.id"
 # ST_3DDWithin of a non-point: on the CPU (poison), the answer is PostGIS'
 gistjoin "line/polygon: ST_3DDWithin (CPU)" "$J5 st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), 2.5) and i.id % 32 not in (6, 8, 15, 17)"
-# how many rows did the join hand back? (EXPLAIN ANALYZE: Fallback-stats; a line or polygon inner row is always handed back)
+# how many rows did the join hand back? (EXPLAIN ANALYZE: Fallback-stats; the rows the kernel cannot decide: Z/M and empty geometries, the huge and the non-finite ones)
 fbsum() {
 	r=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON explain (analyze, costs off) $1" | grep "Fallback-stats" | head -1 | sed 's/[^0-9=]//g; s/=/ /g')
 	n=0; for v in $r; do n=$((n + v)); done; echo $n
 }
 n5=$(fbsum "$J5 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)")
-check "the GiST join hands the line and polygon rows to the backend (Fallback-stats sum $n5)" "$([ "${n5:-0}" -gt 0 ]; echo $?)"
+check "the GiST join hands the rows the kernel cannot decide to the backend (Fallback-stats sum $n5)" "$([ "${n5:-0}" -gt 0 ]; echo $?)"
 # the exact boundary, as a scan qual: a table with the geometry, a point and PostGIS' own ST_Distance in the same row; the tolerance is that value,
 # one float8 step below it and one above it (the step is computed from the exponent: checked below)
 sql "create table pg_g5q (id int4, geom geometry, x float8, y float8, r float8, rdn float8, rup float8)"
@@ -571,5 +573,50 @@ check "ST_DWithin aggregate over a RIGHT join stays off GpuPreAgg" "$(echo "$pla
 plan=$($PSQL -d scantest -c "$GPU $JOINSET $GISTON $AGGSET set pg_strom.enable_gpusort=on; explain select o.id % 7 k, count(*) from pg_g2p o join pg_g2z i on $C2 group by o.id % 7 order by 2 desc, 1" 2>&1)
 check "no GPU-Sort over a geometry GiST join" "$(echo "$plan" | grep -q 'GPU-Sort\|gpusort'; [ $? -ne 0 ]; echo $?)"
 gistagg_any "GROUP BY ... ORDER BY over the join" "select k, c from (select o.id % 7 k, count(*) c from pg_g2p o join pg_g2z i on $C2 group by o.id % 7 order by 2 desc, 1) x"
+
+# ---- R15: the geometry tiers of the join kernels. A join program whose inner column is declared geometry(Point[Z], srid) cannot see a non-point
+# inner value (PostGIS enforces the type), so the planner leaves KEXP_FLAG__GEOM_NP off and the service runs the point-only ST_DWithin kernel (3 MB of
+# SPIR-V; plain "geometry" columns take the walker tier, 7 MB, which decides lines and polygons on the GPU, the tests above, and the full kernel has
+# neither); a point-in-polygon program runs the point-in-polygon kernel (4 MB). All of them must give PostGIS' answers.
+echo "GiST spatial join, kernel tiers (R15)"
+sql "drop table if exists pg_g6z; drop table if exists pg_g6zz; drop table if exists pg_g6p"
+sql "create table pg_g6z (id int4, geom geometry(Point, 0), a int4)"
+sql "insert into pg_g6z select i, case i % 20 when 0 then null when 1 then ST_GeomFromText('POINT EMPTY') when 2 then ST_MakePoint(1e39, 0) else ST_MakePoint(i % 50 + (i % 3) * 0.25, i % 47 + (i % 5) * 0.1) end, i from generate_series(1, 3200) i"
+sql "create index pg_g6z_gist on pg_g6z using gist (geom)"
+sql "create table pg_g6zz (id int4, geom geometry(PointZ, 0), a int4)"
+sql "insert into pg_g6zz select i, case i % 20 when 0 then null else ST_MakePoint(i % 50 + (i % 3) * 0.25, i % 47 + (i % 5) * 0.1, (i % 7)::float8) end, i from generate_series(1, 3200) i"
+sql "create index pg_g6zz_gist on pg_g6zz using gist (geom)"
+sql "create table pg_g6p (id int4, x float8, y float8, r float8)"
+sql "insert into pg_g6p select i, (i % 100) / 2.0, (i / 100) / 2.0, (i % 11) / 2.0 from generate_series(0, 2999) i"
+sql "insert into pg_g6p values (-1, null, 1, 1), (-2, 1, null, 1), (-3, 1, 1, null), (-4, 1e39, 0, 1), (-5, 3, 4, 5), (-6, 0.1, 0.1, 0.1)"
+sql "analyze pg_g6z; analyze pg_g6zz; analyze pg_g6p"
+J6="select o.id, i.id from pg_g6p o join pg_g6z i on"
+gistjoin "typed Point inner: ST_DWithin(inner, point, constant)" "$J6 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+gistjoin "typed Point inner: the point first, tolerance of the outer row" "$J6 st_dwithin(st_makepoint(o.x, o.y), i.geom, o.r)"
+gistjoin "typed Point inner: tolerance 0" "$J6 st_dwithin(i.geom, st_makepoint(o.x, o.y), 0)"
+gistjoin "typed Point inner: huge tolerance (beyond FLT_MAX)" "$J6 st_dwithin(i.geom, st_makepoint(o.x, o.y), 1e300) and o.id % 500 = 0 and i.id % 40 = 3"
+gistjoin "typed Point inner: left join" "select o.id, i.id from pg_g6p o left join pg_g6z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)"
+gistjoin "typed Point inner: right join" "select o.id, i.id from pg_g6p o right join pg_g6z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75)"
+gistjoin "typed Point inner: semi join" "select o.id from pg_g6p o where exists (select 1 from pg_g6z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistjoin "typed Point inner: anti join" "select o.id from pg_g6p o where not exists (select 1 from pg_g6z i where st_dwithin(i.geom, st_makepoint(o.x, o.y), 0.75))"
+gistjoin "typed Point inner: count per outer row" "select o.id, count(i.id) from pg_g6p o join pg_g6z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) group by o.id"
+gistjoin "typed PointZ inner: ST_3DDWithin" "select o.id, i.id from pg_g6p o join pg_g6zz i on st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), 2.5)"
+gistjoin "typed PointZ inner: ST_DWithin (2D) of Z points" "select o.id, i.id from pg_g6p o join pg_g6zz i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+gistagg "typed Point inner: ST_DWithin GROUP BY" "select i.a % 4, count(*), sum(o.id) from pg_g6p o join pg_g6z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) group by i.a % 4"
+gistagg_any "typed Point inner: ST_DWithin ungrouped" "select count(*), sum(i.a), sum(o.id) from pg_g6p o join pg_g6z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5)"
+gistagg "typed PointZ inner: ST_3DDWithin GROUP BY" "select o.id % 5, count(*), sum(i.a) from pg_g6p o join pg_g6zz i on st_3ddwithin(i.geom, st_makepoint(o.x, o.y, (o.id % 5)::float8), 2.5) group by o.id % 5"
+# the walker tier: lines and polygons that the kernel can read (no Z/M, finite, in range) are decided by the join kernel itself, so the backend gets no
+# rows back (the outer points on the integer grid, id % 7 = 0, lie on polygon edges: the winding test hands those to PostGIS, so they are left out; before the tiers every such inner row was a poison record joined on the CPU)
+sql "drop table if exists pg_g7z"
+sql "create table pg_g7z as select id, geom, a from pg_g5z where geom is not null and not st_isempty(geom) and geometrytype(geom) in ('LINESTRING', 'POLYGON', 'MULTILINESTRING', 'MULTIPOLYGON') and not st_hasz(geom) and not st_hasm(geom) and st_srid(geom) = 0 and st_xmax(geom) < 1000 and st_ymax(geom) < 1000 and st_xmin(geom) > -1000 and st_ymin(geom) > -1000 and id <= 3200"
+sql "create index pg_g7z_gist on pg_g7z using gist (geom)"
+sql "analyze pg_g7z"
+gistjoin "walker tier: ST_DWithin(line/polygon, point, constant)" "select o.id, i.id from pg_g5p o join pg_g7z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) where o.id >= 0 and o.id % 7 <> 0"
+gistjoin "walker tier: the tolerance of the outer row" "select o.id, i.id from pg_g5p o join pg_g7z i on st_dwithin(st_makepoint(o.x, o.y), i.geom, o.r) where o.id >= 0 and o.id % 7 <> 0"
+gistagg "walker tier: GROUP BY over the join" "select i.a % 4, count(*), sum(o.id) from pg_g5p o join pg_g7z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) where o.id >= 0 and o.id % 7 <> 0 group by i.a % 4"
+nfb=$(fbsum "select o.id, i.id from pg_g5p o join pg_g7z i on st_dwithin(i.geom, st_makepoint(o.x, o.y), 1.5) where o.id >= 0 and o.id % 7 <> 0")
+nout=$($PSQL -d scantest -c "select count(*) from pg_g5p where id >= 0 and id % 7 <> 0" | tail -1)
+echo "  info  walker tier: $nfb of $nout outer rows handed back to the backend"
+check "the walker tier decides the lines and polygons of the join (backend rows $nfb of $nout)" "$([ "${nfb:-1}" -lt $((nout / 20)) ]; echo $?)"
 
 fi

@@ -89,7 +89,7 @@ emit(builder *b, uint32_t op, uint32_t dst, uint32_t a, uint32_t rb, uint32_t k0
 		b->insn = ni;
 		b->insn_cap = ncap;
 	}
-	b->feat |= scan_vm_op_feat(op);
+	b->feat |= scan_insn_feat(op, k0);
 	p = b->insn + 6 * b->ninsn++;
 	p[0] = op; p[1] = dst; p[2] = a; p[3] = rb; p[4] = k0; p[5] = k1;
 	return (int)(b->ninsn - 1);
@@ -106,7 +106,7 @@ builder_feat(const builder *b)
 	uint32_t	feat = b->feat;
 
 	for (uint32_t i = 0; i < b->ninsn; i++)
-		feat |= scan_vm_op_feat(b->insn[6 * i]);
+		feat |= scan_insn_feat(b->insn[6 * i], b->insn[6 * i + 4]);
 	return feat;
 }
 

@@ -2548,6 +2548,39 @@ calib_host_ring(const double (*pt)[3], int n, bool d3)
 static bool vulkan_geom_area_calibrated(Oid func_oid);
 
 /*
+ * R15: a join program's ST_DWithin / ST_3DDWithin whose geometry operands are all points by their declared type (a column of type
+ * geometry(Point[Z][M], srid): PostGIS keeps its typmod, a value of another type cannot be stored in it, or a fused st_makepoint) never has
+ * a non-point operand: the kernel needs no point-to-geometry walker for it (KEXP_FLAG__GEOM_NP stays clear), and the service picks the
+ * small point-only join kernel (scan_caps.h, SCAN_TIER_GDW) instead of the walker tier.
+ */
+static bool
+vulkan_geom_join_points_only(codegen_context *context, List *func_args)
+{
+	ListCell   *lc;
+	int			i = 0;
+
+	if ((context->xpu_task_flags & DEVTASK__MASK) != DEVTASK__JOIN)
+		return false;
+	foreach (lc, func_args)
+	{
+		Expr	   *arg = (Expr *) lfirst(lc);
+
+		if (i++ >= 2)
+			break;					/* the tolerance */
+		if (IsA(arg, Var))
+		{
+			int32		typmod = ((Var *) arg)->vartypmod;
+
+			if (typmod < 0 || ((typmod & 0x000000FC) >> 2) != 1)	/* PostGIS: TYPMOD_GET_TYPE() == POINTTYPE */
+				return false;
+		}
+		else if (vulkan_geom_operand_shape(arg) != 1)
+			return false;
+	}
+	return true;
+}
+
+/*
  * Does the installed PostGIS decide ST_DWithin(point, line or polygon, d) as "the 2D distance of the model (calib_ptarray_min per line or
  * ring; a polygon: 0 inside it, the distance to the exterior ring outside it, to the hole's ring inside a hole) <= d"? Called, with the
  * operands in both orders, on 120 fixed cases (lines, polygons with a hole and points outside, in the hole and in the body; Z geometries,
@@ -3340,7 +3373,8 @@ __codegen_func_expression(codegen_context *context,
 		{
 			kexp.expflags |= KEXP_FLAG__GEOM_EXACT;
 			/* a point and a line, polygon or multi-geometry (3D: lines and points): decided by the kernel when this PostGIS does it the modelled way */
-			if (vulkan_geom_dwithin_np_calibrated(dfunc->func_oid, xfc.cls == SOP_GEOM3DDW))
+			if (!vulkan_geom_join_points_only(context, func_args) &&
+				vulkan_geom_dwithin_np_calibrated(dfunc->func_oid, xfc.cls == SOP_GEOM3DDW))
 				kexp.expflags |= KEXP_FLAG__GEOM_NP;
 		}
 	}
