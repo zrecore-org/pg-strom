@@ -624,29 +624,38 @@ devtype_float8_hash(bool isnull, Datum value)
 	return hash_any((unsigned char *)&f, sizeof(double));
 }
 
+/*
+ * numeric: equal values must hash alike whatever their display scale (1.5 and 1.50). A value that fits { int64 unscaled, scale } (what
+ * the kernel reads) hashes as that pair with the trailing zeros stripped (scan_common.slang, SOP_HASHMERGE k1 = 5); any other value
+ * (more than 18 digits, NaN, Infinity) never meets a GPU-read row and uses PostgreSQL's own hash_numeric.
+ */
 static uint32_t
 devtype_numeric_hash(bool isnull, Datum value)
 {
-	uint32_t	hash;
-	uint8_t		kind;
-	int16_t		weight;
-	int128_t	num;
-	const char *emsg;
+	struct varlena *vl;
+	int64_t		v;
+	uint32_t	sc, hash;
 
 	if (isnull)
 		return 0;
-	emsg = __decimal_from_varlena(&kind,
-								  &weight,
-								  &num,
-								  (varlena *)value);
-	if (emsg)
-		elog(ERROR, "%s", emsg);
-	if (kind == XPU_NUMERIC_KIND__VALID)
-		hash = (hash_any((unsigned char *)&weight, sizeof(int16_t)) ^
-				hash_any((unsigned char *)&num, sizeof(int128_t)));
+	vl = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
+	if (scan_vm_numeric_datum_decode((const unsigned char *) vl, &v, &sc))
+	{
+		if (v == 0)
+			sc = 0;
+		else
+			while (sc > 0 && v % 10 == 0)
+			{
+				v /= 10;
+				sc--;
+			}
+		hash = hash_any((unsigned char *)&v, sizeof(int64_t)) ^
+			hash_any((unsigned char *)&sc, sizeof(uint32_t));
+	}
 	else
-		hash = hash_any((unsigned char *)&kind, sizeof(uint8_t));
-
+		hash = DatumGetUInt32(DirectFunctionCall1(hash_numeric, PointerGetDatum(vl)));
+	if ((Pointer) vl != DatumGetPointer(value))
+		pfree(vl);
 	return hash;
 }
 
@@ -3235,8 +3244,12 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return vulkan_geom_dwithin_args_ok(func_args);
 	if (fc.cls == SOP_GEOMMK)
 		return codegen_geom_mk_ok;
-	/* numeric: not in a join program (its registers are not loaded there) */
-	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	/*
+	 * numeric: in a join program only the equality of two numerics (a join key: the kernel hashes the canonical { int64, scale } pair,
+	 * SOP_HASHMERGE k1 = 5, and compares with NUMCMP; a value it cannot read makes the backend join the row)
+	 */
+	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN &&
+		!(fc.cls == SOP_NUMCMP && (fc.kind == SOP_CMP_EQ || fc.kind == SOP_CMP_NE)))
 	{
 		ListCell   *lc;
 

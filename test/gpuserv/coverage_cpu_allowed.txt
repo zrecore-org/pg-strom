@@ -9,10 +9,6 @@
 # Sources: srcfull.arrow / srcfull.parquet hold the cf columns except uuid and the unconstrained numeric (pg2arrow cannot write them).
 
 # Each distinct reason is one row of the gap table printed by the test, so the same gap always carries the same text here.
-join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
-aggjoin.key.numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
-src.*.join.key_numeric | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
-srcfull.*.join.key.numeric.* | hash-join key numeric: numeric_eq is not a device hash-join function | gap:A6
 join.key.null_safe.inner | IS NOT DISTINCT FROM as a join clause: a DistinctExpr is not an opcode and the clause is not hash-joinable | gap:A14
 join.nl.nonequi.* | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
 join.nl.range.inner | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4

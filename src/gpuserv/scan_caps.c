@@ -1575,6 +1575,7 @@ scan_vm_joinkey_type_supported(int type_code)
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:
 		case TypeOpCode__uuid:
+		case TypeOpCode__numeric:		/* hashed as the canonical { int64, scale } (SOP_HASHMERGE k1 = 5), compared by NUMCMP */
 		case TypeOpCode__float4:		/* hashed with -0 -> +0 and one NaN (SOP_HASHMERGE k1 = 3, 4), compared by CMPF / CMPD */
 		case TypeOpCode__float8:
 			return true;

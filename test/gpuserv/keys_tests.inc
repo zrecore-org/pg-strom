@@ -126,4 +126,11 @@ rung "group by a uuid, a text and an int" "select u, k, n, count(*), sum(pay) fr
 rung "uuid equals a constant" "select count(*), sum(pay) from %T where u = md5('7')::uuid" tko
 rung "tkog (GPU-Cache): group by a uuid" "select u, count(*), sum(pay) from %T group by u" tkog
 runkj "tkog (GPU-Cache) outer: uuid key join" "select t.i, d.i from tkog t join tki d on t.u = d.u"
+# ---- numeric join keys (hashed as the canonical { unscaled, scale }: 1.5 = 1.50 = 1.500)
+runkj "numeric key: inner join" "select t.i, d.w from tno t join tni d on t.nm = d.nm"
+runkj "numeric key: LEFT join" "select t.i, d.w from tno t left join tni d on t.nm = d.nm"
+runkj "numeric key: semi join" "select t.i from tno t where t.nm in (select d.nm from tni d)"
+runkj "numeric key: anti join" "select t.i from tno t where not exists (select 1 from tni d where d.nm = t.nm)"
+runkj "numeric key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tno t join tni d on t.nm = d.nm group by d.w"
+runkj "numeric key and an int key" "select t.i, d.w from tno t join tni d on t.nm = d.nm and t.n = d.w % 4"
 echo

@@ -91,6 +91,16 @@ sql "create table tfi as select * from (values (0::float4, 0::float8, 1), (-0.0:
 	('Infinity'::float4, 'Infinity'::float8, 4), (1.5::float4, 1.5::float8, 5), (null::float4, null::float8, 6), (-1.5::float4, -1.5::float8, 7),
 	(1e-45::float4, 5e-324::float8, 8), (0.25::float4, 0.25::float8, 9), (0.5::float4, 0.5::float8, 10)) v(f4, f8, w)"
 sql "analyze tfo"; sql "analyze tfi"
+# numeric keys: equal values of different scales (1.5, 1.50, 1.500), zero in several scales, NaN, a value beyond 18 digits (the backend
+# joins those rows), NULLs
+sql "create table tno as select i,
+	(case i % 20 when 0 then null when 1 then 'NaN'::numeric when 2 then 123456789012345678901234567890::numeric when 3 then 1.5
+	 when 4 then 1.50 when 5 then 1.500 when 6 then -0.25 when 7 then 0 when 8 then 0.00 when 9 then 100 when 10 then 1e2::numeric
+	 else (i % 9)::numeric / 4 end) as nm,
+	(i % 4)::int4 as n, i::int8 as pay from generate_series(1, 6000) i"
+sql "create table tni as select * from (values (1.5, 1), (1.50, 2), ('NaN'::numeric, 3), (123456789012345678901234567890::numeric, 4), (0.0, 5),
+	(-0.25, 6), (100.000, 7), (null::numeric, 8), (0.5, 9), (2.25, 10), (0.75, 11), (1.000, 12)) v(nm, w)"
+sql "analyze tno"; sql "analyze tni"
 # GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
 # table is sized for the estimate and overflows); tkb is big enough for several tasks
 sql "create table tkm as select md5((i % 100)::text) as k, (i % 7)::int4 as n, i::int8 as v from generate_series(1, 20000) i"

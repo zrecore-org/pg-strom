@@ -222,8 +222,6 @@ emit_numconst(builder *b, const unsigned char *datum, int isnull, int *next)
 	int64_t		v = 0;
 	uint32_t	sc = 0;
 
-	if (b->no_strings)
-		return fail(b, "numeric is not supported in a join");
 	if (!isnull && !scan_vm_numeric_datum_decode(datum, &v, &sc))
 		return fail(b, "a numeric constant that does not fit 64 bits (or NaN/Infinity)");
 	dst = new_reg(b, next);
@@ -1010,8 +1008,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				 * string function into a join, a geometry qual of a GiST join reads the inner one, A13), not
 				 * numerics or jsonb
 				 */
-				if (b->no_strings && reg_vtype(kexp->exptype, &bytes) != SOP_VT_STR)
-					return fail(b, "strings and numerics are not supported in a join");
+				if (b->no_strings && reg_vtype(kexp->exptype, &bytes) != SOP_VT_STR && reg_vtype(kexp->exptype, &bytes) != SOP_VT_NUM)
+					return fail(b, "jsonb is not supported in a join");
 				b->slot_strval[slot] = 1;
 			}
 			if (b->slot_resno[slot] > 0)
@@ -1997,9 +1995,9 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 		int		bytes, r;
 
 		int		is_str = (reg_vtype(karg->exptype, &bytes) == SOP_VT_STR);
+		/* (a numeric key: k0 = 0 too) */
 
-		if (!reg_vtype(karg->exptype, &bytes) ||
-			reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM || reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
+		if (!reg_vtype(karg->exptype, &bytes) || reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
 		*next = acc + 1;
 		r = expr_to_reg(b, karg, next);
@@ -2009,7 +2007,8 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 		 */
 		if (r < 0 || emit(b, SOP_HASHMERGE, acc, r, 0, is_str ? 0 : bytes,
 						  is_str ? (karg->exptype == TypeOpCode__bpchar ? 2 : 1) :
-						  karg->exptype == TypeOpCode__float4 ? 3 : karg->exptype == TypeOpCode__float8 ? 4 : 0) < 0)
+						  karg->exptype == TypeOpCode__float4 ? 3 : karg->exptype == TypeOpCode__float8 ? 4 :
+						  karg->exptype == TypeOpCode__numeric ? 5 : 0) < 0)
 			return -1;
 	}
 	if (emit(b, SOP_HASHFIN, acc, 0, 0, 0, 0) < 0)
@@ -2503,9 +2502,9 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		if (b.slot_used[s])
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_vtype[s] == SOP_VT_STR && b.slot_strval[s])
+			if ((b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM) && b.slot_strval[s])
 			{
-				/* the value of an outer string column is read (a join key, A6) */
+				/* the value of an outer string or numeric column is read (a join key, A6) */
 				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1 && kds_src->colmeta[b.slot_resno[s] - 1].attlen != 16)
 				{
 					fail(&b, "outer column %d does not have the type the expression expects", b.slot_resno[s]);
@@ -2534,7 +2533,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
 
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_ivtype[s] == SOP_VT_STR && b.slot_strval[s])
+			if ((b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM) && b.slot_strval[s])
 			{
 				/* the value of a string column of an inner relation is read (a join key, a geometry qual of a GiST join) */
 				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1 && kds_in->colmeta[b.slot_iresno[s] - 1].attlen != 16)

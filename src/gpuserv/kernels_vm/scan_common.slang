@@ -3688,6 +3688,27 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 uint acc = uint(regs[dst].v);
                 regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
             }
+            else if (regs[ra].isnull == 0 && k1 == 5)
+            {
+                // a numeric key { unscaled int64, scale }: equal values hash alike whatever the scale (1.5, 1.50): the
+                // trailing zeros are stripped, then the value and the scale are hashed (devtype_numeric_hash)
+                int64_t nv = regs[ra].v;
+                uint nsc = regs[ra].sc;
+                if (nv == 0)
+                    nsc = 0;
+                else
+                {
+                    while (nsc > 0 && (nv % 10) == 0)
+                    {
+                        nv = nv / 10;
+                        nsc = nsc - 1;
+                    }
+                }
+                uint64_t uv = uint64_t(nv);
+                uint h = hash_any_value(uint(uv & 0xffffffffu), uint(uv >> 32), 8u) ^ hash_any_value(nsc, 0u, 4u);
+                uint acc = uint(regs[dst].v);
+                regs[dst].v = int64_t(((acc >> 3) | (acc << 29)) ^ h);
+            }
             else if (regs[ra].isnull == 0 && k1 != 0)
             {
                 // a string key (k1 = 1 text / varchar, 2 bpchar: trailing blanks do not count)
