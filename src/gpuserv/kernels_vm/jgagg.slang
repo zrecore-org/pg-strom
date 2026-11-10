@@ -7,7 +7,8 @@
 // whole workgroup has anything left (a shared flag), so every barrier is reached by all threads.
 //
 // The program is a join program (see join.slang) whose "projection" section computes the key
-// expressions, the aggregate arguments and the FILTER conditions; header words as in gagg.slang:
+// expressions, the aggregate arguments and the FILTER conditions (up to GA_NK = 4 keys; a join
+// program with fewer keys stages zeros in the rest, and the host reads only the keys it has); header words as in gagg.slang:
 // [10] aggregates, [11] aggregate table offset, [12] keys, [13] offset of the key registers.
 //
 // A GiST-index join (program header word 18 nonzero, interpreter only) skips the outer rows the
@@ -18,7 +19,7 @@
 // of 1 + GA_C * GA_REC words, exactly as gagg.slang writes it. A joined row whose key finds no slot
 // within a few probes (or whose min/max argument does not fit 32 bits) is not lost: its staged
 // values are appended to an overflow list at word kparam.total_lps (the "overflow base"): { count,
-// then records of OV_REC words { null mask, key0 lo, hi, key1 lo, hi, (ok, value lo, hi) * GA_NA } },
+// then records of OV_REC words { null mask, (key lo, hi) * GA_NK, (ok, value lo, hi) * GA_NA } },
 // at most kparam.extra records (the count may exceed it: the host runs the task again with room).
 #define WITH_INNER 1
 #define JW_MODE 2
@@ -31,7 +32,7 @@
 #ifndef GA_NA
 #define GA_NA 4
 #endif
-#define GA_NK 2
+#define GA_NK 4
 #ifndef GA_C
 #define GA_C 128
 #endif
@@ -70,15 +71,26 @@ groupshared int64_t st_key[SCAN_WG * GA_NK];
 groupshared uint    st_ok[SCAN_WG * GA_NA];
 groupshared int64_t st_val[SCAN_WG * GA_NA];
 
-uint hash_keys(int64_t k0, int64_t k1, uint kn)
+uint hash_fold(uint h, int64_t k, uint isnull)
 {
-    uint h = 0x811c9dc5u;
-    h = (h ^ (uint(k0) ^ (uint(k0 >> 32) * 0x9e3779b1u) ^ ((kn & 1u) * 0x85ebca6bu))) * 0x01000193u;
-    h = (h ^ (uint(k1) ^ (uint(k1 >> 32) * 0x9e3779b1u) ^ ((kn & 2u) * 0x85ebca6bu))) * 0x01000193u;
+    return (h ^ (uint(k) ^ (uint(k >> 32) * 0x9e3779b1u) ^ (isnull * 0x85ebca6bu))) * 0x01000193u;
+}
+
+uint hash_fin(uint h)
+{
     h ^= h >> 15;
     h *= 0x2c1b3c6du;
     h ^= h >> 12;
     return h;
+}
+
+// two keys (the specialized kernels stage at most two; the hash of a row with at most two keys is the same in both kernels)
+uint hash_keys(int64_t k0, int64_t k1, uint kn)
+{
+    uint h = 0x811c9dc5u;
+    h = hash_fold(h, k0, kn & 1u);
+    h = hash_fold(h, k1, (kn >> 1) & 1u);
+    return hash_fin(h);
 }
 
 #ifdef SPEC_PROG

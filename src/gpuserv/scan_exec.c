@@ -2515,7 +2515,7 @@ ensure_group_pipeline(scan_engine *eng, int variant, int avariant, char *err, si
  */
 static int
 group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-				   uint32_t cap, uint32_t rec_words, uint32_t blk_words)
+				   uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk)
 {
 	uint32_t	nagg = prog->nagg;
 	uint32_t	agg_col[SCAN_AGG_MAX];
@@ -2542,14 +2542,14 @@ group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, ui
 
 			if (!rec[0])
 				continue;
-			for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
+			for (int i = 0; i < nk && i < prog->nkeys; i++)
 				key[i] = (int64_t)((uint64_t) rec[2 + 2 * i] | ((uint64_t) rec[3 + 2 * i] << 32));
 			e = group_lookup(&st->groups, nagg, key, rec[1]);
 			if (!e)
 				return -1;
 			for (uint32_t a = 0; a < nagg; a++)
 				acc_merge_group_record(&e->acc[a], prog->agg_ent_action[a],
-									   rec + 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * a);
+									   rec + 2 + 2 * nk + 6 * a);
 		}
 	}
 	return 0;
@@ -3403,7 +3403,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		}
 	}
 	/* merge the workgroups' tables */
-	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
+	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED) != 0)
 	{
 		snprintf(err, errlen, "out of memory");
 		goto done;
@@ -4648,9 +4648,9 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_JOIN + 6 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_JOIN + 3 * sh.agg_max;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&
 		ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
@@ -4912,7 +4912,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		const uint32_t *w = prog->words;
 		uint32_t	aggoff = w[11];
 
-		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
+		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN) != 0)
 		{
 			snprintf(err, errlen, "out of memory");
 			goto done;
@@ -4924,7 +4924,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
 
-			for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
+			for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
 				key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
 			g = group_lookup(&st->groups, nagg, key, rec[0]);
 			if (!g)
@@ -4932,7 +4932,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 				goto done;
 			}
-			acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_SHARED);
+			acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_JOIN);
 		}
 	}
 	t3 = now_ms();
@@ -5013,15 +5013,15 @@ scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *o
 
 int
 scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-						uint32_t cap, uint32_t rec_words, uint32_t blk_words)
+						uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk)
 {
-	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words);
+	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, nk);
 }
 
 /* the rows that found no slot in their workgroup's table: { null mask, keys, (ok, value) * aggregates } each */
 int
 scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
-						  uint32_t ov_rec)
+						  uint32_t ov_rec, int nk)
 {
 	const uint32_t *w = prog->words;
 	uint32_t	aggoff = w[11];
@@ -5033,12 +5033,12 @@ scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *
 		int64_t		key[SCAN_GROUP_KEYS] = {0};
 		group_entry *g;
 
-		for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
+		for (int i = 0; i < nk && i < prog->nkeys; i++)
 			key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
 		g = group_lookup(&st->groups, nagg, key, rec[0]);
 		if (!g)
 			return -1;
-		acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_SHARED);
+		acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * nk);
 	}
 	return 0;
 }

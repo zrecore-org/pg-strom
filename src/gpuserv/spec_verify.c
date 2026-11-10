@@ -20,7 +20,6 @@
 #include "scan_prog.h"
 #include "specialize.h"
 
-#define V_GA_NK		2
 
 static size_t	sort_words;
 
@@ -159,7 +158,7 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 		case SPEC_GAGG:
 		case SPEC_JGAGG:
 		{
-			size_t		rec = 2 + 2 * V_GA_NK + 6 * (size_t) agg_max;
+			size_t		rec = 2 + 2 * (kind == SPEC_JGAGG ? SCAN_GROUP_KEYS_JOIN : SCAN_GROUP_KEYS_SHARED) + 6 * (size_t) agg_max;
 			size_t		blk = 1 + (size_t) ga_c * rec;
 			size_t		fb = pc[3];			/* GAGG: flags base; JGAGG: overflow base */
 
@@ -234,7 +233,7 @@ spec_verify_compare(int kind, const scan_prog *prog, int agg_max, int ga_c, cons
 			else if (arrow)
 			{
 				/* A12: one flag word per row of the pass (2 = the backend evaluates the row) follows the overflow list */
-				size_t		flags0 = fb + 1 + (size_t) pc[4] * (1 + 2 * V_GA_NK + 3 * (size_t) agg_max);
+				size_t		flags0 = fb + 1 + (size_t) pc[4] * (1 + 2 * SCAN_GROUP_KEYS_JOIN + 3 * (size_t) agg_max);
 
 				for (size_t i = flags0; i < words; i++)
 					if (a[i] != b[i])

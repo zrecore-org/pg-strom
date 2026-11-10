@@ -538,6 +538,7 @@ gen_stage(gen_ctx *g, sbuf *o)
 	else
 		sb_printf(o,
 				  "    st_key[tid * GA_NK + 0] = k0;\n    st_key[tid * GA_NK + 1] = k1;\n"
+				  "    for (uint i = 2; i < GA_NK; i++)\n        st_key[tid * GA_NK + i] = 0;\n"
 				  "    st_hash[tid] = hash_keys(k0, k1, kn);\n    st_kn[tid] = kn | 0x80000000u;\n");
 	for (uint32_t k = 0; k < naggs; k++)
 	{

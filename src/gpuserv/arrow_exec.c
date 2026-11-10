@@ -2182,8 +2182,8 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 			scan_agg_merge_workgroups(prog, st, out, ngroups);
 		else
 		{
-			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words) != 0 ||
-				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec) != 0)
+			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED) != 0 ||
+				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_SHARED) != 0)
 			{
 				snprintf(err, errlen, "out of memory");
 				goto done;
@@ -2698,8 +2698,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_JOIN + 6 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_JOIN + 3 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&
@@ -2849,8 +2849,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			scan_agg_merge_workgroups(prog, st, out, ngroups);
 		else
 		{
-			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words) != 0 ||
-				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec) != 0)
+			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN) != 0 ||
+				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_JOIN) != 0)
 			{
 				snprintf(err, errlen, "out of memory");
 				goto done;
