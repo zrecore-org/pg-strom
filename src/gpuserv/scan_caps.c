@@ -1633,6 +1633,8 @@ scan_vm_agg_action_supported(int action)
 		 * float4/float8. The integer and numeric forms (STDDEV_NUM) and regr_count (COVAR_CNT) stay on the CPU. */
 		case KAGG_ACTION__STDDEV:
 		case KAGG_ACTION__COVAR:
+		/* A10: variance / stddev of int2, int4, int8: the exact int128 / 192-bit sums (class 13, kernels_vm/scan_common.slang) */
+		case KAGG_ACTION__STDDEV_INT:
 			return true;
 		default:
 			break;

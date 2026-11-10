@@ -1653,11 +1653,12 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				/* A10: PostgreSQL's float8_accum / float8_regr_accum states (variance, stddev; covar, corr, regr_*) */
 				case KAGG_ACTION__STDDEV:		cls = 10; break;
 				case KAGG_ACTION__COVAR:		cls = 11; break;
+				case KAGG_ACTION__STDDEV_INT:	cls = 13; break;		/* exact integer variance: three entries (13, 12, 12) */
 				default:
 					fail(&b, "aggregate action %u is not implemented by the Vulkan service", d->action);
 					goto error;
 			}
-			if (cls == 11 && nagg + 3 > SCAN_AGG_MAX)
+			if ((cls == 11 || cls == 13) && nagg + 3 > SCAN_AGG_MAX)
 			{
 				fail(&b, "the aggregates need %d accumulators (up to %d are supported; covar/corr/regr take three each)", nagg + 3, SCAN_AGG_MAX);
 				goto error;
@@ -1712,7 +1713,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			agg_tab[4 * nagg + 3] = (prog->agg_scale[nagg] >= 0) ? (uint32_t) prog->agg_scale[nagg] + 1 : 0;
 			prog->agg_ent_action[nagg] = (uint16_t) d->action;
 			nagg++;
-			if (cls == 11)
+			if (cls == 11 || cls == 13)
 				for (int c = 0; c < 2; c++)
 				{
 					agg_tab[4 * nagg + 0] = 12;
@@ -1730,6 +1731,11 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				fail(&b, "a numeric GROUP BY key %d is not an output column", k + 1);
 				goto error;
 			}
+		if (nagg > SCAN_AGG_MAX)
+		{
+			fail(&b, "the aggregates need %d accumulators (up to %d are supported)", nagg, SCAN_AGG_MAX);
+			goto error;
+		}
 		for (int k = 0; k < nagg; k++)
 			if ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10)
 				b.feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
@@ -2055,6 +2061,7 @@ join_agg_class(uint32_t action)
 		case KAGG_ACTION__PMAX_FP64:	return 8;
 		case KAGG_ACTION__STDDEV:		return 10;
 		case KAGG_ACTION__COVAR:		return 11;
+		case KAGG_ACTION__STDDEV_INT:	return 13;
 		default:
 			break;
 	}
@@ -2174,7 +2181,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 		if (cls == 0)
 			return fail(b, "aggregate action %u is not implemented by the Vulkan service", d->action);
 		prog->agg_of_col[i] = (int8_t) nagg;
-		if (cls == 11 && nagg + 3 > SCAN_AGG_MAX)
+		if ((cls == 11 || cls == 13) && nagg + 3 > SCAN_AGG_MAX)
 			return fail(b, "the aggregates need %d accumulators (up to %d are supported; covar/corr/regr take three each)", nagg + 3, SCAN_AGG_MAX);
 		for (int k = 0; k < 3; k++)
 		{
@@ -2200,7 +2207,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 		agg_tab[4 * nagg + 3] = 0;
 		prog->agg_ent_action[nagg] = (uint16_t) d->action;
 		nagg++;
-		if (cls == 11)
+		if (cls == 11 || cls == 13)
 			for (int c = 0; c < 2; c++)
 			{
 				agg_tab[4 * nagg + 0] = 12;
@@ -2212,6 +2219,8 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 				nagg++;
 			}
 	}
+	if (nagg > SCAN_AGG_MAX)
+		return fail(b, "the aggregates need %d accumulators (up to %d are supported)", nagg, SCAN_AGG_MAX);
 	for (int k = 0; k < nagg; k++)
 		if ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10)
 			b->feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */

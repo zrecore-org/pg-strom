@@ -151,8 +151,8 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 {
                     if (cls == AC_VCONT)
                         continue;
-                    bool isreg = (cls == AC_REG);
-                    uint rb = isreg ? prog[aggoff + 4 * (k + 1) + 1] : ra;         // the Y register of regr(Y, X)
+                    bool isreg = (cls >= AC_REG);
+                    uint rb = (cls == AC_REG) ? prog[aggoff + 4 * (k + 1) + 1] : ra;         // the Y register of regr(Y, X)
                     if (regs[ra].isnull != 0 || (isreg && regs[rb].isnull != 0))
                         continue;
                     VS s;
@@ -237,7 +237,7 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 {
                     if (cls == AC_VCONT)
                         continue;
-                    bool isreg = (cls == AC_REG);
+                    bool isreg = (cls >= AC_REG);
                     uint x1 = x + SCAN_WG, x2 = x + 2 * SCAN_WG;
                     VS sa, sb;
                     sa.n = sh_n[x]; sa.a0 = sh_a[x]; sa.b0 = sh_b[x]; sa.a1 = 0; sa.b1 = 0; sa.a2 = 0;

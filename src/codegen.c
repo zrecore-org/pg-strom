@@ -6864,6 +6864,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__STDDEV_INT:
+				appendStringInfo(buf, "stddev::int[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
 			case KAGG_ACTION__STDDEV:
 				appendStringInfo(buf, "stddev[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,

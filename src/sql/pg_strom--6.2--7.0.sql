@@ -151,3 +151,31 @@ CREATE AGGREGATE pgstrom.max_numx(bytea)
   finalfunc = pgstrom.fminmax_final_numx,
   parallel = safe
 );
+
+---
+--- variance / stddev of int2, int4, int8: the partial state is PostgreSQL's integer accumulator state, exactly (A10)
+---
+CREATE FUNCTION pgstrom.pvarint(int2)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_varint2'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pvarint(int2,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_varint2'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pvarint(int4)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_varint4'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pvarint(int4,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_varint4'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pvarint(int8)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_varint8'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pvarint(int8,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_varint8'
+  LANGUAGE C STRICT PARALLEL SAFE;

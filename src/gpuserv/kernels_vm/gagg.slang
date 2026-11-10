@@ -374,7 +374,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                             {
                                 if (a_cls[k] == AC_VCONT)
                                     continue;
-                                bool isreg = (a_cls[k] == AC_REG);
+                                bool isreg = (a_cls[k] >= AC_REG);
                                 if (isreg && st_ok[j * GA_NA + k + 1] == 0)
                                     continue;
                                 VS vs;

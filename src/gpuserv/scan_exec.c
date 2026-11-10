@@ -1311,7 +1311,65 @@ typedef struct
  * The partials of the workgroups merge with float8_combine / float8_regr_combine (vagg.inc), in workgroup order; an overflow
  * PostgreSQL would raise sets fovf of the first accumulator.
  */
-#define VAGG_ACT(action)	((action) == KAGG_ACTION__STDDEV || (action) == KAGG_ACTION__COVAR)
+#define VAGG_ACT(action)	((action) == KAGG_ACTION__STDDEV || (action) == KAGG_ACTION__COVAR || (action) == KAGG_ACTION__STDDEV_INT)
+#define VAGG_NACC(action)	(((action) == KAGG_ACTION__COVAR || (action) == KAGG_ACTION__STDDEV_INT) ? 3 : 1)
+
+/*
+ * variance / stddev of int2, int4, int8 (action STDDEV_INT, class 13 + two continuation entries; A10): PostgreSQL's integer accumulator
+ * state exactly. The three accumulators hold n and Sx (signed 128 bits: acc[0].sum), Sx2 (unsigned 192 bits: the low 128 in
+ * acc[1].sum, the high 64 in acc[2].val). The kernel records carry them as (b0:a0), (b1:a1) and a2 (scan_common.slang, ivs_acc).
+ */
+typedef struct
+{
+	uint64_t	n;
+	unsigned __int128 sx;			/* two's complement */
+	unsigned __int128 sx2_lo;
+	uint64_t	sx2_hi;
+} ivar_state;
+
+static ivar_state
+ivar_of(const agg_acc *a)
+{
+	ivar_state	v;
+
+	v.n = a[0].n;
+	v.sx = (unsigned __int128) a[0].sum;
+	v.sx2_lo = (unsigned __int128) a[1].sum;
+	v.sx2_hi = (uint64_t) a[2].val;
+	return v;
+}
+
+static void
+ivar_to(agg_acc *a, ivar_state v)
+{
+	for (int i = 0; i < 3; i++)
+		a[i].n = v.n;
+	a[0].sum = (__int128) v.sx;
+	a[1].sum = (__int128) v.sx2_lo;
+	a[2].val = (int64_t) v.sx2_hi;
+}
+
+static void
+ivar_add_sq(ivar_state *v, unsigned __int128 sq)
+{
+	unsigned __int128 lo = v->sx2_lo + sq;
+
+	if (lo < sq)
+		v->sx2_hi += 1;
+	v->sx2_lo = lo;
+}
+
+static void
+ivar_add_value(agg_acc *a, int64_t x)
+{
+	ivar_state	v = ivar_of(a);
+	uint64_t	ax = (x < 0) ? (0 - (uint64_t) x) : (uint64_t) x;
+
+	v.n += 1;
+	v.sx += (unsigned __int128)(__int128) x;
+	ivar_add_sq(&v, (unsigned __int128) ax * ax);
+	ivar_to(a, v);
+}
 
 static VAcc
 vacc_of(const agg_acc *a)
@@ -1382,6 +1440,16 @@ vagg_merge_rec(uint32_t action, agg_acc *acc, const uint32_t *rec)
 		b.err = 0;
 		vacc_to(acc, vacc_merge(vacc_of(acc), b));
 	}
+	else if (action == KAGG_ACTION__STDDEV_INT)
+	{
+		ivar_state	v = ivar_of(acc);
+
+		v.n += rec[0];
+		v.sx += ((unsigned __int128) rec_b(rec) << 64) | rec_a(rec);
+		ivar_add_sq(&v, ((unsigned __int128) rec_b(rec + 6) << 64) | rec_a(rec + 6));
+		v.sx2_hi += rec_a(rec + 12);
+		ivar_to(acc, v);
+	}
 	else
 	{
 		RAcc		b;
@@ -1421,7 +1489,7 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 			if (VAGG_ACT(act))
 			{
 				agg_acc		tmp[3];
-				int			nacc = (act == KAGG_ACTION__COVAR) ? 3 : 1;
+				int			nacc = VAGG_NACC(act);
 
 				memset(tmp, 0, sizeof(tmp));
 				for (int t = 0; t < nacc; t++)
@@ -1826,6 +1894,9 @@ acc_add_value(agg_acc *acc, uint32_t cls, int64_t v, int64_t y)
 		}
 		case 12:		/* the continuation entries: the head adds for them */
 			break;
+		case 13:		/* variance, stddev of integers: the exact state; acc is the head of three (A10) */
+			ivar_add_value(acc, v);
+			break;
 		case 1:			/* count(*) */
 		case 2:			/* count(x) */
 			acc->n += 1;
@@ -2015,6 +2086,30 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 
 				memcpy(&r->sum_x2, &sxx, sizeof(r->sum_x2));
 			}
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		case KAGG_ACTION__STDDEV_INT:
+		{
+			/* the exact integer state (kagg_state__ivar_packed) of PostgreSQL's int4_accum / int8_accum; acc points to the three accumulators */
+			kagg_state__ivar_packed *r = (kagg_state__ivar_packed *) cv->data;
+			ivar_state	v;
+
+			if (acc->n == 0)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			v = ivar_of(acc);
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = 0;
+			r->nitems = (int64_t) v.n;
+			r->sum_x[0] = (uint64_t) v.sx;
+			r->sum_x[1] = (uint64_t) (v.sx >> 64);
+			r->sum_x2[0] = (uint64_t) v.sx2_lo;
+			r->sum_x2[1] = (uint64_t) (v.sx2_lo >> 64);
+			r->sum_x2[2] = v.sx2_hi;
 			cv->len = sizeof(*r);
 			break;
 		}
@@ -3554,7 +3649,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				{
 					/* the session's accumulators of this column: one, or three for covar / corr / regr_* (A10) */
 					int		a = (prog && prog->words && prog->agg_of_col[j] >= 0) ? prog->agg_of_col[j] : (int) j;
-					int		nacc = (action == KAGG_ACTION__COVAR) ? 3 : 1;
+					int		nacc = VAGG_NACC(action);
 
 					memset(acc, 0, sizeof(acc));
 					for (int t = 0; t < nacc; t++)

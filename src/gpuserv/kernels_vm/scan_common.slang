@@ -1460,9 +1460,68 @@ struct VS
     int64_t a2;
 };
 
+
+// exact variance / stddev of int2, int4 and int8 (class 13: the head of three entries, the other two are class 12; A10). The state of
+// PostgreSQL's int4_accum / int8_accum, exactly: N, Sx as a signed 128-bit sum (b0:a0, low word first) and Sx2, the sum of the squares,
+// as an unsigned 192-bit sum (a2:b1:a1). Integer addition is exact and order independent, so any order of rows and of partials gives
+// PostgreSQL's numbers; the final function runs on the backend (aggfuncs.c).
+VS ivs_acc(VS s, uint64_t x)
+{
+    VS r = s;
+    uint64_t xhi = (int64_t(x) < 0) ? 0xffffffffffffffffull : 0ull;
+    uint64_t lo = uint64_t(s.a0) + x;
+    uint64_t hi = uint64_t(s.b0) + xhi + ((lo < x) ? 1ull : 0ull);
+    // x * x as 128 bits: |x| = h * 2^32 + l
+    uint64_t ax = (int64_t(x) < 0) ? (0ull - x) : x;
+    uint64_t l = ax & 0xffffffffull;
+    uint64_t h = ax >> 32;
+    uint64_t ll = l * l;
+    uint64_t lh = l * h;
+    uint64_t hh = h * h;
+    uint64_t plo = ll + (lh << 33);
+    uint64_t phi = hh + (lh >> 31) + ((plo < ll) ? 1ull : 0ull);
+    uint64_t t0 = uint64_t(s.a1) + plo;
+    uint64_t c0 = (t0 < plo) ? 1ull : 0ull;
+    uint64_t t1 = uint64_t(s.b1) + phi;
+    uint64_t c1 = (t1 < phi) ? 1ull : 0ull;
+    uint64_t t2 = t1 + c0;
+    if (t2 < t1)
+        c1 += 1ull;
+    r.n = s.n + 1u;
+    r.a0 = int64_t(lo);
+    r.b0 = int64_t(hi);
+    r.a1 = int64_t(t0);
+    r.b1 = int64_t(t2);
+    r.a2 = int64_t(uint64_t(s.a2) + c1);
+    return r;
+}
+
+VS ivs_merge(VS a, VS b)
+{
+    VS r = a;
+    uint64_t lo = uint64_t(a.a0) + uint64_t(b.a0);
+    uint64_t hi = uint64_t(a.b0) + uint64_t(b.b0) + ((lo < uint64_t(b.a0)) ? 1ull : 0ull);
+    uint64_t t0 = uint64_t(a.a1) + uint64_t(b.a1);
+    uint64_t c0 = (t0 < uint64_t(b.a1)) ? 1ull : 0ull;
+    uint64_t t1 = uint64_t(a.b1) + uint64_t(b.b1);
+    uint64_t c1 = (t1 < uint64_t(b.b1)) ? 1ull : 0ull;
+    uint64_t t2 = t1 + c0;
+    if (t2 < t1)
+        c1 += 1ull;
+    r.n = a.n + b.n;
+    r.a0 = int64_t(lo);
+    r.b0 = int64_t(hi);
+    r.a1 = int64_t(t0);
+    r.b1 = int64_t(t2);
+    r.a2 = int64_t(uint64_t(a.a2) + uint64_t(b.a2) + c1);
+    return r;
+}
+
 [noinline] VS vs_acc(uint cls, VS s, uint64_t x, uint64_t y, inout uint err)
 {
     VS r = s;
+    if (cls == 13u)
+        return ivs_acc(s, x);
     if (cls == 10u)
     {
         VAcc t;
@@ -1503,6 +1562,8 @@ struct VS
 [noinline] VS vs_merge(uint cls, VS a, VS b, inout uint err)
 {
     VS r = a;
+    if (cls == 13u)
+        return ivs_merge(a, b);
     if (cls == 10u)
     {
         VAcc ta, tb;

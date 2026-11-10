@@ -451,8 +451,8 @@
                     {
                         if (cls == AC_VCONT)
                             continue;
-                        bool isreg = (cls == AC_REG);
-                        uint rb = isreg ? prog[aggoff + 4 * (k + 1) + 1] : ra;         // the Y register of regr(Y, X)
+                        bool isreg = (cls >= AC_REG);
+                        uint rb = (cls == AC_REG) ? prog[aggoff + 4 * (k + 1) + 1] : ra;         // the Y register of regr(Y, X)
                         if (regs[ra].isnull != 0 || (isreg && regs[rb].isnull != 0))
                             continue;
                         VS s;
@@ -722,7 +722,7 @@
                             {
                                 if (a_cls[k] == AC_VCONT)
                                     continue;
-                                bool isreg = (a_cls[k] == AC_REG);
+                                bool isreg = (a_cls[k] >= AC_REG);
                                 if (isreg && st_ok[j * GA_NA + k + 1] == 0)
                                     continue;
                                 VS vs;
