@@ -59,11 +59,17 @@ LIB_OBJS   += arrow_exec.o
 # GPU-Cache (A7 part 2)
 LIB_OBJS   += gcache.o
 # GPU-Sort (A7): the bitonic sort kernel and the host side
+# Every VM kernel depends on every kernel source: the per-rule lists missed includes of includes (f64_soft.inc and
+# area_ring.inc are included by scan_common.slang and were in no rule), so an edit of one of them left stale SPIR-V in
+# the service while the planner and the program builder already spoke the new instruction set (wrong or empty results
+# right after a merge that changed such a file). Identical output costs nothing: the driver's caches key on the SPIR-V.
+KDEPS := $(wildcard kernels_vm/*.slang kernels_vm/*.inc)
 # the lite and nogeom variants of every VM kernel (see LITE_FLAGS / NOGEOM_FLAGS)
 SPV_VMBASE := build/gpuscan8.spv build/gpuscan16.spv build/gpuscan32.spv $(AGG_SPV) $(GAGG_SPV) $(GTAB_SPV) $(JOIN_SPV) $(JAGG_SPV) $(JGAGG_SPV) $(ARROW_SPV) $(AAGG_SPV) $(AGAGG_SPV) $(AGTAB_SPV) $(AJOIN_SPV) $(AJAGG_SPV) $(AJGAGG_SPV)
 SPV_LITE   := $(patsubst build/%.spv,build/%_lite.spv,$(SPV_VMBASE))
 SPV_NOGEOM := $(patsubst build/%.spv,build/%_nogeom.spv,$(SPV_VMBASE))
 SPV_FILES  += $(SPV_LITE) $(SPV_NOGEOM)
+$(SPV_VMBASE) $(SPV_LITE) $(SPV_NOGEOM): $(KDEPS)
 SPV_FILES  += build/gsort.spv
 LIB_OBJS   += gpusort.o gpu_vk_seq.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
