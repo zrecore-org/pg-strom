@@ -2830,6 +2830,9 @@ pgstromExplainSelectIntoDirect(pgstromTaskState *pts, List *dcontext, ExplainSta
 			case KAGG_FINAL__FMINMAX_BOOL:
 				appendStringInfo(&buf, "fminmax_bool(%s)", str);
 				break;
+			case KAGG_FINAL__FMINMAX_NUMX:
+				appendStringInfo(&buf, "fminmax_numx(%s)", str);
+				break;
 			case KAGG_FINAL__FSUM_INT:
 				appendStringInfo(&buf, "fsum_int(%s)", str);
 				break;

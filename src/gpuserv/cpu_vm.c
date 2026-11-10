@@ -2901,6 +2901,12 @@ cpu_eval_row(const scan_prog *prog, const unsigned char *htup,
 				regs[slot].v = 0;
 				regs[slot].isnull = 0;
 			}
+			else if (slot != 0xff && vt == SOP_VT_STR)
+			{
+				/* a fixed-length by-reference value (a 16 byte uuid): a string register over its bytes (source 0: the tuple) */
+				regs[slot].v = (int64_t)((uint64_t) off | ((uint64_t) alen << 32));
+				regs[slot].isnull = 0;
+			}
 			else if (slot != 0xff)
 			{
 				int64_t		v = 0;

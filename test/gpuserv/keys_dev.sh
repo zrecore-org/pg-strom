@@ -53,7 +53,8 @@ sql "create table tko as select i,
 	(i % 50)::int4 as n,
 	case when i % 40 = 0 then repeat(chr(97 + i % 4), 5000 + (i % 3)) end as big,
 	case when i % 40 = 0 then repeat(md5((i % 6)::text), 160) end as ext,
-	i::int8 as pay
+	i::int8 as pay,
+	case when i % 31 = 0 then null else md5((i % 40)::text)::uuid end as u
 	from generate_series(1, $NROWS) i"
 sql "alter table tko alter column ext set storage external"
 sql "update tko set ext = ext where i % 1 = 0"
@@ -64,11 +65,12 @@ sql "create table tki as select i,
 	(i % 50)::int4 as n,
 	repeat(chr(97 + i % 4), 5000 + (i % 3)) as big,
 	repeat(md5((i % 6)::text), 160) as ext,
-	(i * 3)::int4 as grp
+	(i * 3)::int4 as grp,
+	case when i % 23 = 0 then null else md5((i % 60)::text)::uuid end as u
 	from generate_series(1, 4000) i"
 sql "alter table tki alter column ext set storage external"
 sql "update tki set ext = ext where i % 1 = 0"
-sql "insert into tki select i + 5000, k, kv, kb, n, big, ext, grp from tki where i % 10 = 0"
+sql "insert into tki select i + 5000, k, kv, kb, n, big, ext, grp, u from tki where i % 10 = 0"
 sql "vacuum analyze tko"; sql "vacuum analyze tki"
 # bool keys: tbo (3000 rows) joined to the 4 rows of tbi
 sql "create table tbo as select i, case when i % 13 = 0 then null else (i % 3 = 0) end as b, (i % 5)::int4 as n, (i % 7)::int4 as m, (i % 4)::int4 as o, i::int8 as pay from generate_series(1, 3000) i"
@@ -89,6 +91,19 @@ sql "create table tfi as select * from (values (0::float4, 0::float8, 1), (-0.0:
 	('Infinity'::float4, 'Infinity'::float8, 4), (1.5::float4, 1.5::float8, 5), (null::float4, null::float8, 6), (-1.5::float4, -1.5::float8, 7),
 	(1e-45::float4, 5e-324::float8, 8), (0.25::float4, 0.25::float8, 9), (0.5::float4, 0.5::float8, 10)) v(f4, f8, w)"
 sql "analyze tfo"; sql "analyze tfi"
+# numeric keys: equal values of different scales (1.5, 1.50, 1.500), zero in several scales, NaN, a value beyond 18 digits (the backend
+# joins those rows), NULLs
+sql "create table tno as select i,
+	(case i % 20 when 0 then null when 1 then 'NaN'::numeric when 2 then 123456789012345678901234567890::numeric when 3 then 1.5
+	 when 4 then 1.50 when 5 then 1.500 when 6 then -0.25 when 7 then 0 when 8 then 0.00 when 9 then 100 when 10 then 1e2::numeric
+	 else (i % 9)::numeric / 4 end) as nm,
+	(i % 4)::int4 as n, i::int8 as pay,
+	case when i % 17 = 0 then null else (((i * 37) % 20011 - 5000) / 8.0)::numeric(12,3) end as nc
+	from generate_series(1, 6000) i"
+sql "create table tni as select * from (values (1.5, 1), (1.50, 2), ('NaN'::numeric, 3), (123456789012345678901234567890::numeric, 4), (0.0, 5),
+	(-0.25, 6), (100.000, 7), (null::numeric, 8), (0.5, 9), (2.25, 10), (0.75, 11), (1.000, 12)) v(nm, w)"
+sql "alter table tno alter column nc type numeric(12,3)"	# (a CASE loses the typmod of its branches)
+sql "analyze tno"; sql "analyze tni"
 # GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
 # table is sized for the estimate and overflows); tkb is big enough for several tasks
 sql "create table tkm as select md5((i % 100)::text) as k, (i % 7)::int4 as n, i::int8 as v from generate_series(1, 20000) i"
@@ -110,7 +125,7 @@ $P2A -h "$ROOT" -p "$PORT" -u postgres -d scantest -c "select $KSEL from tko whe
 check "pg2arrow writes the Parquet file" $?
 sql "create foreign table tkoa ($KCOLS) server arrow_fdw options (file '$KDIR/tko.arrow')"
 sql "create foreign table tkop ($KCOLS) server arrow_fdw options (file '$KDIR/tko.parquet')"
-sql "create table tkog as select $KSEL from tko where i <= 30000"
+sql "create table tkog as select $KSEL, u from tko where i <= 30000"
 sql "vacuum analyze tkog"
 sql "create trigger gc_sync after insert or update or delete on tkog for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=90000')"
 sql "analyze tkoa"; sql "analyze tkop"

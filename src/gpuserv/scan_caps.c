@@ -218,6 +218,10 @@ classify_string(const char *name)
 	{
 		fc.cls = SOP_STRCMP; fc.kind = k;
 	}
+	else if (!strncmp(name, "uuid_", 5) && (k = cmp_kind_of(name + 5)) >= 0)
+	{
+		fc.cls = SOP_STRCMP; fc.kind = k;			/* 16 bytes, compared bytewise (uuid_cmp is memcmp) */
+	}
 	else if (!strcmp(name, "like") || !strcmp(name, "textlike"))
 	{
 		fc.cls = SOP_STRLIKE; fc.kind = 0;
@@ -768,6 +772,107 @@ scan_vm_numeric_datum_decode(const unsigned char *d, int64_t *v, uint32_t *sc)
 		memcpy(&h, d, 4);
 		return scan_vm_numeric_payload_decode(d + 4, ((h >> 2) & 0x3fffffffU) - 4, v, sc);
 	}
+}
+
+/*
+ * The canonical form of a numeric as the join hash sees it: { unscaled, scale } with the scale the value is stored with and the trailing
+ * zeros stripped while the scale is above 0 (the kernel does the same to what num_decode() reads). Unlike the kernel's decode this
+ * accepts up to 36 digits and any scale of 60 or less, so 0.5 stored with 20 decimals (5e19 does not fit an int64) has the canonical
+ * form { 5, 1 } of the 0.5 the kernel reads. 0 if the value has no such form (NaN, Infinity, too long): hash_numeric() then.
+ */
+int
+scan_vm_numeric_datum_canon(const unsigned char *d, __int128 *v, uint32_t *sc)
+{
+	const unsigned char *p;
+	uint32_t	plen, hl, dscale, ndig;
+	uint16_t	hdr;
+	int			neg, weight, e;
+	__int128	acc = 0;
+
+	if (d[0] & 1)
+	{
+		if (d[0] == 1)
+			return 0;
+		p = d + 1;
+		plen = ((d[0] >> 1) & 0x7f) - 1;
+	}
+	else
+	{
+		uint32_t	h;
+
+		if ((d[0] & 3) == 2)
+			return 0;
+		memcpy(&h, d, 4);
+		p = d + 4;
+		plen = ((h >> 2) & 0x3fffffffU) - 4;
+	}
+	if (plen < 2)
+		return 0;
+	memcpy(&hdr, p, 2);
+	if ((hdr & 0xc000) == 0xc000)
+		return 0;
+	if (hdr & 0x8000)
+	{
+		neg = (hdr & 0x2000) != 0;
+		dscale = (hdr >> 7) & 0x3f;
+		weight = (int)(hdr & 0x3f) - ((hdr & 0x40) ? 64 : 0);
+		hl = 2;
+	}
+	else
+	{
+		int16_t		w;
+
+		if (plen < 4)
+			return 0;
+		neg = (hdr & 0x4000) != 0;
+		dscale = hdr & 0x3fff;
+		memcpy(&w, p + 2, 2);
+		weight = w;
+		hl = 4;
+	}
+	ndig = (plen - hl) / 2;
+	if (dscale > 60 || ndig > 9)
+		return 0;
+	for (uint32_t i = 0; i < ndig; i++)
+	{
+		uint16_t	dg;
+
+		memcpy(&dg, p + hl + 2 * i, 2);
+		acc = acc * 10000 + dg;
+	}
+	e = 4 * (weight - (int) ndig + 1) + (int) dscale;
+	if (acc != 0)
+	{
+		if (e >= 0)
+		{
+			for (int i = 0; i < e; i++)
+			{
+				if (acc > (((__int128) 1 << 120) / 10))
+					return 0;
+				acc *= 10;
+			}
+		}
+		else
+		{
+			for (int i = 0; i < -e; i++)
+			{
+				if (acc % 10 != 0)
+					return 0;
+				acc /= 10;
+			}
+		}
+	}
+	*sc = dscale;
+	if (acc == 0)
+		*sc = 0;
+	else
+		while (*sc > 0 && acc % 10 == 0)
+		{
+			acc /= 10;
+			(*sc)--;
+		}
+	*v = neg ? -acc : acc;
+	return 1;
 }
 
 /*
@@ -1570,6 +1675,8 @@ scan_vm_joinkey_type_supported(int type_code)
 	{
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:
+		case TypeOpCode__uuid:
+		case TypeOpCode__numeric:		/* hashed as the canonical { int64, scale } (SOP_HASHMERGE k1 = 5), compared by NUMCMP */
 		case TypeOpCode__float4:		/* hashed with -0 -> +0 and one NaN (SOP_HASHMERGE k1 = 3, 4), compared by CMPF / CMPD */
 		case TypeOpCode__float8:
 			return true;

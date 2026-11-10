@@ -23,6 +23,8 @@ pgstrom_group_string_key_ok(Expr *expr)
 		node = (Node *) ((RelabelType *) node)->arg;
 	if (!node || !IsA(node, Var))
 		return false;
+	if (exprType(node) == UUIDOID)
+		return true;				/* no collation: 16 bytes */
 	return (OidIsValid(exprCollation((Node *) expr)) &&
 			get_collation_isdeterministic(exprCollation((Node *) expr)));
 }
@@ -192,12 +194,18 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
+	/*
+	 * min / max of a numeric of a known scale (numeric(p,s) columns and what follows from them): the Vulkan service takes the
+	 * extreme of the unscaled int64 values, and its partial state is the numeric itself in a bytea (pgstrom.pmin(numeric),
+	 * pgstrom.min_numx(bytea)): exact, unlike the float8 state of the CUDA code. The action is the integer one; the typmod of
+	 * the argument (a numeric typmod, see below) tells the service the scale.
+	 */
 	{"min(numeric)",
-	 "s:min_num(bytea)",
-	 "s:pmin(float8)",
-	 "s:fmin_num(bytea)",
-	 KAGG_ACTION__PMIN_FP64,
-	 KAGG_FINAL__FMINMAX_NUMERIC,
+	 "s:min_numx(bytea)",
+	 "s:pmin(numeric)",
+	 "s:fmin_numx(bytea)",
+	 KAGG_ACTION__PMIN_INT64,
+	 KAGG_FINAL__FMINMAX_NUMX,
 	 true,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
@@ -343,11 +351,11 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(numeric)",
-	 "s:max_num(bytea)",
-	 "s:pmax(float8)",
-	 "s:fmax_num(bytea)",
-	 KAGG_ACTION__PMAX_FP64,
-	 KAGG_FINAL__FMINMAX_NUMERIC,
+	 "s:max_numx(bytea)",
+	 "s:pmax(numeric)",
+	 "s:fmax_numx(bytea)",
+	 KAGG_ACTION__PMAX_INT64,
+	 KAGG_FINAL__FMINMAX_NUMX,
 	 true,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
@@ -1723,7 +1731,10 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 		{
 			groupby_typmod = exprTypmod((Node *)expr);
 			if (aggfn_cat->partial_func_action == KAGG_ACTION__PSUM_NUMERIC ||
-				aggfn_cat->partial_func_action == KAGG_ACTION__PAVG_NUMERIC)
+				aggfn_cat->partial_func_action == KAGG_ACTION__PAVG_NUMERIC ||
+				((aggfn_cat->partial_func_action == KAGG_ACTION__PMIN_INT64 ||
+				  aggfn_cat->partial_func_action == KAGG_ACTION__PMAX_INT64) &&
+				 exprType((Node *) expr) == NUMERICOID))
 			{
 				/*
 				 * The Vulkan service sums numerics as unscaled integers of one scale: it must be known
@@ -2067,7 +2078,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
 				   pgstrom_numeric_static_dscale((Node *) expr) <= 255) &&
 				 !((dtype->type_code == TypeOpCode__text ||
-					dtype->type_code == TypeOpCode__bpchar) &&
+					dtype->type_code == TypeOpCode__bpchar ||
+					dtype->type_code == TypeOpCode__uuid) &&
 				   con->inner_target_list == NIL &&
 				   pgstrom_group_string_key_ok(expr)) &&
 				 /* float4 / float8 keys of the scanned relation: the program groups on x + 0.0 (-0 = +0, NaN = NaN) */
@@ -2083,6 +2095,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			coll_oid = exprCollation((Node *)expr);
 			if (dtype->type_code != TypeOpCode__text &&
 				dtype->type_code != TypeOpCode__bpchar &&
+				dtype->type_code != TypeOpCode__uuid &&
 				devtype_lookup_equal_func(dtype, coll_oid) == NULL)
 			{
 				elog(DEBUG2, "GROUP BY contains unsupported device type (%s): %s",

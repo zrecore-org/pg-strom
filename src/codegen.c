@@ -624,29 +624,40 @@ devtype_float8_hash(bool isnull, Datum value)
 	return hash_any((unsigned char *)&f, sizeof(double));
 }
 
+/*
+ * numeric: equal values must hash alike whatever their display scale (1.5, 1.50, 0.5 stored with 20 decimals). The canonical form is
+ * { unscaled, scale } with the trailing zeros stripped while the scale is above 0 (scan_vm_numeric_datum_canon); what fits an int64
+ * hashes as the kernel hashes it (scan_common.slang, SOP_HASHMERGE k1 = 5). NaN, Infinity and values beyond 36 digits use PostgreSQL's hash_numeric
+ * (such a value is never equal to one that has a canonical form).
+ */
 static uint32_t
 devtype_numeric_hash(bool isnull, Datum value)
 {
-	uint32_t	hash;
-	uint8_t		kind;
-	int16_t		weight;
-	int128_t	num;
-	const char *emsg;
+	struct varlena *vl;
+	__int128	v;
+	uint32_t	sc, hash;
 
 	if (isnull)
 		return 0;
-	emsg = __decimal_from_varlena(&kind,
-								  &weight,
-								  &num,
-								  (varlena *)value);
-	if (emsg)
-		elog(ERROR, "%s", emsg);
-	if (kind == XPU_NUMERIC_KIND__VALID)
-		hash = (hash_any((unsigned char *)&weight, sizeof(int16_t)) ^
-				hash_any((unsigned char *)&num, sizeof(int128_t)));
-	else
-		hash = hash_any((unsigned char *)&kind, sizeof(uint8_t));
+	vl = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
+	if (scan_vm_numeric_datum_canon((const unsigned char *) vl, &v, &sc))
+	{
+		if (v >= INT64_MIN && v <= INT64_MAX)
+		{
+			int64_t		v8 = (int64_t) v;
 
+			/* what the kernel hashes (SOP_HASHMERGE k1 = 5) */
+			hash = hash_any((unsigned char *)&v8, sizeof(int64_t)) ^
+				hash_any((unsigned char *)&sc, sizeof(uint32_t));
+		}
+		else	/* the kernel never reads such a value (the row goes to the backend) */
+			hash = hash_any((unsigned char *)&v, sizeof(__int128)) ^
+				hash_any((unsigned char *)&sc, sizeof(uint32_t));
+	}
+	else
+		hash = DatumGetUInt32(DirectFunctionCall1(hash_numeric, PointerGetDatum(vl)));
+	if ((Pointer) vl != DatumGetPointer(value))
+		pfree(vl);
 	return hash;
 }
 
@@ -3235,8 +3246,12 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 		return vulkan_geom_dwithin_args_ok(func_args);
 	if (fc.cls == SOP_GEOMMK)
 		return codegen_geom_mk_ok;
-	/* numeric: not in a join program (its registers are not loaded there) */
-	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+	/*
+	 * numeric: in a join program only the equality of two numerics (a join key: the kernel hashes the canonical { int64, scale } pair,
+	 * SOP_HASHMERGE k1 = 5, and compares with NUMCMP; a value it cannot read makes the backend join the row)
+	 */
+	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN &&
+		!(fc.cls == SOP_NUMCMP && (fc.kind == SOP_CMP_EQ || fc.kind == SOP_CMP_NE)))
 	{
 		ListCell   *lc;
 
@@ -3293,6 +3308,10 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN &&
 		!(fc.cls == SOP_STRCMP && (fc.kind == SOP_CMP_EQ || fc.kind == SOP_CMP_NE)))
 		return false;
+	/* a uuid has no collation: its comparison is the memcmp of 16 bytes */
+	if (fc.cls == SOP_STRCMP && dfunc->func_nargs > 0 && dfunc->func_argtypes[0] &&
+		dfunc->func_argtypes[0]->type_code == TypeOpCode__uuid)
+		return true;
 	if (!OidIsValid(func_collid) || !get_collation_isdeterministic(func_collid))
 		return false;
 	if (fc.cls == SOP_STRLEN)

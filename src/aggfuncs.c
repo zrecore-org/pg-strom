@@ -20,6 +20,10 @@ PG_FUNCTION_INFO_V1(pgstrom_partial_nrows_filtered);
 
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_bool);
+PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_numeric);
+PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_numeric);
+PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_numeric);
+PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_numx);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp64);
@@ -252,6 +256,104 @@ pgstrom_fminmax_final_int8(PG_FUNCTION_ARGS)
 	if (state->value < SCHAR_MIN || state->value > SCHAR_MAX)
 		elog(ERROR, "min/max(int1) out of range");
 	PG_RETURN_INT32(state->value);
+}
+
+/*
+ * min / max of a numeric of a known scale (A6): the partial state is the numeric itself (its varlena, header included) in a bytea;
+ * an empty payload says "no value". The Vulkan service writes the same form (scan_exec.c, agg_col_value).
+ */
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_minmax_numeric(PG_FUNCTION_ARGS)
+{
+	struct varlena *num;
+	bytea	   *r;
+	Size		len;
+
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	num = (struct varlena *) PG_GETARG_DATUM(0);
+	num = pg_detoast_datum_packed(num);
+	len = VARSIZE_ANY(num);
+	r = (bytea *) palloc(VARHDRSZ + len);
+	SET_VARSIZE(r, VARHDRSZ + len);
+	memcpy(VARDATA(r), num, len);
+	PG_RETURN_BYTEA_P(r);
+}
+
+static Datum
+__minmax_trans_numeric(PG_FUNCTION_ARGS, bool is_min)
+{
+	MemoryContext aggcxt;
+	bytea	   *state, *arg;
+
+	if (!AggCheckCallContext(fcinfo, &aggcxt))
+		elog(ERROR, "aggregate function called in non-aggregate context");
+	if (PG_ARGISNULL(1))
+	{
+		if (PG_ARGISNULL(0))
+			PG_RETURN_NULL();
+		PG_RETURN_BYTEA_P(PG_GETARG_BYTEA_P(0));
+	}
+	arg = PG_GETARG_BYTEA_P(1);
+	if (VARSIZE_ANY_EXHDR(arg) == 0)
+	{
+		if (PG_ARGISNULL(0))
+			PG_RETURN_BYTEA_P(arg);
+		PG_RETURN_BYTEA_P(PG_GETARG_BYTEA_P(0));
+	}
+	if (PG_ARGISNULL(0))
+	{
+		state = MemoryContextAlloc(aggcxt, VARSIZE_ANY(arg));
+		memcpy(state, arg, VARSIZE_ANY(arg));
+		PG_RETURN_BYTEA_P(state);
+	}
+	state = PG_GETARG_BYTEA_P(0);
+	if (VARSIZE_ANY_EXHDR(state) == 0)
+	{
+		state = MemoryContextAlloc(aggcxt, VARSIZE_ANY(arg));
+		memcpy(state, arg, VARSIZE_ANY(arg));
+		PG_RETURN_BYTEA_P(state);
+	}
+	{
+		int32		cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp,
+															PointerGetDatum(VARDATA_ANY(arg)),
+															PointerGetDatum(VARDATA_ANY(state))));
+
+		if (is_min ? (cmp < 0) : (cmp > 0))
+		{
+			bytea	   *r = MemoryContextAlloc(aggcxt, VARSIZE_ANY(arg));
+
+			memcpy(r, arg, VARSIZE_ANY(arg));
+			PG_RETURN_BYTEA_P(r);
+		}
+	}
+	PG_RETURN_BYTEA_P(state);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fmin_trans_numeric(PG_FUNCTION_ARGS)
+{
+	return __minmax_trans_numeric(fcinfo, true);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fmax_trans_numeric(PG_FUNCTION_ARGS)
+{
+	return __minmax_trans_numeric(fcinfo, false);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fminmax_final_numx(PG_FUNCTION_ARGS)
+{
+	bytea	   *state = PG_GETARG_BYTEA_P(0);
+	struct varlena *r;
+	Size		len = VARSIZE_ANY_EXHDR(state);
+
+	if (len == 0)
+		PG_RETURN_NULL();
+	r = (struct varlena *) palloc(len);
+	memcpy(r, VARDATA_ANY(state), len);
+	PG_RETURN_POINTER(r);
 }
 
 PUBLIC_FUNCTION(Datum)

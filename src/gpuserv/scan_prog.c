@@ -153,6 +153,8 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		case TypeOpCode__bpchar:      *p_bytes = 0; return SOP_VT_STR;
 		/* A11: a geometry is the payload of a varlena (GSERIALIZED), read like a string */
 		case TypeOpCode__geometry:    *p_bytes = 0; return SOP_VT_STR;
+		/* A6: a uuid is a string register of 16 bytes (the column is fixed-length: deform_col, arrow_load mode 4) */
+		case TypeOpCode__uuid:        *p_bytes = 0; return SOP_VT_STR;
 		/* A6: numeric is { unscaled int64, scale } when the value fits (otherwise the row is rechecked) */
 		case TypeOpCode__numeric:     *p_bytes = 0; return SOP_VT_NUM;
 		/* A8: a jsonb value is a register that points at its container */
@@ -220,8 +222,6 @@ emit_numconst(builder *b, const unsigned char *datum, int isnull, int *next)
 	int64_t		v = 0;
 	uint32_t	sc = 0;
 
-	if (b->no_strings)
-		return fail(b, "numeric is not supported in a join");
 	if (!isnull && !scan_vm_numeric_datum_decode(datum, &v, &sc))
 		return fail(b, "a numeric constant that does not fit 64 bits (or NaN/Infinity)");
 	dst = new_reg(b, next);
@@ -229,6 +229,23 @@ emit_numconst(builder *b, const unsigned char *datum, int isnull, int *next)
 		return -1;
 	return emit(b, SOP_NUMCONST, dst, isnull ? 1 : 0, sc,
 				(uint32_t)((uint64_t) v & 0xffffffffU), (uint32_t)((uint64_t) v >> 32)) < 0 ? -1 : dst;
+}
+
+/* a uuid constant (16 bytes, no header) as a string register */
+static int
+emit_constuuid(builder *b, const unsigned char *datum, int isnull, int *next)
+{
+	int			dst;
+	int64_t		off = 0;
+
+	if (!isnull && (off = pool_add(b, datum, 16)) < 0)
+		return -1;
+	dst = new_reg(b, next);
+	if (dst < 0)
+		return -1;
+	if (isnull)
+		return emit(b, SOP_CONST, dst, 1, 0, 0, 0) < 0 ? -1 : dst;
+	return emit(b, SOP_CONSTSTR, dst, 0, 0, (uint32_t) off, 16) < 0 ? -1 : dst;
 }
 
 /* a string constant (a text datum) as a register */
@@ -268,6 +285,8 @@ emit_const(builder *b, const kern_expression *kexp, int *next)
 		return fail(b, "constant of an unsupported type (opcode type %u)", kexp->exptype);
 	if (vt == SOP_VT_JSON)
 		return fail(b, "a jsonb constant is only supported as the pattern of @>");
+	if (vt == SOP_VT_STR && kexp->exptype == TypeOpCode__uuid)
+		return emit_constuuid(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (vt == SOP_VT_NUM)
@@ -329,6 +348,8 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 	off = session->poffset[id];
 	if (vt == SOP_VT_JSON)
 		return fail(b, "a jsonb parameter is not supported");
+	if (vt == SOP_VT_STR && kexp->exptype == TypeOpCode__uuid)
+		return emit_constuuid(b, (const unsigned char *) session + off, off == 0, next);
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) session + off, off == 0, next);
 	if (vt == SOP_VT_NUM)
@@ -987,8 +1008,8 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 				 * string function into a join, a geometry qual of a GiST join reads the inner one, A13), not
 				 * numerics or jsonb
 				 */
-				if (b->no_strings && reg_vtype(kexp->exptype, &bytes) != SOP_VT_STR)
-					return fail(b, "strings and numerics are not supported in a join");
+				if (b->no_strings && reg_vtype(kexp->exptype, &bytes) != SOP_VT_STR && reg_vtype(kexp->exptype, &bytes) != SOP_VT_NUM)
+					return fail(b, "jsonb is not supported in a join");
 				b->slot_strval[slot] = 1;
 			}
 			if (b->slot_resno[slot] > 0)
@@ -1436,7 +1457,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 
 					if (k0->opcode != FuncOpCode__VarExpr || k0->u.v.var_slot_id >= b.nslots ||
 						b.slot_resno[k0->u.v.var_slot_id] <= 0 ||
-						(kk->exptype != TypeOpCode__text && kk->exptype != TypeOpCode__bpchar))
+						(kk->exptype != TypeOpCode__text && kk->exptype != TypeOpCode__bpchar &&
+						 kk->exptype != TypeOpCode__uuid))
 					{
 						fail(&b, "a GROUP BY string key must be a column");
 						goto error;
@@ -1610,9 +1632,18 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					cls = 3;
 					break;
 				case KAGG_ACTION__PMIN_INT32:
-				case KAGG_ACTION__PMIN_INT64:	cls = 4; break;
+				case KAGG_ACTION__PMIN_INT64:
 				case KAGG_ACTION__PMAX_INT32:
-				case KAGG_ACTION__PMAX_INT64:	cls = 5; break;
+				case KAGG_ACTION__PMAX_INT64:
+					cls = (d->action == KAGG_ACTION__PMIN_INT32 || d->action == KAGG_ACTION__PMIN_INT64) ? 4 : 5;
+					/*
+					 * min / max of a numeric of one known scale (the planner passes a numeric typmod: 38 << 16 and up; the
+					 * typmods of the temporal types are small): the extreme of the unscaled int64 values, every row must have
+					 * the scale (as a sum of numerics), and the reply carries the numeric
+					 */
+					if (d->typmod >= (int32_t) (38 << 16))
+						prog->agg_scale[nagg] = (int) (((uint32_t)(d->typmod - 4)) & 0x7ffU);
+					break;
 				/* A10: float8 (sum, avg, min, max): classes 6 - 8, without GROUP BY (checked below) */
 				case KAGG_ACTION__PSUM_FP:
 				case KAGG_ACTION__PAVG_FP:		cls = 6; break;
@@ -1830,7 +1861,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* only IS [NOT] NULL reads it */
 			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)
 			{
-				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
+				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1 && kds_src->colmeta[b.slot_resno[s] - 1].attlen != 16)
 				{
 					fail(&b, "column %d does not have the type the expression expects", b.slot_resno[s]);
 					goto error;
@@ -1973,9 +2004,9 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 		int		bytes, r;
 
 		int		is_str = (reg_vtype(karg->exptype, &bytes) == SOP_VT_STR);
+		/* (a numeric key: k0 = 0 too) */
 
-		if (!reg_vtype(karg->exptype, &bytes) ||
-			reg_vtype(karg->exptype, &bytes) == SOP_VT_NUM || reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
+		if (!reg_vtype(karg->exptype, &bytes) || reg_vtype(karg->exptype, &bytes) == SOP_VT_JSON)
 			return fail(b, "join key of an unsupported type (opcode type %u)", karg->exptype);
 		*next = acc + 1;
 		r = expr_to_reg(b, karg, next);
@@ -1985,7 +2016,8 @@ emit_hash_value(builder *b, const kern_expression *khash, int *next)
 		 */
 		if (r < 0 || emit(b, SOP_HASHMERGE, acc, r, 0, is_str ? 0 : bytes,
 						  is_str ? (karg->exptype == TypeOpCode__bpchar ? 2 : 1) :
-						  karg->exptype == TypeOpCode__float4 ? 3 : karg->exptype == TypeOpCode__float8 ? 4 : 0) < 0)
+						  karg->exptype == TypeOpCode__float4 ? 3 : karg->exptype == TypeOpCode__float8 ? 4 :
+						  karg->exptype == TypeOpCode__numeric ? 5 : 0) < 0)
 			return -1;
 	}
 	if (emit(b, SOP_HASHFIN, acc, 0, 0, 0, 0) < 0)
@@ -2161,6 +2193,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 			return fail(b, "aggregate in column %d has no argument", i + 1);
 		if (cls == 11 && regs_of[2] < 0)
 			return fail(b, "aggregate in column %d has no second argument", i + 1);
+		prog->agg_scale[nagg] = -1;		/* (no numeric aggregates over a join: agg_col_value reads -1 as "not a numeric") */
 		agg_tab[4 * nagg + 0] = cls;
 		agg_tab[4 * nagg + 1] = (cls == 11 ? regs_of[2] : regs_of[0]) < 0 ? 0xffffffffU : (uint32_t) (cls == 11 ? regs_of[2] : regs_of[0]);
 		agg_tab[4 * nagg + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
@@ -2479,15 +2512,15 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		if (b.slot_used[s])
 		{
 			b.slot_vtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_vtype[s] == SOP_VT_STR && b.slot_strval[s])
+			if ((b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM) && b.slot_strval[s])
 			{
-				/* the value of an outer string column is read (a join key, A6) */
-				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
+				/* the value of an outer string or numeric column is read (a join key, A6) */
+				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1 && kds_src->colmeta[b.slot_resno[s] - 1].attlen != 16)
 				{
 					fail(&b, "outer column %d does not have the type the expression expects", b.slot_resno[s]);
 					goto error;
 				}
-				if (kds_src->format != KDS_FORMAT_ARROW)
+				if (kds_src->format != KDS_FORMAT_ARROW && kds_src->colmeta[b.slot_resno[s] - 1].attlen == -1)
 					prog->rck_outer = 1;	/* a compressed or out-of-line value: the backend joins the row */
 			}
 			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)		/* the NULL-ness only */
@@ -2510,15 +2543,16 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			const kern_data_store *kds_in = rels[b.slot_idepth[s] - 1].kds;
 
 			b.slot_ivtype[s] = reg_vtype(vs[s].vs_type_code, &bytes);
-			if (b.slot_ivtype[s] == SOP_VT_STR && b.slot_strval[s])
+			if ((b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM) && b.slot_strval[s])
 			{
 				/* the value of a string column of an inner relation is read (a join key, a geometry qual of a GiST join) */
-				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1)
+				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1 && kds_in->colmeta[b.slot_iresno[s] - 1].attlen != 16)
 				{
 					fail(&b, "inner column %d does not have the type the expression expects", b.slot_iresno[s]);
 					goto error;
 				}
-				prog->rck_walk = 1;		/* a compressed or out-of-line value: the backend joins the outer row */
+				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen == -1)
+					prog->rck_walk = 1;		/* a compressed or out-of-line value: the backend joins the outer row */
 			}
 			else if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM || b.slot_ivtype[s] == SOP_VT_JSON)
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;

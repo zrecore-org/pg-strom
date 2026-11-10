@@ -11,7 +11,7 @@ runkj() { # label, query-with-%T/%D; the plan must contain GpuJoin or GpuPreAgg-
 	g=$(q "$GPU $JOINSET $JAGGBIG $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
 	elif [ "$ALLOW_CPU" = on ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows; plan differs on this host)"
-	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; echo "$pl" | head -12 | sed 's/^/        plan| /'; fail=$((fail+1)); fi
 }
 for col in k kv kb big ext; do
 	runkj "$col: inner join" "select t.i, d.i from %T t join %D d on t.$col = d.$col"
@@ -59,7 +59,7 @@ rung() { # label, query-with-%T; the plan must have a GpuPreAgg (no GpuJoin); re
 	g=$(q "$GPU $GBIG $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
 	elif [ "$ALLOW_CPU" = on ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows; plan differs on this host)"
-	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; $PSQL -d scantest -c "$GPU $GBIG $set_extra explain $qry" | head -12 | sed 's/^/        plan| /'; fail=$((fail+1)); fi
 }
 for col in k kv kb; do
 	rung "group by $col: count, sum, min, max" "select $col, count(*), sum(n), min(pay), max(pay) from %T group by $col"
@@ -114,4 +114,29 @@ for col in f4 f8; do
 	rung "group by $col and an int" "select ${col}g, n, count(*), sum(pay) from %T group by ${col}g, n" tfo
 done
 rung "group by float4, float8 and two ints" "select f4g, f8g, n, (pay % 3)::int4, count(*), sum(pay) from %T group by f4g, f8g, n, (pay % 3)::int4" tfo
+# ---- uuid keys (a 16 byte string register: hashed with hash_bytes, compared bytewise)
+runkj "uuid key: inner join" "select t.i, d.i from tko t join tki d on t.u = d.u where t.i % 5 = 0"
+runkj "uuid key: LEFT join" "select t.i, d.i from tko t left join tki d on t.u = d.u where t.i % 5 = 0"
+runkj "uuid key: semi join" "select t.i from tko t where t.u in (select d.u from tki d)"
+runkj "uuid key: anti join" "select t.i from tko t where not exists (select 1 from tki d where d.u = t.u)"
+runkj "uuid key: aggregation over the join" "select t.n, count(*), sum(d.grp) from tko t join tki d on t.u = d.u group by t.n"
+rung "group by a uuid" "select u, count(*), sum(pay), min(n), max(n) from %T group by u" tko
+rung "group by a uuid and an int" "select u, n, count(*), sum(pay) from %T group by u, n" tko
+rung "group by a uuid, a text and an int" "select u, k, n, count(*), sum(pay) from %T group by u, k, n" tko
+rung "uuid equals a constant" "select count(*), sum(pay) from %T where u = md5('7')::uuid" tko
+rung "tkog (GPU-Cache): group by a uuid" "select u, count(*), sum(pay) from %T group by u" tkog
+runkj "tkog (GPU-Cache) outer: uuid key join" "select t.i, d.i from tkog t join tki d on t.u = d.u"
+# ---- numeric join keys (hashed as the canonical { unscaled, scale }: 1.5 = 1.50 = 1.500)
+runkj "numeric key: inner join" "select t.i, d.w from tno t join tni d on t.nm = d.nm"
+runkj "numeric key: LEFT join" "select t.i, d.w from tno t left join tni d on t.nm = d.nm"
+runkj "numeric key: semi join" "select t.i from tno t where t.nm in (select d.nm from tni d)"
+runkj "numeric key: anti join" "select t.i from tno t where not exists (select 1 from tni d where d.nm = t.nm)"
+runkj "numeric key: aggregation over the join" "select d.w, count(*), sum(t.pay) from tno t join tni d on t.nm = d.nm group by d.w"
+runkj "numeric key and an int key" "select t.i, d.w from tno t join tni d on t.nm = d.nm and t.n = d.w % 4"
+# ---- min / max of a numeric of a known scale (numeric(12,3)): the extreme of the unscaled values, the state is the numeric
+rung "min, max of numeric(12,3), ungrouped" "select min(nc), max(nc), count(nc) from %T" tno
+rung "min, max of numeric(12,3), grouped" "select n, min(nc), max(nc), count(*) from %T group by n" tno
+rung "min, max of numeric(12,3) with FILTER and a qual" "select n, min(nc) filter (where pay % 3 = 0), max(nc), sum(nc) from %T where pay > 100 group by n" tno
+rung "min, max of numeric(12,3) of a group without any value" "select n, min(nc) filter (where pay < 0), max(nc) filter (where pay < 0) from %T group by n" tno
+rung "min, max of numeric(12,3) with a qual on another column" "select n, count(*), min(nc), max(nc) from %T where pay % 2 = 0 group by n" tno
 echo

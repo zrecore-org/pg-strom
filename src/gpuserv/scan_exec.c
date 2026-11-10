@@ -1890,6 +1890,7 @@ typedef struct
 	uint32_t	len;
 	unsigned char data[64];
 	const unsigned char *ext;	/* a string key: the bytes (form_partial_tuple writes the varlena header) */
+	int			raw;			/* ext is a fixed-length value (uuid): no header */
 } col_value;
 
 static int
@@ -2071,6 +2072,16 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 		{
 			kagg_state__pminmax_int64_packed *r = (kagg_state__pminmax_int64_packed *) cv->data;
 
+			if (scale >= 0)
+			{
+				/* min / max of a numeric of a known scale: the state is the numeric in a bytea (an empty one: no value) */
+				uint32_t	nl = acc->n ? scan_vm_numeric_encode(acc->val, (uint32_t) scale, cv->data + 4) : 0;
+				uint32_t	hdr = (4 + nl) << 2;
+
+				memcpy(cv->data, &hdr, 4);
+				cv->len = 4 + nl;
+				break;
+			}
 			if (!acc->n)
 			{
 				cv->isnull = 1;
@@ -2118,7 +2129,7 @@ form_partial_tuple(const kern_data_store *kds_dst_head, const col_value *cols, u
 
 		if (cols[k].isnull)
 			continue;
-		uint32_t	vlen = cols[k].len + (cols[k].ext ? 4 : 0);
+		uint32_t	vlen = cols[k].len + (cols[k].ext && !cols[k].raw ? 4 : 0);
 
 		if (cm->attlen == -1)
 			infomask |= 2;						/* HEAP_HASVARWIDTH */
@@ -2130,7 +2141,9 @@ form_partial_tuple(const kern_data_store *kds_dst_head, const col_value *cols, u
 		}
 		if (t_next > t_hoff)
 			memset(tup + t_hoff, 0, t_next - t_hoff);	/* the padding of a varlena must be zero bytes (heap_deform_tuple) */
-		if (cols[k].ext)
+		if (cols[k].ext && cols[k].raw)
+			memcpy(tup + t_next, cols[k].ext, cols[k].len);
+		else if (cols[k].ext)
 		{
 			uint32_t	hdr = vlen << 2;		/* a 4-byte varlena header (little endian) */
 
@@ -3490,13 +3503,16 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				const kern_colmeta *cm = &kds_dst_head->colmeta[j];
 
 				memset(&cols[j], 0, sizeof(cols[j]));
-				if (k >= 0 && prog->key_str[k] && cm->attlen == -1)
+				if (k >= 0 && prog->key_str[k] && (cm->attlen == -1 || cm->attlen == 16))
 				{
-					/* a string key: the value the dictionary holds under the group's id */
+					/* a string key: the value the dictionary holds under the group's id (a uuid: its 16 bytes, no header) */
 					if (g->knull & (1u << k))
 						cols[j].isnull = 1;
 					else
+					{
 						cols[j].ext = sd_get(st, g->key[k], &cols[j].len);
+						cols[j].raw = (cm->attlen == 16);
+					}
 					continue;
 				}
 				if (k >= 0 && prog->key_scale[k] >= 0 && cm->attlen == -1)

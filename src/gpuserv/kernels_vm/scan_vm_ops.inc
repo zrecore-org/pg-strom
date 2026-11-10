@@ -17,7 +17,7 @@
 
  *   HASHINIT dst = 0xffffffff;  HASHMERGE dst = merge(dst, hash_any(a, k0 bytes)) unless a is NULL;
  *   HASHFIN  dst ^= 0xffffffff   (the hash of a join key, bit-identical to PostgreSQL's hash_any)
- *            HASHMERGE k1: 0 the k0 bytes of the value, 1 text, 2 bpchar (the payload bytes, hash_bytes), 3 float4, 4 float8 (-0 as +0, one NaN)
+ *            HASHMERGE k1: 0 the k0 bytes of the value, 1 text, 2 bpchar (the payload bytes, hash_bytes), 3 float4, 4 float8 (-0 as +0, one NaN), 5 numeric (the { unscaled, scale } pair without trailing zeros)
  *   I2F      dst = (float4) a;  F2I  dst = rint(a) as an integer of k0 bits (range checked, error id k1)
  *
  *   D2TS     dst = timestamp of the date a (k0 = 0: saturating, for comparisons; k0 = 1: the ::timestamp cast,
