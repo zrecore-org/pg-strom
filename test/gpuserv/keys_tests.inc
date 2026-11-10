@@ -11,7 +11,7 @@ runkj() { # label, query-with-%T/%D; the plan must contain GpuJoin or GpuPreAgg-
 	g=$(q "$GPU $JOINSET $JAGGBIG $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
 	elif [ "$ALLOW_CPU" = on ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows; plan differs on this host)"
-	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; echo "$pl" | head -12 | sed 's/^/        plan| /'; fail=$((fail+1)); fi
 }
 for col in k kv kb big ext; do
 	runkj "$col: inner join" "select t.i, d.i from %T t join %D d on t.$col = d.$col"
@@ -59,7 +59,7 @@ rung() { # label, query-with-%T; the plan must have a GpuPreAgg (no GpuJoin); re
 	g=$(q "$GPU $GBIG $set_extra" "$qry"); c=$(q "$CPU" "$qry")
 	if [ "$plan" -ge 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
 	elif [ "$ALLOW_CPU" = on ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows; plan differs on this host)"
-	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+	else echo "  FAIL  $label (plan=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; $PSQL -d scantest -c "$GPU $GBIG $set_extra explain $qry" | head -12 | sed 's/^/        plan| /'; fail=$((fail+1)); fi
 }
 for col in k kv kb; do
 	rung "group by $col: count, sum, min, max" "select $col, count(*), sum(n), min(pay), max(pay) from %T group by $col"
