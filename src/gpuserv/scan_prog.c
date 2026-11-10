@@ -2193,6 +2193,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 			return fail(b, "aggregate in column %d has no argument", i + 1);
 		if (cls == 11 && regs_of[2] < 0)
 			return fail(b, "aggregate in column %d has no second argument", i + 1);
+		prog->agg_scale[nagg] = -1;		/* (no numeric aggregates over a join: agg_col_value reads -1 as "not a numeric") */
 		agg_tab[4 * nagg + 0] = cls;
 		agg_tab[4 * nagg + 1] = (cls == 11 ? regs_of[2] : regs_of[0]) < 0 ? 0xffffffffU : (uint32_t) (cls == 11 ? regs_of[2] : regs_of[0]);
 		agg_tab[4 * nagg + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
