@@ -102,6 +102,7 @@ sql "create table tno as select i,
 	from generate_series(1, 6000) i"
 sql "create table tni as select * from (values (1.5, 1), (1.50, 2), ('NaN'::numeric, 3), (123456789012345678901234567890::numeric, 4), (0.0, 5),
 	(-0.25, 6), (100.000, 7), (null::numeric, 8), (0.5, 9), (2.25, 10), (0.75, 11), (1.000, 12)) v(nm, w)"
+sql "alter table tno alter column nc type numeric(12,3)"	# (a CASE loses the typmod of its branches)
 sql "analyze tno"; sql "analyze tni"
 # GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
 # table is sized for the estimate and overflows); tkb is big enough for several tasks
