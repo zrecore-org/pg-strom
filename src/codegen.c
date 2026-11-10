@@ -3293,6 +3293,10 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 	if ((context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN &&
 		!(fc.cls == SOP_STRCMP && (fc.kind == SOP_CMP_EQ || fc.kind == SOP_CMP_NE)))
 		return false;
+	/* a uuid has no collation: its comparison is the memcmp of 16 bytes */
+	if (fc.cls == SOP_STRCMP && dfunc->func_nargs > 0 && dfunc->func_argtypes[0] &&
+		dfunc->func_argtypes[0]->type_code == TypeOpCode__uuid)
+		return true;
 	if (!OidIsValid(func_collid) || !get_collation_isdeterministic(func_collid))
 		return false;
 	if (fc.cls == SOP_STRLEN)

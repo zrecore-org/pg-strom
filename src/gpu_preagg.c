@@ -23,6 +23,8 @@ pgstrom_group_string_key_ok(Expr *expr)
 		node = (Node *) ((RelabelType *) node)->arg;
 	if (!node || !IsA(node, Var))
 		return false;
+	if (exprType(node) == UUIDOID)
+		return true;				/* no collation: 16 bytes */
 	return (OidIsValid(exprCollation((Node *) expr)) &&
 			get_collation_isdeterministic(exprCollation((Node *) expr)));
 }
@@ -2067,7 +2069,8 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 				   pgstrom_numeric_static_dscale((Node *) expr) >= 0 &&
 				   pgstrom_numeric_static_dscale((Node *) expr) <= 255) &&
 				 !((dtype->type_code == TypeOpCode__text ||
-					dtype->type_code == TypeOpCode__bpchar) &&
+					dtype->type_code == TypeOpCode__bpchar ||
+					dtype->type_code == TypeOpCode__uuid) &&
 				   con->inner_target_list == NIL &&
 				   pgstrom_group_string_key_ok(expr)) &&
 				 /* float4 / float8 keys of the scanned relation: the program groups on x + 0.0 (-0 = +0, NaN = NaN) */
@@ -2083,6 +2086,7 @@ xpugroupby_build_path_target(xpugroupby_build_path_context *con)
 			coll_oid = exprCollation((Node *)expr);
 			if (dtype->type_code != TypeOpCode__text &&
 				dtype->type_code != TypeOpCode__bpchar &&
+				dtype->type_code != TypeOpCode__uuid &&
 				devtype_lookup_equal_func(dtype, coll_oid) == NULL)
 			{
 				elog(DEBUG2, "GROUP BY contains unsupported device type (%s): %s",

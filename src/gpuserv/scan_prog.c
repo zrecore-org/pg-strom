@@ -153,6 +153,8 @@ reg_vtype(uint32_t type_code, int *p_bytes)
 		case TypeOpCode__bpchar:      *p_bytes = 0; return SOP_VT_STR;
 		/* A11: a geometry is the payload of a varlena (GSERIALIZED), read like a string */
 		case TypeOpCode__geometry:    *p_bytes = 0; return SOP_VT_STR;
+		/* A6: a uuid is a string register of 16 bytes (the column is fixed-length: deform_col, arrow_load mode 4) */
+		case TypeOpCode__uuid:        *p_bytes = 0; return SOP_VT_STR;
 		/* A6: numeric is { unscaled int64, scale } when the value fits (otherwise the row is rechecked) */
 		case TypeOpCode__numeric:     *p_bytes = 0; return SOP_VT_NUM;
 		/* A8: a jsonb value is a register that points at its container */
@@ -231,6 +233,23 @@ emit_numconst(builder *b, const unsigned char *datum, int isnull, int *next)
 				(uint32_t)((uint64_t) v & 0xffffffffU), (uint32_t)((uint64_t) v >> 32)) < 0 ? -1 : dst;
 }
 
+/* a uuid constant (16 bytes, no header) as a string register */
+static int
+emit_constuuid(builder *b, const unsigned char *datum, int isnull, int *next)
+{
+	int			dst;
+	int64_t		off = 0;
+
+	if (!isnull && (off = pool_add(b, datum, 16)) < 0)
+		return -1;
+	dst = new_reg(b, next);
+	if (dst < 0)
+		return -1;
+	if (isnull)
+		return emit(b, SOP_CONST, dst, 1, 0, 0, 0) < 0 ? -1 : dst;
+	return emit(b, SOP_CONSTSTR, dst, 0, 0, (uint32_t) off, 16) < 0 ? -1 : dst;
+}
+
 /* a string constant (a text datum) as a register */
 static int
 emit_conststr(builder *b, const unsigned char *datum, int isnull, int *next)
@@ -268,6 +287,8 @@ emit_const(builder *b, const kern_expression *kexp, int *next)
 		return fail(b, "constant of an unsupported type (opcode type %u)", kexp->exptype);
 	if (vt == SOP_VT_JSON)
 		return fail(b, "a jsonb constant is only supported as the pattern of @>");
+	if (vt == SOP_VT_STR && kexp->exptype == TypeOpCode__uuid)
+		return emit_constuuid(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) kexp->u.c.const_value, kexp->u.c.const_isnull, next);
 	if (vt == SOP_VT_NUM)
@@ -329,6 +350,8 @@ emit_param(builder *b, const kern_expression *kexp, int *next)
 	off = session->poffset[id];
 	if (vt == SOP_VT_JSON)
 		return fail(b, "a jsonb parameter is not supported");
+	if (vt == SOP_VT_STR && kexp->exptype == TypeOpCode__uuid)
+		return emit_constuuid(b, (const unsigned char *) session + off, off == 0, next);
 	if (vt == SOP_VT_STR)
 		return emit_conststr(b, (const unsigned char *) session + off, off == 0, next);
 	if (vt == SOP_VT_NUM)
@@ -1436,7 +1459,8 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 
 					if (k0->opcode != FuncOpCode__VarExpr || k0->u.v.var_slot_id >= b.nslots ||
 						b.slot_resno[k0->u.v.var_slot_id] <= 0 ||
-						(kk->exptype != TypeOpCode__text && kk->exptype != TypeOpCode__bpchar))
+						(kk->exptype != TypeOpCode__text && kk->exptype != TypeOpCode__bpchar &&
+						 kk->exptype != TypeOpCode__uuid))
 					{
 						fail(&b, "a GROUP BY string key must be a column");
 						goto error;
@@ -1830,7 +1854,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				b.slot_vtype[s] = SOP_VT_NULLONLY;		/* only IS [NOT] NULL reads it */
 			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)
 			{
-				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
+				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1 && kds_src->colmeta[b.slot_resno[s] - 1].attlen != 16)
 				{
 					fail(&b, "column %d does not have the type the expression expects", b.slot_resno[s]);
 					goto error;
@@ -2482,12 +2506,12 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			if (b.slot_vtype[s] == SOP_VT_STR && b.slot_strval[s])
 			{
 				/* the value of an outer string column is read (a join key, A6) */
-				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1)
+				if (kds_src->colmeta[b.slot_resno[s] - 1].attlen != -1 && kds_src->colmeta[b.slot_resno[s] - 1].attlen != 16)
 				{
 					fail(&b, "outer column %d does not have the type the expression expects", b.slot_resno[s]);
 					goto error;
 				}
-				if (kds_src->format != KDS_FORMAT_ARROW)
+				if (kds_src->format != KDS_FORMAT_ARROW && kds_src->colmeta[b.slot_resno[s] - 1].attlen == -1)
 					prog->rck_outer = 1;	/* a compressed or out-of-line value: the backend joins the row */
 			}
 			else if (b.slot_vtype[s] == SOP_VT_STR || b.slot_vtype[s] == SOP_VT_NUM || b.slot_vtype[s] == SOP_VT_JSON)		/* the NULL-ness only */
@@ -2513,12 +2537,13 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			if (b.slot_ivtype[s] == SOP_VT_STR && b.slot_strval[s])
 			{
 				/* the value of a string column of an inner relation is read (a join key, a geometry qual of a GiST join) */
-				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1)
+				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen != -1 && kds_in->colmeta[b.slot_iresno[s] - 1].attlen != 16)
 				{
 					fail(&b, "inner column %d does not have the type the expression expects", b.slot_iresno[s]);
 					goto error;
 				}
-				prog->rck_walk = 1;		/* a compressed or out-of-line value: the backend joins the outer row */
+				if (kds_in->colmeta[b.slot_iresno[s] - 1].attlen == -1)
+					prog->rck_walk = 1;		/* a compressed or out-of-line value: the backend joins the outer row */
 			}
 			else if (b.slot_ivtype[s] == SOP_VT_STR || b.slot_ivtype[s] == SOP_VT_NUM || b.slot_ivtype[s] == SOP_VT_JSON)
 				b.slot_ivtype[s] = SOP_VT_NULLONLY;

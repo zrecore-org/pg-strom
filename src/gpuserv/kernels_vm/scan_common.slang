@@ -3886,6 +3886,13 @@ bool deform_col(uint c, uint desc, uint tbase, uint natts, bool hasnull, uint pa
                 regs[slot].v = 0;
                 regs[slot].isnull = 0;
             }
+            else if (slot != 0xffu && vt == SOP_VT_STR)
+            {
+                // a fixed-length by-reference value (a 16 byte uuid): a string register over its bytes
+                regs[slot].v = int64_t(uint64_t(tbase + off) | (uint64_t(alen) << 32) | (uint64_t(g_src) << 60));
+                regs[slot].isnull = 0;
+                regs[slot].sc = 0;
+            }
             else if (slot != 0xffu)
             {
                 int64_t v = 0;

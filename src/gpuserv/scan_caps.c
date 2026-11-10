@@ -218,6 +218,10 @@ classify_string(const char *name)
 	{
 		fc.cls = SOP_STRCMP; fc.kind = k;
 	}
+	else if (!strncmp(name, "uuid_", 5) && (k = cmp_kind_of(name + 5)) >= 0)
+	{
+		fc.cls = SOP_STRCMP; fc.kind = k;			/* 16 bytes, compared bytewise (uuid_cmp is memcmp) */
+	}
 	else if (!strcmp(name, "like") || !strcmp(name, "textlike"))
 	{
 		fc.cls = SOP_STRLIKE; fc.kind = 0;
@@ -1570,6 +1574,7 @@ scan_vm_joinkey_type_supported(int type_code)
 	{
 		case TypeOpCode__text:
 		case TypeOpCode__bpchar:
+		case TypeOpCode__uuid:
 		case TypeOpCode__float4:		/* hashed with -0 -> +0 and one NaN (SOP_HASHMERGE k1 = 3, 4), compared by CMPF / CMPD */
 		case TypeOpCode__float8:
 			return true;

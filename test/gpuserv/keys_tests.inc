@@ -114,4 +114,16 @@ for col in f4 f8; do
 	rung "group by $col and an int" "select ${col}g, n, count(*), sum(pay) from %T group by ${col}g, n" tfo
 done
 rung "group by float4, float8 and two ints" "select f4g, f8g, n, (pay % 3)::int4, count(*), sum(pay) from %T group by f4g, f8g, n, (pay % 3)::int4" tfo
+# ---- uuid keys (a 16 byte string register: hashed with hash_bytes, compared bytewise)
+runkj "uuid key: inner join" "select t.i, d.i from tko t join tki d on t.u = d.u where t.i % 5 = 0"
+runkj "uuid key: LEFT join" "select t.i, d.i from tko t left join tki d on t.u = d.u where t.i % 5 = 0"
+runkj "uuid key: semi join" "select t.i from tko t where t.u in (select d.u from tki d)"
+runkj "uuid key: anti join" "select t.i from tko t where not exists (select 1 from tki d where d.u = t.u)"
+runkj "uuid key: aggregation over the join" "select t.n, count(*), sum(d.grp) from tko t join tki d on t.u = d.u group by t.n"
+rung "group by a uuid" "select u, count(*), sum(pay), min(n), max(n) from %T group by u" tko
+rung "group by a uuid and an int" "select u, n, count(*), sum(pay) from %T group by u, n" tko
+rung "group by a uuid, a text and an int" "select u, k, n, count(*), sum(pay) from %T group by u, k, n" tko
+rung "uuid equals a constant" "select count(*), sum(pay) from %T where u = md5('7')::uuid" tko
+rung "tkog (GPU-Cache): group by a uuid" "select u, count(*), sum(pay) from %T group by u" tkog
+runkj "tkog (GPU-Cache) outer: uuid key join" "select t.i, d.i from tkog t join tki d on t.u = d.u"
 echo
