@@ -2987,6 +2987,16 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
     return 0u;
 }
 
+#ifndef WITH_INNER
+// R5: lines and polygons against each other (the default join kernels stay as they were: their non-point operands are poison records)
+#define GP_FN
+#define GP_T(n) n
+#define GP_SRC_T uint
+#define GP_LD32(src, off) ldw_s(src, off)
+#define GP_LD64(src, off) ld64s(src, off)
+#include "geom_pred.inc"
+#endif
+
 // Returns 0 (res set), or SOP_RECHECK_CODE. a: the polygon register; b: the point register, or with SOP_GPIP_FUSED
 // the float8 x (xv) and y (yv) of a point with SRID fsrid.
 uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
@@ -3006,6 +3016,20 @@ uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM
     uint sb = str_src(y);
     uint bb = str_off(y);
     uint lb = str_len(y);
+#ifndef WITH_INNER
+    if (!fused)
+    {
+        uint gr = gp_try(sa, ba, la, sb, bb, lb, (k0 & SOP_GPIP_SYMM) != 0u ? 1u : 0u);
+        if (gr == GP_RECHECK)
+            return SOP_RECHECK_CODE;
+        if (gr != GP_NA)
+        {
+            regs[dst].isnull = 0u;
+            regs[dst].v = b2l(gr == GP_TRUE);
+            return 0u;
+        }
+    }
+#endif
     GHead ha = geom_head(sa, ba, la);
     GHead hb;
     uint64_t px = uint64_t(y.v);

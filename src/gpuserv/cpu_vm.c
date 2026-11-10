@@ -820,6 +820,14 @@ geom_head(const unsigned char *p, uint32_t len, uint32_t *gtype, uint32_t *srid,
 	return 0;
 }
 
+/* R5: lines and polygons against each other (kernels_vm/geom_pred.inc, the text the kernel compiles too) */
+#define GP_FN static
+#define GP_T(n) struct n
+#define GP_SRC_T const unsigned char *
+#define GP_LD32(src, off) ld32u((src) + (off))
+#define GP_LD64(src, off) ld64u((src) + (off))
+#include "kernels_vm/geom_pred.inc"
+
 /* 0: res set (0/1); else SOP_RECHECK_CODE. poly, point: string registers (point_x != NULL: the fused point) */
 static uint32_t
 geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t lb, int have_xy,
@@ -830,6 +838,18 @@ geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t
 	uint64_t	px, py;
 	int			rr = PIP_OUT;
 
+	if (!have_xy)
+	{
+		uint32_t	gr = gp_try(pa, 0, la, pb, 0, lb, (k0 & SOP_GPIP_SYMM) ? 1 : 0);
+
+		if (gr == GP_RECHECK)
+			return SOP_RECHECK_CODE;
+		if (gr != GP_NA)
+		{
+			*res = (gr == GP_TRUE);
+			return 0;
+		}
+	}
 	if (geom_head(pa, la, &ta, &sa, &pos_a, &fl_a))
 		return SOP_RECHECK_CODE;
 	if (!have_xy)
