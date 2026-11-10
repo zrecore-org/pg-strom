@@ -625,32 +625,34 @@ devtype_float8_hash(bool isnull, Datum value)
 }
 
 /*
- * numeric: equal values must hash alike whatever their display scale (1.5 and 1.50). A value that fits { int64 unscaled, scale } (what
- * the kernel reads) hashes as that pair with the trailing zeros stripped (scan_common.slang, SOP_HASHMERGE k1 = 5); any other value
- * (more than 18 digits, NaN, Infinity) never meets a GPU-read row and uses PostgreSQL's own hash_numeric.
+ * numeric: equal values must hash alike whatever their display scale (1.5, 1.50, 0.5 stored with 20 decimals). The canonical form is
+ * { unscaled, scale } with the trailing zeros stripped while the scale is above 0 (scan_vm_numeric_datum_canon); what fits an int64
+ * hashes as the kernel hashes it (scan_common.slang, SOP_HASHMERGE k1 = 5). NaN, Infinity and values beyond 36 digits use PostgreSQL's hash_numeric
+ * (such a value is never equal to one that has a canonical form).
  */
 static uint32_t
 devtype_numeric_hash(bool isnull, Datum value)
 {
 	struct varlena *vl;
-	int64_t		v;
+	__int128	v;
 	uint32_t	sc, hash;
 
 	if (isnull)
 		return 0;
 	vl = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
-	if (scan_vm_numeric_datum_decode((const unsigned char *) vl, &v, &sc))
+	if (scan_vm_numeric_datum_canon((const unsigned char *) vl, &v, &sc))
 	{
-		if (v == 0)
-			sc = 0;
-		else
-			while (sc > 0 && v % 10 == 0)
-			{
-				v /= 10;
-				sc--;
-			}
-		hash = hash_any((unsigned char *)&v, sizeof(int64_t)) ^
-			hash_any((unsigned char *)&sc, sizeof(uint32_t));
+		if (v >= INT64_MIN && v <= INT64_MAX)
+		{
+			int64_t		v8 = (int64_t) v;
+
+			/* what the kernel hashes (SOP_HASHMERGE k1 = 5) */
+			hash = hash_any((unsigned char *)&v8, sizeof(int64_t)) ^
+				hash_any((unsigned char *)&sc, sizeof(uint32_t));
+		}
+		else	/* the kernel never reads such a value (the row goes to the backend) */
+			hash = hash_any((unsigned char *)&v, sizeof(__int128)) ^
+				hash_any((unsigned char *)&sc, sizeof(uint32_t));
 	}
 	else
 		hash = DatumGetUInt32(DirectFunctionCall1(hash_numeric, PointerGetDatum(vl)));
