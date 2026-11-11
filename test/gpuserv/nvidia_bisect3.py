@@ -12,18 +12,21 @@ FLAGS = ['-DVM_MAX_REGS=8', '-DVM_NO_JSON', '-DVM_NO_F8', '-DVM_NO_GEOM']
 MUL = "if (ma != 0 && mb > 9223372036854775807 / ma)"
 PL = "if ((b > 0 && a > 9223372036854775807 - b) || (b < 0 && a < -9223372036854775807 - b))"
 MI = "if ((b < 0 && a > 9223372036854775807 + b) || (b > 0 && a < -9223372036854775807 + b))"
+INEX = '    bool inexact = (x.sc >= 20u) ? (m != 0ul) : (m != q * num_p10u(x.sc));\n'
+FIN = '    if (x.v >= 0)\n        r = int64_t(q) + ((k0 == SOP_NUMOP_CEIL && inexact) ? 1 : 0);\n    else\n        r = -int64_t(q) - ((k0 == SOP_NUMOP_FLOOR && inexact) ? 1 : 0);\n'
+SIGN = '    if (k0 == SOP_NUMOP_SIGN)\n    {\n        r = (x.v > 0) ? 1 : ((x.v < 0) ? -1 : 0);\n        return;\n    }\n'
 variants = [
-    ('A_mulcheck_false', [(MUL, "if (false)")]),
-    ('F1_mul_udiv', [(MUL, "if (ma != 0 && uint64_t(mb) > 9223372036854775807ul / uint64_t(ma))")]),
-    ('B_negabs', [("regs[dst].v = (k0 == SOP_NUMOP_NEG || x.v < 0) ? -x.v : x.v;", "regs[dst].v = x.v;")]),
-    ('C_unary', [("num_unary(k0, x, ur);", "ur = 0;")]),
-    ('D_numup', [("if (!num_up(a, sc - x.sc) || !num_up(b, sc - y.sc))", "if (false)")]),
-    ('E_pl', [(PL, "if (false)")]),
-    ('G_mi', [(MI, "if (false)")]),
-    ('H_final', [("if (r == (-9223372036854775807 - 1) || sc > 255u)", "if (sc > 255u)")]),
-    ('I_pl_mi', [(PL, "if (false)"), (MI, "if (false)")]),
-    ('J_mul_branch', [("            r = a * b;\n        }\n        else\n        {\n            sc = max(x.sc, y.sc);", "            r = 0;\n        }\n        else\n        {\n            sc = max(x.sc, y.sc);"),
-                      (MUL, "if (false)")]),
+    ('U2_no_inexact', [(INEX, "    bool inexact = false;\n")]),
+    ('U3_inexact_simple', [(INEX, "    bool inexact = (m != q);\n")]),
+    ('U4_no_sc20', [(INEX, "    bool inexact = (m != q * num_p10u(x.sc));\n")]),
+    ('U5_no_down', [("    uint64_t q = num_down(m, x.sc, false);\n", "    uint64_t q = m;\n")]),
+    ('U6_no_sign', [(SIGN, "")]),
+    ('U7_simple_final', [(FIN, "    r = (x.v >= 0) ? int64_t(q) : -int64_t(q);\n")]),
+    ('U8_ifs_final', [(FIN, "    if (x.v >= 0)\n    {\n        r = int64_t(q);\n        if (k0 == SOP_NUMOP_CEIL && inexact)\n            r += 1;\n    }\n    else\n    {\n        r = -int64_t(q);\n        if (k0 == SOP_NUMOP_FLOOR && inexact)\n            r -= 1;\n    }\n")]),
+    ('U9_back', [(INEX, "    uint64_t back = (x.sc >= 20u) ? 0ul : q * num_p10u(x.sc);\n    bool inexact = (m != back);\n")]),
+    ('U10_u8_u9', [(INEX, "    uint64_t back = (x.sc >= 20u) ? 0ul : q * num_p10u(x.sc);\n    bool inexact = (m != back);\n"),
+                   (FIN, "    if (x.v >= 0)\n    {\n        r = int64_t(q);\n        if (k0 == SOP_NUMOP_CEIL && inexact)\n            r += 1;\n    }\n    else\n    {\n        r = -int64_t(q);\n        if (k0 == SOP_NUMOP_FLOOR && inexact)\n            r -= 1;\n    }\n")]),
+    ('U11_sign_if', [(SIGN, "    if (k0 == SOP_NUMOP_SIGN)\n    {\n        int64_t sg = 0;\n        if (x.v > 0)\n            sg = 1;\n        else if (x.v < 0)\n            sg = -1;\n        r = sg;\n        return;\n    }\n")]),
 ]
 def build(name, edits, flags, target='scan'):
     text = kv
