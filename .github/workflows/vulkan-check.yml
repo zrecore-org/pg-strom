@@ -393,8 +393,9 @@ jobs:
     # must pick the GPU, and the differential tests compare it with the CPU.
     name: Linux x86_64, real GPU (NVIDIA T4), PostgreSQL 17
     # Never for a pull request from a fork: the runner is billed and shared with the organization.
-    # Nor for a manual run that probes the macOS runner (that run exists to spend only the macOS minutes).
-    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.try_xlarge_runner)
+    # Nor for a manual run that probes the macOS runner or tests the apt cache with the mirrors blocked (those runs exist to
+    # spend only the minutes they test).
+    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline))
     needs: gpu-changes
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
     timeout-minutes: 120
