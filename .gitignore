@@ -22,3 +22,4 @@ arrow-tools/vcf2arrow
 /src/gpuserv/f64soft_check
 /src/gpuserv/df64_probe
 /.cache/
+src/gpuserv/kernels_reg.inc

@@ -159,7 +159,9 @@ gpu_vk_dispatch_seq(gpu_vk_ctx *ctx, const gpu_vk_step *steps, uint32_t nsteps, 
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &ctx->cmd;
 	t0 = seq_now_ms();
+	pthread_mutex_lock(&ctx->queue_lock);
 	rc = vkQueueSubmit(ctx->queue, 1, &si, ctx->fence);
+	pthread_mutex_unlock(&ctx->queue_lock);
 	if (rc != VK_SUCCESS)
 	{
 		if (rc == VK_ERROR_DEVICE_LOST)

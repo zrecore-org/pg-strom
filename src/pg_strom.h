@@ -1035,6 +1035,7 @@ extern void		pgstrom_init_gpu_cache(void);
  * fallback.c
  */
 extern bool		pgstrom_gpu_error_fallback;		/* GUC pg_strom.gpu_error_fallback */
+extern int		pgstrom_gpu_kernel_wait;		/* GUC pg_strom.gpu_kernel_wait (ms, -1: no gate) */
 extern char	   *pgstrom_gpuserv_fault;
 extern bool		pgstrom_debug_no_limits;		/* GUC pg_strom.debug_no_program_limits */
 extern int		pgstrom_scan_chunk_blocks;		/* GUC pg_strom.scan_chunk_blocks */			/* GUC pg_strom.gpuserv_fault */

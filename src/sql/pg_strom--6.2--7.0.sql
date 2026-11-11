@@ -45,6 +45,39 @@ CREATE FUNCTION pgstrom.gpu_service_state(OUT state text,
   LANGUAGE C STRICT;
 
 ---
+--- First-use kernel compile (A9 part 3): progress of the background compile of the interpreter kernels, and one row
+--- per kernel. The GPU driver compiles a kernel for the GPU at its first use; a query whose kernel is not ready
+--- continues on the CPU (pg_strom.gpu_kernel_wait) while the compile goes on.
+---
+CREATE FUNCTION pgstrom.gpu_prewarm_state(OUT phase text,
+                                          OUT mode text,
+                                          OUT kernels int,
+                                          OUT target int,
+                                          OUT ready int,
+                                          OUT failed int,
+                                          OUT from_disk int,
+                                          OUT current_kernel text,
+                                          OUT current_seconds float8,
+                                          OUT elapsed_seconds float8,
+                                          OUT refused_tasks bigint,
+                                          OUT waited_tasks bigint,
+                                          OUT demanded_kernels bigint)
+  RETURNS record
+  AS 'MODULE_PATHNAME','pgstrom_gpu_prewarm_state'
+  LANGUAGE C STRICT;
+
+CREATE FUNCTION pgstrom.gpu_kernel_state(OUT kernel text,
+                                         OUT tier text,
+                                         OUT state text,
+                                         OUT in_set bool,
+                                         OUT from_disk bool,
+                                         OUT compile_seconds float8,
+                                         OUT spirv_kb int)
+  RETURNS SETOF record
+  AS 'MODULE_PATHNAME','pgstrom_gpu_kernel_state'
+  LANGUAGE C STRICT;
+
+---
 --- Connect to the GPU service and read its handshake reply
 ---
 CREATE FUNCTION pgstrom.gpu_service_ping()

@@ -139,13 +139,27 @@ gpuserv-install: gpuserv-build
 	  $(MKDIR_P) '$(DESTDIR)$(pkglibdir)' && \
 	  $(INSTALL_PROGRAM) gpuserv/pgstrom-gpuserv '$(DESTDIR)$(pkglibdir)/pgstrom-gpuserv'; fi
 
+# A9 part 3: the GPU driver compiles each kernel for the GPU at its first use (minutes for the large ones; the result cannot be
+# shipped). "make prewarm" (as the user the server runs as: the pipeline cache is in that user's $HOME/.cache/pgstrom or in
+# pg_strom.gpu_kernel_cache_dir) compiles the common set now, when the administrator expects to wait; PGSTROM_PREWARM=1 makes
+# "make install" do it (not for DESTDIR builds, which have no GPU); PREWARM_SET=lite|geometry|all picks the set.
+PREWARM_SET ?= lite
+prewarm:
+	'$(DESTDIR)$(pkglibdir)/pgstrom-gpuserv' --prewarm-all --prewarm-set $(PREWARM_SET)
+ifeq ($(PGSTROM_PREWARM),1)
+ifeq ($(DESTDIR),)
+install: prewarm
+prewarm: gpuserv-install
+endif
+endif
+
 gpuserv-uninstall:
 	rm -f '$(DESTDIR)$(pkglibdir)/pgstrom-gpuserv'
 
 gpuserv-clean:
 	@$(MAKE) -C gpuserv clean
 
-.PHONY: gpuserv-build gpuserv-install gpuserv-uninstall gpuserv-clean
+.PHONY: gpuserv-build gpuserv-install gpuserv-uninstall gpuserv-clean prewarm
 
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

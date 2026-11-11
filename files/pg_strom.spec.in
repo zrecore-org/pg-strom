@@ -311,6 +311,19 @@ rm -rf %{buildroot}
 
 %if %{__HAS_PG15}
 %post PG15
+# first-use kernel compile (A9 part 3): the GPU driver compiles each kernel for this GPU at its first use, minutes for the
+# large ones, and the result cannot be shipped. Say so, and compile the common set now when the installer asked for it
+# (PGSTROM_PREWARM_ON_INSTALL=1 in the environment of the package manager, or the file /etc/pg_strom-prewarm exists); the
+# result lands in the postgres user's pipeline cache ($HOME/.cache/pgstrom). Without it the service compiles the set in the
+# background after it starts (pg_strom.gpu_prewarm, default lite) and queries continue on the CPU until their kernel is ready.
+if [ "$1" -eq 1 ]; then
+    if [ "${PGSTROM_PREWARM_ON_INSTALL:-0}" = 1 ] || [ -e /etc/pg_strom-prewarm ]; then
+        echo "pg_strom: compiling the GPU kernels for this GPU (pgstrom-gpuserv --prewarm-all) ..."
+        su - postgres -c "%{__pkglibdir_15}/pgstrom-gpuserv --prewarm-all" || echo "pg_strom: the prewarm did not finish; the service compiles the kernels in the background"
+    else
+        echo "pg_strom: the GPU kernels are compiled for this GPU on first use; to do it now run: sudo -u postgres %{__pkglibdir_15}/pgstrom-gpuserv --prewarm-all"
+    fi
+fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_15}/pg2arrow   1500 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_15}/arrow2csv  1500 || exit 0
@@ -327,6 +340,19 @@ fi
 
 %if %{__HAS_PG16}
 %post PG16
+# first-use kernel compile (A9 part 3): the GPU driver compiles each kernel for this GPU at its first use, minutes for the
+# large ones, and the result cannot be shipped. Say so, and compile the common set now when the installer asked for it
+# (PGSTROM_PREWARM_ON_INSTALL=1 in the environment of the package manager, or the file /etc/pg_strom-prewarm exists); the
+# result lands in the postgres user's pipeline cache ($HOME/.cache/pgstrom). Without it the service compiles the set in the
+# background after it starts (pg_strom.gpu_prewarm, default lite) and queries continue on the CPU until their kernel is ready.
+if [ "$1" -eq 1 ]; then
+    if [ "${PGSTROM_PREWARM_ON_INSTALL:-0}" = 1 ] || [ -e /etc/pg_strom-prewarm ]; then
+        echo "pg_strom: compiling the GPU kernels for this GPU (pgstrom-gpuserv --prewarm-all) ..."
+        su - postgres -c "%{__pkglibdir_16}/pgstrom-gpuserv --prewarm-all" || echo "pg_strom: the prewarm did not finish; the service compiles the kernels in the background"
+    else
+        echo "pg_strom: the GPU kernels are compiled for this GPU on first use; to do it now run: sudo -u postgres %{__pkglibdir_16}/pgstrom-gpuserv --prewarm-all"
+    fi
+fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_16}/pg2arrow   1600 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_16}/arrow2csv  1600 || exit 0
@@ -343,6 +369,19 @@ fi
 
 %if %{__HAS_PG17}
 %post PG17
+# first-use kernel compile (A9 part 3): the GPU driver compiles each kernel for this GPU at its first use, minutes for the
+# large ones, and the result cannot be shipped. Say so, and compile the common set now when the installer asked for it
+# (PGSTROM_PREWARM_ON_INSTALL=1 in the environment of the package manager, or the file /etc/pg_strom-prewarm exists); the
+# result lands in the postgres user's pipeline cache ($HOME/.cache/pgstrom). Without it the service compiles the set in the
+# background after it starts (pg_strom.gpu_prewarm, default lite) and queries continue on the CPU until their kernel is ready.
+if [ "$1" -eq 1 ]; then
+    if [ "${PGSTROM_PREWARM_ON_INSTALL:-0}" = 1 ] || [ -e /etc/pg_strom-prewarm ]; then
+        echo "pg_strom: compiling the GPU kernels for this GPU (pgstrom-gpuserv --prewarm-all) ..."
+        su - postgres -c "%{__pkglibdir_17}/pgstrom-gpuserv --prewarm-all" || echo "pg_strom: the prewarm did not finish; the service compiles the kernels in the background"
+    else
+        echo "pg_strom: the GPU kernels are compiled for this GPU on first use; to do it now run: sudo -u postgres %{__pkglibdir_17}/pgstrom-gpuserv --prewarm-all"
+    fi
+fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_17}/pg2arrow   1700 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_17}/arrow2csv  1700 || exit 0
@@ -358,6 +397,19 @@ fi
 
 %if %{__HAS_PG18}
 %post PG18
+# first-use kernel compile (A9 part 3): the GPU driver compiles each kernel for this GPU at its first use, minutes for the
+# large ones, and the result cannot be shipped. Say so, and compile the common set now when the installer asked for it
+# (PGSTROM_PREWARM_ON_INSTALL=1 in the environment of the package manager, or the file /etc/pg_strom-prewarm exists); the
+# result lands in the postgres user's pipeline cache ($HOME/.cache/pgstrom). Without it the service compiles the set in the
+# background after it starts (pg_strom.gpu_prewarm, default lite) and queries continue on the CPU until their kernel is ready.
+if [ "$1" -eq 1 ]; then
+    if [ "${PGSTROM_PREWARM_ON_INSTALL:-0}" = 1 ] || [ -e /etc/pg_strom-prewarm ]; then
+        echo "pg_strom: compiling the GPU kernels for this GPU (pgstrom-gpuserv --prewarm-all) ..."
+        su - postgres -c "%{__pkglibdir_18}/pgstrom-gpuserv --prewarm-all" || echo "pg_strom: the prewarm did not finish; the service compiles the kernels in the background"
+    else
+        echo "pg_strom: the GPU kernels are compiled for this GPU on first use; to do it now run: sudo -u postgres %{__pkglibdir_18}/pgstrom-gpuserv --prewarm-all"
+    fi
+fi
 if [ "$1" -eq 1 ]; then
     /usr/sbin/update-alternatives --install /usr/bin/pg2arrow   pgsql-pg2arrow   %{__pkgbindir_18}/pg2arrow   1800 || exit 0
     /usr/sbin/update-alternatives --install /usr/bin/arrow2csv  pgsql-arrow2csv  %{__pkgbindir_18}/arrow2csv  1800 || exit 0

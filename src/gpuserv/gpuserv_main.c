@@ -46,8 +46,10 @@
 #include "vm_selftest.h"
 extern int scan_prog_df64;		/* scan_prog.h: the df64 prefilter of float8 comparisons (A10 part 6) */
 #include "wire.h"
+#include "kprewarm.h"
 
 static volatile sig_atomic_t	got_signal = 0;
+static int		prewarm_mode = GPUSERV_PREWARM_LITE;	/* --prewarm-set (pg_strom.gpu_prewarm) */
 
 static void
 log_msg(const char *fmt, ...)
@@ -248,6 +250,9 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 		log_msg("cannot listen on '%s': %s", socket_path, strerror(errno));
 		return 2;
 	}
+	/* A9 part 3: the readiness gate and the background compile of the kernels (a no-op without a pipeline cache); before the
+	 * first task can arrive */
+	kpw_start(&ss.vk, &ss.ctl->prewarm, prewarm_mode);
 	__atomic_store_n(&ss.ctl->state, GPUSERV_STATE_READY, __ATOMIC_SEQ_CST);
 	log_msg("ready: device %u (%s), tier %s, socket %s",
 			device, ss.ctl->devcaps[device].name,
@@ -306,7 +311,9 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 	wire_server_fini(&ss.wire);
 	close(ss.listen_fd);
 	unlink(socket_path);
-	gpu_vk_close(&ss.vk);
+	/* a thread inside a driver compile cannot be interrupted: leave it to the exit of the process, do not destroy the device under it */
+	if (kpw_stop(2000))
+		gpu_vk_close(&ss.vk);
 	return lost ? 3 : 0;
 }
 
@@ -389,6 +396,26 @@ do_prewarm(long device, uint32_t nbind, uint32_t pcsize, char **files, int nfile
 	return rc;
 }
 
+/* --prewarm-all / --prewarm-list: compile (or list) the kernel set in this process; the installer's hook */
+static int
+do_prewarm_all(long device, int mode, int list_only)
+{
+	gpu_vk_ctx *ctx = calloc(1, sizeof(*ctx));
+	int			rc;
+
+	if (!ctx || gpu_vk_open(ctx, (int) device) != 0)
+	{
+		log_msg("prewarm: cannot open device %ld: %s", device, ctx ? ctx->err : "out of memory");
+		return 1;
+	}
+	if (!gpu_vk_pcache_path(ctx)[0])
+		log_msg("prewarm: the pipeline cache is off (PGSTROM_GPUSERV_PIPELINE_CACHE, PGSTROM_GPUSERV_CACHE_DIR=none): nothing would be kept");
+	rc = kpw_cli(ctx, mode, list_only);
+	gpu_vk_close(ctx);
+	free(ctx);
+	return rc;
+}
+
 /* ----------------------------------------------------------------
  * main
  * ----------------------------------------------------------------
@@ -400,6 +427,7 @@ main(int argc, char **argv)
 	const char *control = NULL, *socket_path = NULL;
 	int			lifeline = -1;
 	long		device = 0;
+	int			prewarm_all = 0, prewarm_list = 0;
 
 	for (i = 1; i < argc; i++)
 	{
@@ -431,6 +459,19 @@ main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "--serve"))
 			serve = 1;
+		else if (!strcmp(argv[i], "--prewarm-all"))
+			prewarm_all = 1;
+		else if (!strcmp(argv[i], "--prewarm-list"))
+			prewarm_list = 1;
+		else if (!strcmp(argv[i], "--prewarm-set") && i + 1 < argc)
+		{
+			prewarm_mode = kpw_parse_mode(argv[++i]);		/* pg_strom.gpu_prewarm; --prewarm-all takes it too */
+			if (prewarm_mode < 0)
+			{
+				fprintf(stderr, "--prewarm-set: off, lite, geometry or all\n");
+				return 2;
+			}
+		}
 		else if (!strcmp(argv[i], "--allow-cpu"))
 			allow_cpu = 1;
 		else if (!strcmp(argv[i], "--verbose"))
@@ -453,10 +494,18 @@ main(int argc, char **argv)
 		{
 			fprintf(stderr,
 					"usage: %s --probe [--allow-cpu] [--verbose]\n"
-					"       %s --serve --control NAME --device N --lifeline FD --socket PATH [--allow-cpu]\n",
-					argv[0], argv[0]);
+					"       %s --serve --control NAME --device N --lifeline FD --socket PATH [--allow-cpu]\n"
+					"       %s --prewarm-all [--prewarm-set lite|geometry|all] [--device N]\n"
+					"       %s --prewarm-list [--prewarm-set lite|geometry|all] [--device N]\n",
+					argv[0], argv[0], argv[0], argv[0]);
 			return 2;
 		}
+	}
+	if (prewarm_all || prewarm_list)
+	{
+		/* the same pipeline cache directory and fast-math setting as the service: run as the user the server runs as */
+		setenv("PGSTROM_GPUSERV_PREWARM", "off", 1);
+		return do_prewarm_all(device, prewarm_mode == GPUSERV_PREWARM_OFF ? GPUSERV_PREWARM_LITE : prewarm_mode, prewarm_list);
 	}
 	if (probe == serve)
 	{

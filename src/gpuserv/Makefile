@@ -76,7 +76,7 @@ SPV_GEO    := $(foreach t,$(GEO_TIERS),$(patsubst build/%.spv,build/%_$(t).spv,$
 SPV_FILES  += $(SPV_GEO)
 $(SPV_VMBASE) $(SPV_LITE) $(SPV_NOGEOM) $(SPV_GEO): $(KDEPS)
 SPV_FILES  += build/gsort.spv
-LIB_OBJS   += gpusort.o gpu_vk_seq.o
+LIB_OBJS   += gpusort.o gpu_vk_seq.o kprewarm.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
 # kernel sources are embedded for the compiler
 KSRC_FILES := $(sort $(wildcard kernels_vm/*.slang kernels_vm/*.inc))
@@ -308,6 +308,11 @@ kernels_spv.c: kernels_spv.h
 kernels_spv.h: $(SPV_FILES) gen_kspv.sh
 	sh ./gen_kspv.sh kernels_spv.c kernels_spv.h $(SPV_FILES)
 
+# A9 part 3: the table of the interpreter kernels the service prewarms (kprewarm.c)
+kernels_reg.inc: $(SPV_FILES) gen_kreg.sh
+	sh ./gen_kreg.sh kernels_reg.inc $(SPV_FILES)
+kprewarm.o: kprewarm.c kprewarm.h kernels_reg.inc kernels_spv.h gpu_vk.h gpuserv_proto.h
+
 # -MMD writes <name>.d next to each object: a changed header (scan_exec.h, gpu_vk.h, ...) rebuilds what includes it (without it,
 # objects with the old struct layout stayed and the service crashed or failed its self-test)
 %.o: %.c
@@ -333,6 +338,6 @@ check: gpuserv-probe proto_check
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check feat_check f64soft_check df64_probe pcache_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check feat_check f64soft_check df64_probe pcache_check kernels_spv.c kernels_spv.h kernels_reg.inc kernels_src.c kernels_src.h
 
 .PHONY: all check clean
