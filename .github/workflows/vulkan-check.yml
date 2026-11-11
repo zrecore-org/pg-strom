@@ -409,47 +409,15 @@ jobs:
           restore-keys: |
             shader-cache-${{ runner.os }}-${{ runner.arch }}-
 
-      # The GPU-optimized image has the NVIDIA kernel driver but may lack the userspace Vulkan driver (libnvidia-gl),
-      # without which the service sees only lavapipe and, with ALLOW_CPU off, finds no device.
+      # The GPU-optimized image (Ubuntu 24.04, driver 590 "server" packages) already ships the NVIDIA Vulkan ICD
+      # (libnvidia-gl-590-server). Check it here so that a missing driver fails this step, not the service test.
       - name: NVIDIA Vulkan driver
-        timeout-minutes: 10
+        timeout-minutes: 5
         run: |
-          nvidia-smi
-          if ls /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null; then
-            exit 0
-          fi
-          # apt cannot install libnvidia-gl on top of the image's driver (the same driver version, a newer packaging
-          # revision: "but it is not going to be installed"). Unpack the package into a private tree instead and point
-          # the Vulkan loader and the dynamic linker at it; the kernel module and the userspace libraries share the
-          # driver version, which is all that matters.
-          V=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 | cut -d. -f1)
-          dpkg -l | grep -i nvidia | awk '{print $2, $3}' | head -40 || true
-          apt-cache pkgnames libnvidia-gl | sort
-          ICD=""
-          # the "-server" flavour first (the image's driver is packaged that way); the plain name is a small stub
-          for PKG in "libnvidia-gl-${V}-server" "libnvidia-gl-${V}"; do
-            apt-cache show "$PKG" >/dev/null 2>&1 || continue
-            echo "trying $PKG"
-            rm -rf /tmp/nvgl-deb /tmp/nvgl && mkdir -p /tmp/nvgl-deb /tmp/nvgl
-            (cd /tmp/nvgl-deb && apt-get download "$PKG" && dpkg -x ./*.deb /tmp/nvgl)
-            ICD=$(find /tmp/nvgl -name 'nvidia_icd*.json' | head -n 1)
-            if [ -n "$ICD" ]; then break; fi
-          done
-          if [ -z "$ICD" ]; then
-            echo "::error::no NVIDIA Vulkan ICD found in any libnvidia-gl package"
-            exit 1
-          fi
-          sudo rm -rf /opt/nvgl && sudo mv /tmp/nvgl /opt/nvgl
-          ICD=${ICD/#\/tmp\/nvgl/\/opt\/nvgl}
-          LIBDIR=$(dirname "$(find /opt/nvgl -name 'libGLX_nvidia.so.0' | head -n 1)")
-          echo "icd: $ICD, libs: $LIBDIR"
-          if [ ! -f "$ICD" ] || [ ! -d "$LIBDIR" ] || [ "$LIBDIR" = "." ]; then
-            echo "::error::the unpacked driver is incomplete"; find /opt/nvgl -type f | head -40; exit 1
-          fi
-          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
-          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          VK_DRIVER_FILES=$ICD LD_LIBRARY_PATH=$LIBDIR vulkaninfo --summary | head -40
+          nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+          test -f /usr/share/vulkan/icd.d/nvidia_icd.json
+          vulkaninfo --summary | grep -E 'deviceName|driverName|deviceType' | head -20
+          vulkaninfo --summary | grep -q 'NVIDIA'
 
       - name: What the GPU runner has (informational)
         continue-on-error: true
