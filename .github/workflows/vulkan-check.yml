@@ -423,16 +423,29 @@ jobs:
           # the Vulkan loader and the dynamic linker at it; the kernel module and the userspace libraries share the
           # driver version, which is all that matters.
           V=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 | cut -d. -f1)
-          PKG=$(apt-cache pkgnames "libnvidia-gl-${V}" | grep -E "^libnvidia-gl-${V}(-server)?$" | head -n 1)
-          echo "package: $PKG"
-          mkdir -p /tmp/nvgl-deb && cd /tmp/nvgl-deb
-          apt-get download "$PKG"
-          sudo mkdir -p /opt/nvgl
-          sudo dpkg -x ./*.deb /opt/nvgl
-          ICD=$(find /opt/nvgl -name 'nvidia_icd*.json' | head -n 1)
+          dpkg -l | grep -i nvidia | awk '{print $2, $3}' | head -40 || true
+          apt-cache pkgnames libnvidia-gl | sort
+          ICD=""
+          # the "-server" flavour first (the image's driver is packaged that way); the plain name is a small stub
+          for PKG in "libnvidia-gl-${V}-server" "libnvidia-gl-${V}"; do
+            apt-cache show "$PKG" >/dev/null 2>&1 || continue
+            echo "trying $PKG"
+            rm -rf /tmp/nvgl-deb /tmp/nvgl && mkdir -p /tmp/nvgl-deb /tmp/nvgl
+            (cd /tmp/nvgl-deb && apt-get download "$PKG" && dpkg -x ./*.deb /tmp/nvgl)
+            ICD=$(find /tmp/nvgl -name 'nvidia_icd*.json' | head -n 1)
+            if [ -n "$ICD" ]; then break; fi
+          done
+          if [ -z "$ICD" ]; then
+            echo "::error::no NVIDIA Vulkan ICD found in any libnvidia-gl package"
+            exit 1
+          fi
+          sudo rm -rf /opt/nvgl && sudo mv /tmp/nvgl /opt/nvgl
+          ICD=${ICD/#\/tmp\/nvgl/\/opt\/nvgl}
           LIBDIR=$(dirname "$(find /opt/nvgl -name 'libGLX_nvidia.so.0' | head -n 1)")
           echo "icd: $ICD, libs: $LIBDIR"
-          test -n "$ICD" && test -d "$LIBDIR"
+          if [ ! -f "$ICD" ] || [ ! -d "$LIBDIR" ] || [ "$LIBDIR" = "." ]; then
+            echo "::error::the unpacked driver is incomplete"; find /opt/nvgl -type f | head -40; exit 1
+          fi
           echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
