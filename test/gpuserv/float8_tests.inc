@@ -151,6 +151,7 @@ for t in $(f8part agg); do
 	runagg $t "count, sum, min, max, avg of exact values" "select count(*), count(w), sum(w), min(w), max(w), avg(w) from %T"
 	runagg $t "min, max of float8 with NULLs" "select min(x), max(x), min(y), max(y), count(x) from %T"
 	runagg $t "min, max with NaN and Infinity (NaN is the largest)" "select min(z), max(z), count(z) from %T"
+	runagg $t "min, max with NaN and Infinity after a CPU fallback (partial states merged by pgstrom.fmax_trans_fp64: NaN is the largest)" "select min(z), max(z), count(z) from %T" "set pg_strom.gpuserv_fault='refuse';"
 	runagg $t "sum and avg rounded (inexact values)" "select round(sum(x)::numeric, 3), round(avg(y)::numeric, 6), count(y) from %T"
 	runagg $t "sum of exact values with halves and big integers" "select sum(z), count(z) from %T where abs(z) < 1e10 and z <> 3.0000000000000004 and (abs(z) > 1e-300 or z = 0)"
 	runagg $t "aggregates with a qual" "select sum(w), min(x), max(y), avg(w) from %T where i % 7 = 1 and a > 0"
