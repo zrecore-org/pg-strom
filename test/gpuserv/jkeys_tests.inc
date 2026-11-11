@@ -40,6 +40,9 @@ rungj "float4, float8 and an int" "select t.f4g, d.f8 + 0::float8, d.w % 3, coun
 rungj "float4 key of the outer side over a LEFT join" "select t.f4g, count(*), count(d.w) from tfo t left join tfi d on t.n = d.w group by t.f4g"
 rungj "float key with a float aggregate (the slot owners add in order)" "select t.f4g, count(*), sum(t.f8g), min(t.f4g) from tfo t join tfi d on t.n = d.wn group by t.f4g"
 rungj "float key with a float aggregate, three keys" "select t.f4g, t.n, d.w % 2, count(*), sum(t.f8g), max(t.f8g) from tfo t join tfi d on t.n = d.wn group by 1, 2, 3"
+# a uuid join key (a poison-capable program: the scout pass) with the group key on the inner side (coverage shape aggjoin.key.uuid)
+rungj "uuid join key, GROUP BY an inner column" "select d.n, count(*), sum(t.pay) from tko t join tki d on t.u = d.u group by d.n"
+rungj "uuid join key, GROUP BY an inner and an outer column" "select d.n, t.n, count(*), sum(t.pay) from tko t join tki d on t.u = d.u group by d.n, t.n"
 # bool keys over a join (already worked with up to two keys)
 rungj "bool key over a join" "select t.b, count(*), sum(d.w) from tbo t join tbi d on t.n = d.w % 5 group by t.b"
 rungj "four keys with a bool over a join" "select t.b, t.n, t.m, t.o, count(*), sum(t.pay), max(d.w) from tbo t join tbi d on t.b = d.b group by t.b, t.n, t.m, t.o"
