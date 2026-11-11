@@ -1,1 +1,1 @@
-TMO=1500 pipeline_check.sh
+TMO=1500 nvidia_bisect.sh
