@@ -309,3 +309,4 @@ for t in $(f8part joinagg); do
 	rungrp $t "variance over a join, many groups (overflow rows)" "select d.k, round(var_pop(t.x)::numeric, 3), round(corr(t.x, d.v)::numeric, 5), round(covar_pop(t.x, d.v)::numeric, 3) from %T t join f8_dim d on t.b = d.k group by 1 order by 1" "$JOINSET set enable_seqscan=on;"
 	GRPANY=0
 done
+. "${0%/*}/df64_tests.inc"

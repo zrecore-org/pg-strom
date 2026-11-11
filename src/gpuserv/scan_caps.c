@@ -55,7 +55,7 @@ scan_vm_op_feat(uint32_t op)
 		return SCAN_FEAT_NUM;
 	if (op >= SOP_JSONGET && op <= SOP_JSONCONT)
 		return SCAN_FEAT_JSON;
-	if (op >= SOP_CMPD && op <= SOP_D2F)
+	if (op >= SOP_CMPD && op <= SOP_DFCMP)
 		return SCAN_FEAT_F8;
 	if (op >= SOP_GEOMBOX && op < 200 && op != SOP_NULLMRG)
 		return SCAN_FEAT_GEOM;

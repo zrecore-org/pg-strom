@@ -100,7 +100,7 @@ op_known(uint32_t op)
 		case SOP_CONSTSTR: case SOP_STRCMP: case SOP_STRLIKE: case SOP_STRLEN:
 		case SOP_NUMCONST: case SOP_NUMCMP: case SOP_NUMARITH: case SOP_I2N: case SOP_N2I:
 		case SOP_NUMDIV: case SOP_NUMRND:
-		case SOP_CMPD: case SOP_DARITH: case SOP_DUNARY: case SOP_I2D: case SOP_D2I: case SOP_F2D: case SOP_D2F:
+		case SOP_CMPD: case SOP_DARITH: case SOP_DUNARY: case SOP_I2D: case SOP_D2I: case SOP_F2D: case SOP_D2F: case SOP_DFCMP:
 		case SOP_GEOMBOX: case SOP_GEOMPIP: case SOP_GEOMDWITHIN: case SOP_GEOMZM: case SOP_GEOM3DDW: case SOP_NULLMRG:
 		case SOP_GEOMFLAG: case SOP_GEOMDIST: case SOP_GEOMLEN:
 			return 1;
@@ -132,6 +132,73 @@ gen_fail(gen_ctx *g, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(g->err, g->errlen, fmt, ap);
 	va_end(ap);
+}
+
+/*
+ * DFCMP (A10 part 6): the tree of the prefilter unrolled into straight-line code with the constants as literals. The stack of the
+ * postfix code is simulated here (a variable per position), and the arithmetic is the helpers vm_dfcmp() uses (scan_common.slang
+ * dfe_*), so the specialized kernel decides exactly what the interpreter decides. Returns 0, or -1 (the program is malformed).
+ */
+static int
+gen_dfcmp(gen_ctx *g, sbuf *o, uint32_t dst, uint32_t k0, uint32_t kind)
+{
+	const uint32_t *w = g->w;
+	uint32_t	pw, n, p, sp = 0;
+
+	if (w[20] > g->nw || (k0 >> 2) >= g->nw - w[20])
+		return -1;
+	pw = w[20] + (k0 >> 2);
+	n = w[pw] & 0xff;
+	p = pw + 1;
+	sb_printf(o, "        {\n            bool ok = true;\n            DFE v0, v1, v2, v3, v4, v5;\n");
+	for (uint32_t i = 0; i < n; i++)
+	{
+		uint32_t	nw, t;
+
+		if (p >= g->nw)
+			return -1;
+		nw = w[p++];
+		t = nw & 15;
+		if (t == 0 || t == 2)
+		{
+			if (sp >= 6)
+				return -1;
+			if (t == 0)
+			{
+				if ((nw >> 4) >= g->nregs)
+					return -1;
+				sb_printf(o, "            if (!dfe_load(regs[%u], v%u))\n                ok = false;\n", nw >> 4, sp);
+			}
+			else
+			{
+				if (p + 3 > g->nw)
+					return -1;
+				sb_printf(o, "            v%u = dfe_const(%uu, %uu, %uu);\n", sp, w[p], w[p + 1], w[p + 2]);
+				p += 3;
+			}
+			sp++;
+		}
+		else if (t >= 6)
+		{
+			if (sp < 1)
+				return -1;
+			sb_printf(o, "            v%u = dfe_unary(%uu, v%u);\n", sp - 1, t, sp - 1);
+		}
+		else
+		{
+			if (sp < 2)
+				return -1;
+			sp--;
+			sb_printf(o, "            v%u = dfe_bin(%uu, v%u, v%u, ok);\n", sp - 1, t, sp - 1, sp);
+		}
+	}
+	if (sp != 2 || dst >= g->nregs)
+		return -1;
+	sb_printf(o, "            regs[%u].isnull = 1;\n            if (ok)\n            {\n"
+			  "                int sg = dfe_sign(v0, v1);\n                if (sg != 0)\n                {\n"
+			  "                    regs[%u].isnull = 0;\n                    regs[%u].v = b2l(cmp_result(sg, %uu));\n"
+			  "                }\n            }\n        }\n", dst, dst, dst, kind);
+	return 0;
 }
 
 /*
@@ -240,6 +307,14 @@ gen_range(gen_ctx *g, sbuf *o, uint32_t a, uint32_t b)
 						  "        else if (regs[%u].v != 0)\n        {\n"
 						  "            regs[%u].v = 1;\n            regs[%u].isnull = 0;\n            j%u = true;\n        }\n",
 						  ra, dst, ra, dst, dst, rb);
+		}
+		else if (op == SOP_DFCMP)
+		{
+			if (gen_dfcmp(g, o, dst, k0, k1) != 0)
+			{
+				gen_fail(g, "instruction %u: malformed DFCMP tree", i);
+				return;
+			}
 		}
 		else
 		{

@@ -8,6 +8,7 @@
 // may reassociate, contract (a*b+c into fma) or drop the error terms.
 #ifdef DF64_C
 #include <math.h>
+#pragma STDC FP_CONTRACT OFF
 #define DF_FN static inline
 #define DF_P
 #define DF_FMA(a, b, c) fmaf((a), (b), (c))

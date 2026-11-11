@@ -568,6 +568,100 @@ out:
 }
 
 /* ------------------------------------------------------------------------ */
+/* df64: the error-free transformations (A10 part 6)                          */
+/* ------------------------------------------------------------------------ */
+#define DF64_C 1
+#include "kernels_vm/df64.inc"
+
+static uint32_t df_rng_state = 0x2545F491u;
+static uint32_t
+df_rnd(void)
+{
+	df_rng_state ^= df_rng_state << 13;
+	df_rng_state ^= df_rng_state >> 17;
+	df_rng_state ^= df_rng_state << 5;
+	return df_rng_state;
+}
+static uint32_t df_fbits(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
+static float df_bitsf(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+
+/*
+ * Does this device (with MoltenVK's fast math switched off, gpu_vk.c) compute TwoSum, TwoProduct, the df64 add and multiply and the
+ * binary64 -> df64 conversion bit for bit as the host's float32 does? The kernel runs 2,048 operand sets (exponents within +-30,
+ * cancellations, wide gaps, ties) and every output must equal kernels_vm/df64.inc compiled as C. 0: yes, -1: no (why says which).
+ */
+int
+gpuserv_df64_selfcheck(gpu_vk_ctx *ctx, char *why, size_t whylen)
+{
+	gpu_vk_buffer b[NB];
+	gpu_vk_buffer *bl[2] = { &b[0], &b[1] };
+	const uint32_t n = 2048;
+	uint32_t	pc = n;
+	uint32_t   *in;
+	const uint32_t *out;
+	int			rc = 0;
+
+	memset(b, 0, sizeof(b));
+	MKBUF(0, (size_t) n * 6 * 4, 0);
+	MKBUF(1, (size_t) n * 12 * 4, 0);
+	in = b[0].map;
+	for (uint32_t i = 0; i < n; i++)
+	{
+		float		a = df_bitsf((df_rnd() & 0x807FFFFFu) | ((uint32_t)(127 - 30 + df_rnd() % 61) << 23));
+		float		bb = df_bitsf((df_rnd() & 0x807FFFFFu) | ((uint32_t)(127 - 30 + df_rnd() % 61) << 23));
+		uint64_t	x = ((uint64_t)(df_rnd() & 0x800FFFFFu) << 32) | df_rnd();
+
+		x |= (uint64_t)(1023 - 40 + df_rnd() % 81) << 52;
+		switch (i % 4)
+		{
+			case 1: bb = -df_bitsf(df_fbits(a) + (df_rnd() % 7)); break;						/* cancellation */
+			case 2: bb = df_bitsf((df_fbits(bb) & 0x807FFFFFu) | ((uint32_t)(127 - 40 + df_rnd() % 20) << 23)); break;
+			case 3: a = df_bitsf(df_fbits(a) & 0xFFFF0000u); bb = df_bitsf(df_fbits(bb) & 0xFFFF0000u); break;	/* ties */
+		}
+		in[i * 6 + 0] = df_fbits(a);
+		in[i * 6 + 1] = df_fbits(bb);
+		in[i * 6 + 2] = df_fbits(a * df_bitsf(0x33800000u) * (float)((int)(df_rnd() % 2001) - 1000) / 1000.0f);	/* |lo| <= 2^-24 |a| */
+		in[i * 6 + 3] = df_fbits(bb * df_bitsf(0x33800000u) * (float)((int)(df_rnd() % 2001) - 1000) / 1000.0f);
+		in[i * 6 + 4] = (uint32_t) x;
+		in[i * 6 + 5] = (uint32_t)(x >> 32);
+	}
+	if ((rc = run_kernel(ctx, KSPV(df64_exact), 2, bl, &pc, 4, n / 64, why, whylen)) != 0)
+		goto out;
+	out = b[1].map;
+	for (uint32_t i = 0; i < n; i++)
+	{
+		float		a = df_bitsf(in[i * 6]), bb = df_bitsf(in[i * 6 + 1]);
+		DF			A = df_mk(a, df_bitsf(in[i * 6 + 2])), B = df_mk(bb, df_bitsf(in[i * 6 + 3]));
+		DF			ts = df_two_sum(a, bb), tp = df_two_prod(a, bb), ad = df_add(A, B), mu = df_mul(A, B), cv;
+		uint64_t	xb = (uint64_t) in[i * 6 + 4] | ((uint64_t) in[i * 6 + 5] << 32);
+		double		x;
+		uint32_t	want[10];
+
+		memcpy(&x, &xb, 8);
+		cv = df_mk((float) x, (float)(x - (double)(float) x));
+		want[0] = df_fbits(ts.hi); want[1] = df_fbits(ts.lo); want[2] = df_fbits(tp.hi); want[3] = df_fbits(tp.lo);
+		want[4] = df_fbits(ad.hi); want[5] = df_fbits(ad.lo); want[6] = df_fbits(mu.hi); want[7] = df_fbits(mu.lo);
+		want[8] = df_fbits(cv.hi); want[9] = df_fbits(cv.lo);
+		for (int k = 0; k < 10; k++)
+			if (out[i * 12 + k] != want[k])
+			{
+				WHY("case %u output %d: device %08x, host %08x (a=%a b=%a)", i, k, out[i * 12 + k], want[k], a, bb);
+				rc = -1;
+				goto out;
+			}
+		if (out[i * 12 + 10] != 1u)
+		{
+			WHY("case %u: the conversion refused an operand in range", i);
+			rc = -1;
+			goto out;
+		}
+	}
+out:
+	free_bufs(ctx, b, NB);
+	return rc;
+}
+
+/* ------------------------------------------------------------------------ */
 /* buffer device address, memory model, unified memory, host import          */
 /* ------------------------------------------------------------------------ */
 static int

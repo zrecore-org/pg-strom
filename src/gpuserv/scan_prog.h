@@ -85,6 +85,10 @@ struct kern_session_info;
 struct kern_data_store;
 
 /* 0 on success, -1 on failure with a message in err (the query cannot run on this service) */
+/* A10 part 6: the service sets it when the device keeps the error-free transformations exact (gpuserv_df64_selfcheck); the programs of
+ * float8 comparisons with arithmetic then start with the df64 prefilter DFCMP. 0 in the PostgreSQL module. */
+extern int scan_prog_df64;
+
 int		scan_prog_build(const struct kern_session_info *session,
 						const struct kern_data_store *kds_src,
 						scan_prog *prog, char *err, size_t errlen);

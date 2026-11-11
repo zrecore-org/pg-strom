@@ -231,6 +231,9 @@ static int cmd_bench(const char *spvpath, int op, int var)
 
 int main(int argc, char **argv)
 {
+	/* DF64_SETENV=1: switch MoltenVK's fast math off from inside the process before the first Vulkan call (what the service does) */
+	if (getenv("DF64_SETENV"))
+		setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 1);
 	if (argc >= 3 && !strcmp(argv[1], "corr")) return cmd_corr(argv[2], argc > 3 ? strtoull(argv[3], NULL, 10) : 1000000ull);
 	if (argc >= 5 && !strcmp(argv[1], "bench")) return cmd_bench(argv[2], atoi(argv[3]), atoi(argv[4]));
 	if (argc >= 2 && !strcmp(argv[1], "cover")) return cmd_cover(argc > 2 ? strtoull(argv[2], NULL, 10) : 2000000ull);

@@ -114,6 +114,15 @@ create_instance(inst_t *in, char *err, size_t errlen)
 	VkResult	rc;
 
 	memset(in, 0, sizeof(*in));
+#ifdef __APPLE__
+	/*
+	 * A10 part 6: MoltenVK compiles with Metal's fast math by default, which reassociates the error terms of the double-float
+	 * arithmetic (kernels_vm/df64.inc) away (measured: TwoSum's error term is wrong for 28% of the operand sets). The switch must
+	 * be set before MoltenVK initializes; an explicit setting of the user stays.
+	 */
+	if (!getenv("PGSTROM_GPUSERV_KEEP_FASTMATH"))		/* =1: leave MoltenVK as it is (A/B measurements; the df64 prefilter then switches itself off) */
+		setenv("MVK_CONFIG_FAST_MATH_ENABLED", "0", 0);
+#endif
 	fn_ver = (PFN_vkEnumerateInstanceVersion)
 		vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceVersion");
 	if (fn_ver)
@@ -786,8 +795,12 @@ pcache_open_one(gpu_vk_ctx *ctx, const VkPhysicalDeviceProperties *props, const 
 		const unsigned char *u = props->pipelineCacheUUID;
 		FILE	   *fp;
 
-		snprintf(path, sizeof(path), "%s/pipeline-%s%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x.bin",
-				 dir, spec ? "spec-" : "", props->vendorID, props->deviceID,
+		/* a cache holds the Metal libraries MoltenVK compiled with one fast-math setting (A10 part 6: the service runs with it off):
+		 * a file of its own, or the first start would recompile every library of the other kind */
+		const char *fm = getenv("MVK_CONFIG_FAST_MATH_ENABLED");
+
+		snprintf(path, sizeof(path), "%s/pipeline-%s%s%04x-%04x-%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x.bin",
+				 dir, spec ? "spec-" : "", (fm && fm[0] == '0') ? "nofm-" : "", props->vendorID, props->deviceID,
 				 u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
 				 u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
 		snprintf(path_out, path_len, "%s", path);

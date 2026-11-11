@@ -44,6 +44,7 @@
 #include "gpuserv_probe.h"
 #include "gpu_vk.h"
 #include "vm_selftest.h"
+extern int scan_prog_df64;		/* scan_prog.h: the df64 prefilter of float8 comparisons (A10 part 6) */
 #include "wire.h"
 
 static volatile sig_atomic_t	got_signal = 0;
@@ -218,6 +219,21 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 			return 3;
 		}
 		log_msg("VM self-test %s", msg);
+		/* A10 part 6: the df64 prefilter of float8 comparisons needs exact error-free transformations (gpu_vk.c switches MoltenVK's
+		 * fast math off); PGSTROM_GPUSERV_DF64=off keeps the exact path only */
+		{
+			const char *e = getenv("PGSTROM_GPUSERV_DF64");
+
+			if (e && !strcmp(e, "off"))
+				log_msg("df64 prefilter off (PGSTROM_GPUSERV_DF64=off)");
+			else if (gpuserv_df64_selfcheck(&ss.vk, msg, sizeof(msg)) != 0)
+				log_msg("df64 prefilter off: the device does not keep the error-free transformations exact (%s)", msg);
+			else
+			{
+				scan_prog_df64 = 1;
+				log_msg("df64 prefilter on");
+			}
+		}
 	}
 
 	ss.listen_fd = open_listen_socket(socket_path);

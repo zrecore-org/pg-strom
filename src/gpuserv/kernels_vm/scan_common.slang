@@ -23,6 +23,9 @@
 #define SCANVM_OP(n, v) static const uint SOP_##n = v;
 #include "scan_vm_ops.inc"
 #include "f64_soft.inc"         // A10: float8 in 64-bit integer arithmetic (the device has no fp64)
+#ifndef VM_NO_F8
+#include "df64.inc"             // A10 part 6: double-float pairs, the prefilter of float8 comparisons (DFCMP)
+#endif
 // Geometry groups (R15): VM_GEOM_MASK says which geometry instructions this kernel interprets (the host picks, per program, the
 // smallest kernel tier that has them: scan_caps.h SCAN_FEAT_G_*). VM_NO_GEOM is the empty mask, the default is all of them.
 #define VM_G_BOX   1
@@ -1384,6 +1387,162 @@ uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs
     }
     return 0;
 }
+
+#ifndef VM_NO_F8
+// DFCMP (A10 part 6, S1): decide a float8 comparison of two small expression trees with double-float arithmetic (df64.inc) and a
+// running error bound, or say that it cannot (dst NULL: the exact software binary64 instructions that follow run). The tree is
+// postfix code in the constant pool (scan_vm_ops.inc); every register leaf is converted from its binary64 bits with 2^-48 |x| of
+// error (a constant arrives converted by the host with its exact residual), every node adds the error of the df64 operation (JMP
+// 2017: 3u^2 for +, 5u^2 for *, with 4u^2 and 7u^2 used; u = 2^-24), the CPU's own rounding of the double operation (2^-52 per
+// operation) and an absolute floor of 2^-110 (float32 underflow of the low parts), all carried upward by relative margins (the
+// bound is float32 arithmetic). A leaf that is NULL, nonzero outside [2^-60, 2^60], or a value beyond 2^100 makes the row
+// undecided: then neither overflow nor underflow of the double operations is possible when the row is decided, so no error
+// PostgreSQL would raise is skipped. The comparison is decided when the difference of the two trees exceeds its bound. Needs
+// MoltenVK's fast math off (gpuserv_df64_selfcheck). The helpers are shared with the specialized kernels (specialize.c gen_dfcmp),
+// which unroll the tree.
+struct DFE
+{
+    float h;        // value = h + l (a normalized double-float)
+    float l;
+    float e;        // upper bound of |value - what the CPU computes|
+};
+
+DFE dfe_mk(float h, float l, float e)
+{
+    DFE r;
+    r.h = h;
+    r.l = l;
+    r.e = e;
+    return r;
+}
+
+// a float8 register; false when it is NULL or outside the prefilter's range
+bool dfe_load(Reg r, out DFE d)
+{
+    uint64_t v = uint64_t(r.v);
+    bool lok;
+    DF c = df_from_f64bits(uint(v), uint(v >> 32), lok);
+    d = dfe_mk(c.hi, c.lo, (abs(c.hi) + abs(c.lo)) * 3.6e-15f);       // 2^-48 (+ margin)
+    return lok && r.isnull == 0;
+}
+
+DFE dfe_const(uint hb, uint lb, uint eb)
+{
+    return dfe_mk(asfloat(hb), asfloat(lb), asfloat(eb));
+}
+
+// negate (t == 6) or absolute value (t == 7)
+DFE dfe_unary(uint t, DFE a)
+{
+    if (t == 6u || a.h < 0.0f || (a.h == 0.0f && a.l < 0.0f))
+        return dfe_mk(-a.h, -a.l, a.e);
+    return a;
+}
+
+// +, - (t 3, 4) and * (t 5); ok becomes false when the result is beyond 2^100 (or NaN)
+DFE dfe_bin(uint t, DFE a, DFE b, inout bool ok)
+{
+    float ma = abs(a.h) + abs(a.l);
+    float mb = abs(b.h) + abs(b.l);
+    DF R;
+    float e;
+    if (t == 5u)
+    {
+        R = df_mul(df_mk(a.h, a.l), df_mk(b.h, b.l));
+        e = (ma * b.e + mb * a.e + a.e * b.e) * 1.0000003f + 2.6e-14f * (ma * mb) + 1e-33f;
+    }
+    else
+    {
+        R = df_add(df_mk(a.h, a.l), t == 4u ? df_neg(df_mk(b.h, b.l)) : df_mk(b.h, b.l));
+        e = (a.e + b.e) * 1.0000003f + 1.6e-14f * (ma + mb) + 1e-33f;
+    }
+    if (!(abs(R.hi) < 1.2676506e30f))                       // 2^100; also NaN
+        ok = false;
+    return dfe_mk(R.hi, R.lo, e * 1.00001f);
+}
+
+// the sign of L - R when the bound decides it (-1, +1), else 0
+int dfe_sign(DFE L, DFE R)
+{
+    DF D = df_sub(df_mk(L.h, L.l), df_mk(R.h, R.l));
+    float ml = abs(L.h) + abs(L.l);
+    float mr = abs(R.h) + abs(R.l);
+    float eD = ((L.e + R.e) * 1.0000003f + 1.5e-14f * (ml + mr) + 1e-33f) * 1.00001f;
+    if (abs(D.hi) * 0.999999f > eD)
+        return D.hi > 0.0f ? 1 : -1;
+    return 0;
+}
+
+void vm_dfcmp(uint dst, uint k0, uint kind, inout Reg regs[VM_MAX_REGS])
+{
+    uint w = prog[20] + (k0 >> 2);
+    uint n = prog[w] & 0xffu;
+    DFE st[6];
+    uint sp = 0;
+    bool ok = true;
+
+    for (uint k = 0; k < 6u; k++)
+        st[k] = dfe_mk(0.0f, 0.0f, 0.0f);
+    w++;
+    for (uint i = 0; i < n; i++)
+    {
+        if (ok)
+        {
+            uint nw = prog[w];
+            uint t = nw & 15u;
+            w++;
+            if (t == 0u || t == 2u)
+            {
+                DFE d = dfe_mk(0.0f, 0.0f, 0.0f);
+                if (t == 0u)
+                {
+                    if (!dfe_load(regs[nw >> 4], d))
+                        ok = false;
+                }
+                else
+                {
+                    d = dfe_const(prog[w], prog[w + 1u], prog[w + 2u]);
+                    w += 3u;
+                }
+                if (sp >= 6u)
+                    ok = false;
+                else
+                {
+                    st[sp] = d;
+                    sp++;
+                }
+            }
+            else if (t >= 6u)
+            {
+                if (sp < 1u)
+                    ok = false;
+                else
+                    st[sp - 1u] = dfe_unary(t, st[sp - 1u]);
+            }
+            else
+            {
+                if (sp < 2u)
+                    ok = false;
+                else
+                {
+                    sp--;
+                    st[sp - 1u] = dfe_bin(t, st[sp - 1u], st[sp], ok);
+                }
+            }
+        }
+    }
+    regs[dst].isnull = 1;
+    if (ok && sp == 2u)
+    {
+        int sg = dfe_sign(st[0], st[1]);
+        if (sg != 0)
+        {
+            regs[dst].isnull = 0;
+            regs[dst].v = b2l(cmp_result(sg, kind));
+        }
+    }
+}
+#endif
 
 // float8 aggregates (A10). Classes 6 (sum, avg), 7 (min), 8 (max) and 9 (sum of float4: every addition is rounded to binary32, as
 // float4pl does); a partial is (n, a): a the bits of the double, n the number of values (sum) or 1 (min, max), n == 0 when there
@@ -3392,6 +3551,11 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
 #ifndef VM_NO_F8
         if (op >= SOP_CMPD && op <= SOP_D2F)
             return vm_f8(op, dst, ra, rb, k0, k1, regs);
+        if (op == SOP_DFCMP)
+        {
+            vm_dfcmp(dst, k0, k1, regs);
+            return 0;
+        }
 #endif
 #if (VM_GEOM_MASK & VM_G_BOX) != 0
         if (op == SOP_GEOMBOX)
