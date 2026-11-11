@@ -1,0 +1,148 @@
+name: NVIDIA debug
+
+# Manual runs on the billed GPU runner (Tesla T4) of ONE differential dev script or the reproducer, nothing else: build,
+# install, service lifecycle check, then the chosen script(s). Used to investigate NVIDIA-only failures of the linux-gpu job of
+# vulkan-check.yml. Every run is billed: keep the number of runs small and make each one answer several questions.
+#
+#   gh workflow run nvidia-debug.yml --repo zrecore-org/pg-strom --ref nvidia-fix -f script=float8_dev.sh
+#
+# script: one or more dev scripts under test/gpuserv, separated by ';', each optionally preceded by VAR=value words, e.g.
+#   "SPEC=off nvidia_probe.sh; float8_dev.sh"
+# extra_env: lines of VAR=value exported for every script (e.g. PGSTROM_GPUSERV_TRACE=1)
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "dev script(s) under test/gpuserv, separated by ';' (each may start with VAR=value words)"
+        type: string
+        default: "float8_dev.sh"
+      extra_env:
+        description: "extra environment, one VAR=value per line"
+        type: string
+        default: ""
+
+env:
+  SLANG_VERSION: "2026.20"
+  PG_MAJOR: "17"
+
+jobs:
+  nvidia:
+    name: NVIDIA T4 debug run
+    runs-on: ${{ vars.GPU_RUNNER_LABEL }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build and runtime packages
+        timeout-minutes: 10
+        run: |
+          echo 'Acquire::Retries "3"; Acquire::http::Timeout "30"; Acquire::https::Timeout "30";' | sudo tee /etc/apt/apt.conf.d/99ci-timeouts >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl wget lsb-release gnupg build-essential pkgconf \
+            libvulkan-dev mesa-vulkan-drivers vulkan-tools spirv-tools \
+            libnuma-dev libkrb5-dev libicu-dev postgresql-common
+
+      - name: Install PostgreSQL ${{ env.PG_MAJOR }} (PGDG)
+        timeout-minutes: 10
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR}
+          sudo chown -R "$USER" /usr/lib/postgresql/${PG_MAJOR} /usr/share/postgresql/${PG_MAJOR}
+
+      - name: Install Apache Arrow and Parquet (Apache apt repository)
+        timeout-minutes: 10
+        run: |
+          wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
+          sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
+          sudo apt-get update
+          sudo apt-get install -y libarrow-dev libparquet-dev
+
+      - name: Install Slang ${{ env.SLANG_VERSION }}
+        run: |
+          D="$HOME/tools/slang-${SLANG_VERSION}"
+          mkdir -p "$D"
+          curl -fsSL -o /tmp/slang.tar.gz \
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-2026.20-linux-x86_64.tar.gz"
+          echo "e863e568c204810d6e8bc31852f056aef6763c55ea9925db2db7affa060347c9  /tmp/slang.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/slang.tar.gz -C "$D"
+          SLANGC=$(find "$D" -type f -name slangc | head -n 1)
+          test -x "$SLANGC"
+          echo "SLANGC=$SLANGC" >> "$GITHUB_ENV"
+          "$SLANGC" -v
+
+      # The SPIR-V of the kernels (most of the build time) is kept while the kernel sources are unchanged: a probe run after a
+      # probe run skips it. The restored files are touched so that make finds them newer than the fresh checkout.
+      - name: Restore the compiled kernels
+        id: kcache
+        uses: actions/cache@v4
+        with:
+          path: src/gpuserv/build
+          key: nvidia-spv-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**', 'src/gpuserv/Makefile') }}
+      - name: Mark the restored kernels as up to date
+        if: steps.kcache.outputs.cache-hit == 'true'
+        run: find src/gpuserv/build -type f -exec touch {} +
+
+      - name: NVIDIA Vulkan driver
+        timeout-minutes: 5
+        run: |
+          nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+          test -f /usr/share/vulkan/icd.d/nvidia_icd.json
+          vulkaninfo --summary | grep -q 'NVIDIA'
+          vulkaninfo | grep -iE "subgroupSize|subgroupSupportedOperations|shaderInt64|shaderInt16|storageBuffer16|vulkanMemoryModel|driverVersion|driverName|apiVersion" | sort | uniq | head -40
+
+      - name: Build and install
+        timeout-minutes: 25
+        run: |
+          PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+          make -C src PG_CONFIG=$PG_CONFIG WITH_GPUSERV=1 -j"$(nproc)" install
+
+      - name: Service lifecycle test (the GPU, not lavapipe)
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "off"
+        run: sh test/gpuserv/service_test.sh
+
+      - name: Run the chosen script(s)
+        timeout-minutes: 25
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "off"
+          SCRIPTS: ${{ inputs.script }}
+          EXTRA_ENV: ${{ inputs.extra_env }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          for l in $(printf '%s\n' "$EXTRA_ENV" | tr '\n' ' '); do export "$l"; done
+          IFS=';'
+          for seg in $SCRIPTS; do
+            IFS=' '
+            envs=""; name=""
+            for w in $seg; do case "$w" in *=*) envs="$envs $w";; *) name=$w;; esac; done
+            [ -n "$name" ] || continue
+            log="$RUNNER_TEMP/out/$(echo "$envs $name" | tr -c 'A-Za-z0-9_.\n' '_').log"
+            echo "::group::$envs $name"
+            env $envs sh "test/gpuserv/$name" > "$log" 2>&1 || echo "(exit status $?)" >> "$log"
+            echo "::endgroup::"
+            echo "=== $envs $name: $(grep -c '^  FAIL' "$log") FAIL, $(grep -c '^  ok' "$log") ok"
+            grep -A6 '^  FAIL' "$log" | cut -c1-400 | head -150
+            # the reproducer has no ok/FAIL lines: print it whole
+            case "$name" in nvidia_probe*) cat "$log" | cut -c1-300 ;; esac
+            IFS=';'
+          done
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nvidia-debug-logs
+          path: |
+            ${{ runner.temp }}/out
+            /tmp/f8_dev/log
+            /tmp/pg_dev/log
+            /tmp/pg_gist_dev/log
+            /tmp/gc_dev/log
+          if-no-files-found: ignore
