@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define GPUSERV_PROTO_VERSION		1
+#define GPUSERV_PROTO_VERSION		2
 #define GPUSERV_MAX_DEVICES			8
 
 /*

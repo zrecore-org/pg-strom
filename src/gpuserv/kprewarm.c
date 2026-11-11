@@ -51,6 +51,7 @@ typedef struct kent
 	uint64_t	mhash;
 	float		msecs;
 	int			persist;			/* ready and (as far as we know) in the pipeline cache file */
+	int			refused;			/* a task was refused for it: later ones are refused at once until it is ready */
 } kent;
 
 static const struct { const char *name; const unsigned char *spv; const unsigned int *len; } kreg[] = {
@@ -283,9 +284,13 @@ manifest_save_locked(void)
 		return;
 	fprintf(fp, "pgstrom-kernel-state 1\npcache %llu\n", (unsigned long long) gpu_vk_pcache_saved(K.vk));
 	for (int i = 0; i < K.n; i++)
+	{
 		if (K.ents[i].persist && K.ents[i].hashed)
 			fprintf(fp, "%s %llx %.3f\n", K.ents[i].name, (unsigned long long) K.ents[i].hash,
 					(double) K.st->k[i].compile_secs);
+		else if (K.ents[i].has_mrec && !K.ents[i].hashed)		/* not looked at (outside the set): keep the record */
+			fprintf(fp, "%s %llx %.3f\n", K.ents[i].name, (unsigned long long) K.ents[i].mhash, (double) K.ents[i].msecs);
+	}
 	if (fclose(fp) != 0 || rename(tmp, K.manifest_path) != 0)
 		unlink(tmp);
 }
@@ -322,24 +327,31 @@ set_state_locked(kent *e, int state)
 	pthread_cond_broadcast(&K.done_cv);
 }
 
-/* caller holds K.mu: hash the SPIR-V once and take the manifest's word for a kernel with the same hash */
+/* caller holds K.mu, e->hash is set: take the manifest's word for a kernel with the same hash */
 static void
-verify_locked(kent *e)
+apply_manifest_locked(kent *e)
 {
-	if (e->hashed)
-		return;
-	e->hash = spv_hash(e->spv, e->len);
-	e->hashed = 1;
-	if (e->has_mrec && e->mhash == e->hash && K.st->k[e - K.ents].state == GPUSERV_KSTATE_PENDING)
-	{
-		int			i = (int)(e - K.ents);
+	int			i = (int)(e - K.ents);
 
+	e->hashed = 1;
+	if (e->has_mrec && e->mhash == e->hash && K.st->k[i].state == GPUSERV_KSTATE_PENDING)
+	{
 		K.st->k[i].from_disk = 1;
 		K.st->k[i].compile_secs = e->msecs;
 		e->persist = 1;
 		K.st->persisted++;
 		set_state_locked(e, GPUSERV_KSTATE_READY);
 	}
+}
+
+/* caller holds K.mu: hash the SPIR-V (only a kernel with a manifest record is worth it) */
+static void
+verify_locked(kent *e)
+{
+	if (e->hashed || !e->has_mrec)
+		return;
+	e->hash = spv_hash(e->spv, e->len);
+	apply_manifest_locked(e);
 }
 
 static int
@@ -415,6 +427,12 @@ compile_ent(kent *e, double *secs_out)
 		pthread_mutex_unlock(&K.mu);
 	}
 	pthread_mutex_lock(&K.mu);
+	if (K.stop || K.st->k[i].state != GPUSERV_KSTATE_PENDING)
+	{
+		pthread_mutex_unlock(&K.mu);			/* stopping, or another path made it ready meanwhile */
+		*secs_out = 0;
+		return -2;
+	}
 	set_state_locked(e, GPUSERV_KSTATE_COMPILING);
 	snprintf(K.st->current, sizeof(K.st->current), "%s", e->name);
 	K.st->current_since = real_now();
@@ -488,17 +506,16 @@ kpw_gate(void *arg, const void *spirv, size_t spirv_bytes, uint32_t nbind, uint3
 	{
 		/*
 		 * No gate (the backend cannot continue on the CPU, or the old behavior was asked for): the caller creates the pipeline
-		 * itself and waits as long as it takes; the pipeline cache keeps the result.
+		 * itself and waits as long as it takes. Nothing is recorded here (the prewarm thread finds it in the pipeline cache and
+		 * records it, in milliseconds). A kernel the prewarm thread is compiling right now is waited for, not compiled twice.
 		 */
-		if (K.st->k[e - K.ents].state == GPUSERV_KSTATE_PENDING)
-		{
-			e->persist = 1;
-			set_state_locked(e, GPUSERV_KSTATE_READY);
-			manifest_save_locked();
-		}
+		while (K.st->k[e - K.ents].state == GPUSERV_KSTATE_COMPILING && !K.stop)
+			pthread_cond_wait(&K.done_cv, &K.mu);
 		pthread_mutex_unlock(&K.mu);
 		return 0;
 	}
+	if (e->refused)
+		budget = 0;				/* one task already waited for it: do not stall the service again */
 	if (!e->demand)
 	{
 		e->demand = 1;
@@ -525,6 +542,7 @@ kpw_gate(void *arg, const void *spirv, size_t spirv_bytes, uint32_t nbind, uint3
 		return 0;
 	}
 	K.st->refused++;
+	e->refused = 1;
 	snprintf(err, errlen, "kernel %s is not compiled yet: the GPU driver is compiling it in the background (see pgstrom.gpu_kernel_state())",
 			 e->name);
 	pthread_mutex_unlock(&K.mu);
@@ -644,11 +662,21 @@ prewarm_main(void *arg)
 	lower_priority();
 
 	/* the first look: kernels the manifest vouches for become ready without a compile */
-	pthread_mutex_lock(&K.mu);
 	for (int i = 0; i < K.n; i++)
 		if (K.ents[i].has_mrec)
-			verify_locked(&K.ents[i]);
-	pthread_mutex_unlock(&K.mu);
+		{
+			uint64_t	h = spv_hash(K.ents[i].spv, K.ents[i].len);		/* not under the lock: 10 MB of SPIR-V */
+
+			pthread_mutex_lock(&K.mu);
+			if (!K.ents[i].hashed)
+			{
+				K.ents[i].hash = h;
+				apply_manifest_locked(&K.ents[i]);
+			}
+			pthread_mutex_unlock(&K.mu);
+			if (K.stop)
+				break;
+		}
 
 	/* give the service time to start serving */
 	{
@@ -664,8 +692,15 @@ prewarm_main(void *arg)
 		}
 		pthread_mutex_lock(&K.mu);
 		while (!K.stop)
+		{
+			int			dem = 0;
+
+			(void) pick_next_locked(&dem);
+			if (dem)					/* a task already asked for a kernel */
+				break;
 			if (pthread_cond_timedwait(&K.cv, &K.mu, &dl) == ETIMEDOUT)
 				break;
+		}
 		pthread_mutex_unlock(&K.mu);
 	}
 
@@ -684,10 +719,11 @@ prewarm_main(void *arg)
 		e = pick_next_locked(&demanded);
 		if (!e)
 		{
-			if (K.st->phase != GPUSERV_PHASE_DONE && K.mode != GPUSERV_PREWARM_OFF)
+			if (K.st->phase != GPUSERV_PHASE_DONE && K.st->phase == GPUSERV_PHASE_RUNNING)
 			{
 				K.st->phase = GPUSERV_PHASE_DONE;
 				K.st->finished_at = real_now();
+				if (K.mode != GPUSERV_PREWARM_OFF)
 				fprintf(stderr, "pgstrom-gpuserv[%d]: prewarm: the %s set is compiled (%u kernels, %u failed)\n", (int) getpid(),
 						K.mode == GPUSERV_PREWARM_LITE ? "lite" : K.mode == GPUSERV_PREWARM_GEOMETRY ? "geometry" : "all",
 						K.st->target, K.st->nfailed);
@@ -745,11 +781,15 @@ kpw_start(gpu_vk_ctx *vk, gpuserv_prewarm_state *st, int mode)
 	e = getenv("PGSTROM_GPUSERV_KERNEL_WAIT_MS");
 	K.force_wait = (e && atol(e) < 0 && e[0] == '-');
 	K.last_active = mono_now();
+	if (mode == GPUSERV_PREWARM_OFF && K.force_wait)
+		return 0;						/* nothing to prewarm and no gate: do not even look at the kernels (the tests) */
 	kreg_init(vk, st, mode);
-	vk->create_gate = kpw_gate;
-	vk->create_gate_arg = NULL;
 	if (pthread_create(&K.thr, NULL, prewarm_main, NULL) == 0)
+	{
 		K.thr_started = 1;
+		vk->create_gate = kpw_gate;		/* only with a thread that can compile what the gate queues */
+		vk->create_gate_arg = NULL;
+	}
 	return K.thr_started;
 }
 

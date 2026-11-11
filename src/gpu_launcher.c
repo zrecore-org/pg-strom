@@ -169,9 +169,6 @@ gpuserv_run_probe(void)
 	argv[argc++] = "--probe";
 	if (gpu_allow_cpu_device)
 		argv[argc++] = "--allow-cpu";
-	argv[argc++] = "--prewarm-set";
-	argv[argc++] = (gpu_prewarm == GPUSERV_PREWARM_OFF ? "off" : gpu_prewarm == GPUSERV_PREWARM_GEOMETRY ? "geometry" :
-					gpu_prewarm == GPUSERV_PREWARM_ALL ? "all" : "lite");
 	argv[argc] = NULL;
 
 	if (pipe(pfd) != 0)
@@ -309,6 +306,9 @@ launcher_spawn_service(int *p_lifeline_write)
 		argv[argc++] = "--kernel-cache-dir";
 		argv[argc++] = gpu_kernel_cache_dir;
 	}
+	argv[argc++] = "--prewarm-set";
+	argv[argc++] = (gpu_prewarm == GPUSERV_PREWARM_OFF ? "off" : gpu_prewarm == GPUSERV_PREWARM_GEOMETRY ? "geometry" :
+					gpu_prewarm == GPUSERV_PREWARM_ALL ? "all" : "lite");
 	argv[argc] = NULL;
 
 	pid = fork();
