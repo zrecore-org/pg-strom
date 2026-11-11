@@ -90,11 +90,11 @@ libgpuserv.a: $(LIB_OBJS)
 	$(AR) rcs $@ $(LIB_OBJS)
 
 gpuserv-probe: probe_main.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ probe_main.o libgpuserv.a $(VK_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o $@ probe_main.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 # the service program: --probe and --serve (see gpuserv_main.c)
 pgstrom-gpuserv: gpuserv_main.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ gpuserv_main.o libgpuserv.a $(VK_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o $@ gpuserv_main.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 proto_check: proto_check.o gpuserv_proto.o
 	$(CC) $(CFLAGS) -o $@ proto_check.o gpuserv_proto.o
@@ -193,7 +193,7 @@ spec_check.o: spec_check.c specialize.h scan_prog.h scan_caps.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -MMD -MP -c -o $@ $<
 
 spec_check: spec_check.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ spec_check.o libgpuserv.a $(VK_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o $@ spec_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 # offline check of the kernel tier selection (every GEOM* opcode sets SCAN_FEAT_GEOM; no kernels needed)
 feat_check.o: feat_check.c scan_caps.h kernels_vm/scan_vm_ops.inc ../xpu_common.h
@@ -207,14 +207,14 @@ gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -MMD -MP -c -o $@ $<
 
 gpusort_check: gpusort_check.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 # time to create the VM pipelines with and without the persisted pipeline cache (not part of "all"; test/gpuserv/pcache_test.sh)
 pcache_check.o: pcache_check.c gpu_vk.h kernels_spv.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 pcache_check: pcache_check.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ pcache_check.o libgpuserv.a $(VK_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o $@ pcache_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 # self-check of the software binary64 (kernels_vm/f64_soft.inc): the library as C against the host's hardware double,
 # and the same source compiled by slangc against the device (not part of "all"; test/gpuserv/f64soft_check.sh)
@@ -242,7 +242,7 @@ hash_check.o: hash_check.c gpu_vk.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 hash_check: hash_check.o libgpuserv.a
-	$(CC) $(CFLAGS) -o $@ hash_check.o libgpuserv.a $(VK_LIBS) -lpthread
+	$(CC) $(CFLAGS) -o $@ hash_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 ARROW_INCS := kernels_vm/arrow_load.inc
 build/aagg%.spv: kernels_vm/agg.slang kernels_vm/scan_common.slang kernels_vm/vagg.inc kernels_vm/hash_bytes.inc kernels_vm/scan_vm_ops.inc $(ARROW_INCS) | build
