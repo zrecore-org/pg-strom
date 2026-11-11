@@ -53,9 +53,10 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref replaces the run in progress (a lavapipe run is long).
+# A newer push to the same ref replaces the run in progress (a lavapipe run is long). A manual run is its own group: starting
+# one must not cancel another (a cancelled T4 run is billed for the minutes it ran).
 concurrency:
-  group: vulkan-check-${{ github.ref }}
+  group: vulkan-check-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-manual-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 env:
