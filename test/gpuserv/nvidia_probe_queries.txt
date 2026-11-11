@@ -28,3 +28,18 @@ select min(z), max(z) from np where i % 24 in (0, 2)
 select g4, max(z), min(z) from np group by 1 order by 1
 select max(z), count(*) from np where i < 20000 and i % 24 = 0
 select max(d), min(d), sum(d) from np
+select min(z), max(z), count(z) from np2
+select min(z), max(z), count(z) from np2
+select min(z), max(z), count(z) from np2
+select min(z), max(z), count(z) from np2 where i > 5
+select g3, max(z), min(z) from np2 group by 1 order by 1
+select sum((a % 8)::float4), sum((b % 5)::float4), count(*) from np2
+select g5, sum((a % 8)::float4), sum((b % 5)::float4) from np2 group by 1 order by 1
+select g3, b % 4, sum(w), count(*) from np2 group by 1, 2 order by 1, 2
+select i % 300, sum(w), sum((a % 8)::float4) from np2 group by 1 order by 1 limit 5
+select a % (g3 + 1), count(*) from np2 group by 1 order by 1
+select count(*) from np2 where a % (g5 - 3) = -1
+select date_trunc('day', ('2000-01-01'::timestamp - (i || ' hours')::interval))::date, count(*) from np group by 1 order by 1 limit 3
+select count(*), sum((ts::date - '1999-12-31'::date)) from (select '1999-12-31 23:00'::timestamp - (i % 5 || ' hours')::interval as ts from np) s
+select sum(n % 7), sum(n % -7) from (select (a::numeric / 10) as n from np) s
+select sum((a::numeric / 10) % 3) from np

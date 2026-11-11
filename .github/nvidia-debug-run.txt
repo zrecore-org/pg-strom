@@ -1,1 +1,2 @@
 nvidia_probe.sh; float8_dev.sh
+PGSTROM_GPUSERV_TRACE=0
