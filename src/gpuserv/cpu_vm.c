@@ -822,6 +822,7 @@ geom_head(const unsigned char *p, uint32_t len, uint32_t *gtype, uint32_t *srid,
 
 /* R5: lines and polygons against each other (kernels_vm/geom_pred.inc, the text the kernel compiles too) */
 #define GP_FN static
+#define GP_NOINL
 #define GP_T(n) struct n
 #define GP_SRC_T const unsigned char *
 #define GP_LD32(src, off) ld32u((src) + (off))
@@ -837,16 +838,47 @@ geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t
 	uint32_t	tb = GEOM_POINTTYPE, sb = fsrid, pos_b = 0, fl_b = 0;
 	uint64_t	px, py;
 	int			rr = PIP_OUT;
+	uint32_t	gmode;
+	int			gneg;
 
+	gmode = (k0 >> 2) & 7;
+	gneg = (gmode == 1);
 	if (!have_xy)
 	{
-		uint32_t	gr = gp_try(pa, 0, la, pb, 0, lb, (k0 & SOP_GPIP_SYMM) ? 1 : 0);
+		uint32_t	gm = GPM_CONTAINS;
+		uint32_t	gr;
 
+		if (gmode >= 2)
+			gm = gmode;
+		else if ((k0 & SOP_GPIP_SYMM) || gneg)
+			gm = GPM_INTERSECTS;
+		gr = gp_try(pa, 0, la, pb, 0, lb, gm);
 		if (gr == GP_RECHECK)
 			return SOP_RECHECK_CODE;
 		if (gr != GP_NA)
 		{
-			*res = (gr == GP_TRUE);
+			*res = ((gr == GP_TRUE) != gneg);
+			return 0;
+		}
+		if (gmode >= 2)
+			return SOP_RECHECK_CODE;
+	}
+	else
+	{
+		/* a Z or M polygon against the fused point: the rings are read by their own stride */
+		struct GpGeo ga = gp_head(pa, 0, la, 0);
+
+		if (ga.ok && (ga.flags & 3) != 0 && (ga.gtype == 3 || ga.gtype == 6))
+		{
+			struct GpInfo gi = gp_prep(pa, ga);
+			uint32_t	pr;
+
+			if (!gi.ok || ga.srid != fsrid || F64_NONFINITE(fx) || F64_NONFINITE(fy))
+				return SOP_RECHECK_CODE;
+			pr = gp_pip_area(pa, ga, fx, fy);
+			if (pr == GPP_UNSURE)
+				return SOP_RECHECK_CODE;
+			*res = ((pr == GPP_IN) != gneg);
 			return 0;
 		}
 	}
@@ -888,7 +920,7 @@ geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t
 		npts = ld32u(pb + pos_b + 4);
 		if (npts == 0)
 		{
-			*res = 0;							/* POINT EMPTY */
+			*res = gneg;						/* POINT EMPTY */
 			return 0;
 		}
 		if (npts != 1 || pos_b + 8 + 16 > lb)
@@ -909,7 +941,7 @@ geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t
 			(f64_lt(px, f64_from_f32(bx0)) || f64_gt(px, f64_from_f32(bx1)) ||
 			 f64_lt(py, f64_from_f32(by0)) || f64_gt(py, f64_from_f32(by1))))
 		{
-			*res = 0;
+			*res = gneg;
 			return 0;
 		}
 	}
@@ -946,7 +978,7 @@ geom_pip(const unsigned char *pa, uint32_t la, const unsigned char *pb, uint32_t
 	}
 	if (rr == PIP_UNSURE)
 		return SOP_RECHECK_CODE;
-	*res = (rr == PIP_IN);
+	*res = ((rr == PIP_IN) != gneg);
 	return 0;
 }
 

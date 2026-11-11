@@ -235,6 +235,15 @@ SCANVM_OP(GEOMLEN,    139)
 SCANVM_OP(GPIP_POLY_POINT,  0)
 SCANVM_OP(GPIP_POINT_POLY,  1)
 SCANVM_OP(GPIP_EITHER,      2)
+/* R6: ST_Disjoint (the negated ST_Intersects; a fused point allowed), ST_Touches, ST_Crosses, ST_Overlaps, ST_Equals of two lines / polygons: the
+ * relation is (kind - 2) in bits 2-4 of k0 (SOP_GPIP_MODE_SHIFT); the instruction decides only beyond the error bounds of geom_pred.inc, and
+ * everything else is SCANVM_RECHECK_CODE. Not in join programs. */
+SCANVM_OP(GPIP_DISJOINT,    3)
+SCANVM_OP(GPIP_TOUCHES,     4)
+SCANVM_OP(GPIP_CROSSES,     5)
+SCANVM_OP(GPIP_OVERLAPS,    6)
+SCANVM_OP(GPIP_EQUALS,      7)
+SCANVM_OP(GPIP_MODE_SHIFT,  2)
 SCANVM_OP(GPIP_FUSED,       1)
 SCANVM_OP(GPIP_SYMM,        2)
 /* GEOMDWITHIN: the flags of k0 */
