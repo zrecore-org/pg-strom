@@ -1,1 +1,1 @@
-TMO=600 nvidia_bisect2.sh; TMO=900 PIPE_PATTERN=gagg16_4_nogeom+gtab16_nogeom+gtab16+gpuscan8 PIPE_TIMEOUT=200 pipeline_check.sh
+TMO=400 nvidia_bisect3.sh
