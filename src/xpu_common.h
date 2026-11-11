@@ -2902,6 +2902,14 @@ typedef struct kern_session_info
 	/* fault injection for tests (pg_strom.gpuserv_fault; offset to a C string, 0: none) */
 	uint32_t	fault_spec;
 
+	/*
+	 * A9 part 3: how long the GPU service may make this session wait for a kernel that the GPU driver has not compiled yet
+	 * (first use after an install). 0: no gate (the service creates the pipeline in place and waits as long as it takes);
+	 * otherwise the budget in milliseconds plus one: when it runs out the task is answered with an error and the node
+	 * continues on the CPU (A14) while the compile goes on in the background.
+	 */
+	uint32_t	kernel_wait_ms;
+
 	/* executor parameter buffer */
 	uint32_t	nparams;	/* number of parameters */
 	uint32_t	poffset[1];	/* offset of params */

@@ -105,6 +105,26 @@ tier, which asks for 64-bit atomics, fp64 and the memory model.) If the log show
 7. Arrow tables: every referenced column must have a supported Arrow type, otherwise the plain
    Arrow_Fdw scan is used.
 
+## 4a. Queries run on the CPU for the first minutes after an install
+
+The GPU driver compiles each kernel for your GPU the first time a query needs it and keeps the result in the pipeline cache
+(see "First start" in [install.md](install.md)). A query whose kernel is not compiled yet is not stalled: after
+`pg_strom.gpu_kernel_wait` (2 s) its node continues on the CPU, the log has `GPU execution failed (kernel gpuscan8_nogeom
+is not compiled yet: ...); the CPU runs the rest of the node` and the result is the CPU's. Look at
+
+```sql
+SELECT * FROM pgstrom.gpu_prewarm_state();      -- phase, ready / target, current_kernel, refused_tasks
+SELECT * FROM pgstrom.gpu_kernel_state() WHERE state <> 'ready' AND in_set;
+```
+
+`refused_tasks` growing and `current_kernel` set means the compile is in progress; repeat the query a little later (the
+kernel it needed was compiled first). To compile everything at once: `pgstrom-gpuserv --prewarm-all` as the server's
+user. If the cache never fills: `pg_strom.gpu_kernel_cache_dir = none`, `PGSTROM_GPUSERV_PIPELINE_CACHE=off`, an unwritable
+cache directory (the user's `$HOME`), a cache above its size bound, or a driver update (the cache is dropped when the
+driver's `pipelineCacheUUID` changes, and every kernel compiles again). `failed` kernels: the driver's message is in the log
+(`prewarm: <kernel>: ...`); the query then waits in place and gets the driver's error as before. To get the old
+behavior (wait, never the CPU) set `pg_strom.gpu_kernel_wait = -1`.
+
 ## 5. Reading `EXPLAIN`
 
 ```

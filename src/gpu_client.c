@@ -17,6 +17,7 @@
 
 static int		pgstrom_max_async_tasks_guc;		/* GUC */
 int				pgstrom_debug_level = 0;			/* GUC */
+int				pgstrom_gpu_kernel_wait = 2000;		/* GUC pg_strom.gpu_kernel_wait */
 
 int
 pgstrom_max_async_tasks(void)
@@ -123,6 +124,20 @@ pgstrom_init_gpu_client(void)
 							256,
 							PGC_SUSET,
 							GUC_NOT_IN_SAMPLE | GUC_SUPERUSER_ONLY,
+							NULL, NULL, NULL);
+	DefineCustomIntVariable("pg_strom.gpu_kernel_wait",
+							"How long a GPU task may wait for a kernel the GPU driver has not compiled yet (milliseconds)",
+							"The driver compiles each kernel for the GPU when it is first used (minutes for the large ones). "
+							"A task whose kernel is not compiled waits this long for the background compile and is then "
+							"refused: the node continues on the CPU (pg_strom.gpu_error_fallback) while the compile goes on. "
+							"0: refuse at once; -1: no gate, wait for the compile however long it takes. Nodes that cannot "
+							"continue on the CPU always wait.",
+							&pgstrom_gpu_kernel_wait,
+							2000,
+							-1,
+							3600000,
+							PGC_USERSET,
+							GUC_NOT_IN_SAMPLE | GUC_UNIT_MS,
 							NULL, NULL, NULL);
 	DefineCustomBoolVariable("pg_strom.gpu_error_fallback",
 							 "A node continues on the CPU when the GPU service refuses or fails its program",

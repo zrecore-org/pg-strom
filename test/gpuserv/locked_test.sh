@@ -142,6 +142,11 @@ if [ -z "$ROOT" ]; then
 	ROOT=$OWN_ROOT; export ROOT
 fi
 [ -n "$ROOT" ] && echo "$ROOT" > "$LOCK/root"
+# A9 part 3: the tests run without the service's kernel readiness gate (a cold kernel would become a CPU fallback, which
+# many tests assert against; they wait for the compile as before) and without its background prewarm (it would compete
+# with the test for the compiler and the GPU). firstuse_dev.sh clears both: it tests them.
+: "${PGSTROM_GPUSERV_KERNEL_WAIT_MS:=-1}" "${PGSTROM_GPUSERV_PREWARM:=off}"
+export PGSTROM_GPUSERV_KERNEL_WAIT_MS PGSTROM_GPUSERV_PREWARM
 GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} $LOWPRI sh "$SCRIPT"
 rc=$?
 

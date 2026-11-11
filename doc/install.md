@@ -141,6 +141,67 @@ longer exist; see [parameters.md](parameters.md). PG-Strom does not reserve its 
 PostgreSQL treats an unknown `pg_strom.*` name in `postgresql.conf` as a placeholder and the
 setting silently does nothing. Remove them.
 
+## First start: the kernel compile
+
+The kernels ship as SPIR-V, which is not machine code: the GPU driver compiles each kernel for the user's GPU
+at the first use and keeps the result in the Vulkan **pipeline cache**, a file next to the service's other caches
+(`$XDG_CACHE_HOME/pgstrom` or `~/.cache/pgstrom` of the user the server runs as, or `pg_strom.gpu_kernel_cache_dir`;
+`pipeline-*.bin`). The compiled form is tied to the GPU, the driver build and the OS, so it cannot be shipped in a
+package, and a fresh install has an empty cache. The compile takes (Metal, Apple M1 Pro) 4 to 25 s for the `lite` and
+`nogeom` tiers of a kernel, 13 to 150 s for the geometry tiers of the join kernels and about 5 minutes for a full-tier
+join or aggregation-over-join kernel (`doc/features.md`, the plan's "Why a cold full kernel takes 5 minutes").
+
+What PG-Strom does about it:
+
+1. **Background prewarm.** After the service is ready, a low-priority thread compiles a set of kernels one at a
+   time, only while no task is running (it waits for 2 s of quiet before each kernel; `PGSTROM_GPUSERV_PREWARM_IDLE_MS`).
+   `pg_strom.gpu_prewarm` picks the set: `lite` (default: the `lite` and `nogeom` tiers of the common kernels: scan,
+   aggregation, GROUP BY, group table, join, join aggregation and the Arrow twins, 36 kernels), `geometry` (also the
+   geometry tiers of the join kernels, 66), `all` (every kernel including the full tier, 207; about an hour on a
+   cold machine), `off`.
+2. **Readiness gate.** A query whose kernel is not compiled yet must not stall for minutes. Its first task waits for
+   the compile for `pg_strom.gpu_kernel_wait` (default 2000 ms) and is then refused with the message "kernel ... is not
+   compiled yet"; the node **continues on the CPU** (`pg_strom.gpu_error_fallback`, A14: the rows of the plan with
+   `pg_strom.enabled = off`) while the compile goes on in the background, and the kernel it needed is compiled first,
+   ahead of the set. The next query that needs it runs on the GPU. Nodes that cannot continue on the CPU (GPU-Sort,
+   pinned inner buffers, `SELECT INTO` direct, `pg_strom.gpu_error_fallback = off`) and `pg_strom.gpu_kernel_wait = -1`
+   wait for the compile instead, as before.
+3. **Persisted state.** The service records the kernels it has seen compiled in `kernels-*.txt` next to the pipeline
+   cache file (kernel name and a hash of its SPIR-V, and the cache file's size). A restart trusts it only if the cache
+   file loaded with at least that size, so a deleted, damaged, foreign or reset cache (another GPU, driver or OS) is
+   recompiled, and a kernel whose SPIR-V changed with the service build is compiled again.
+4. **Install-time prewarm**, for when the administrator expects to wait:
+
+   ```
+   sudo -u postgres <pkglibdir>/pgstrom-gpuserv --prewarm-list    # what it would compile, and what is ready
+   sudo -u postgres <pkglibdir>/pgstrom-gpuserv --prewarm-all [--prewarm-set lite|geometry|all] [--device N]
+   make -C src PG_CONFIG=... prewarm [PREWARM_SET=geometry]    # the same on the installed service
+   make -C src PG_CONFIG=... install PGSTROM_PREWARM=1         # install, then prewarm (not for DESTDIR builds)
+   ```
+
+   Run it as the user the server runs as (the cache is per user and per `pg_strom.gpu_kernel_cache_dir`), with the
+   server stopped or not; it prints one line per kernel with the compile time and stops with status 1 if a kernel failed.
+   The RPM template (`files/pg_strom.spec.in`, `%post`) prints the command and runs it as `postgres` when
+   `PGSTROM_PREWARM_ON_INSTALL=1` is set in the package manager's environment or `/etc/pg_strom-prewarm` exists (the
+   packages have not been built, see "Packaging"); a deb `postinst` would do the same.
+
+Watch the progress:
+
+```sql
+SELECT * FROM pgstrom.gpu_prewarm_state();
+-- phase (off, waiting, running, done), mode, kernels, target, ready, failed, from_disk, current_kernel, current_seconds,
+-- elapsed_seconds, refused_tasks (tasks sent to the CPU), waited_tasks, demanded_kernels
+SELECT * FROM pgstrom.gpu_kernel_state() WHERE in_set ORDER BY tier, kernel;   -- one row per kernel: tier, state (not compiled,
+-- compiling, ready, failed), in_set, from_disk (ready from the persisted state), compile_seconds, spirv_kb
+```
+
+The pipeline cache is bounded (1536 MB for the interpreter kernels, `PGSTROM_GPUSERV_PIPELINE_CACHE_MAX_MB`; a file
+above the bound is deleted at the next start): the full set of `all` fits with room to spare on the Apple GPU the
+numbers were taken on, but a kernel whose compile did not grow the file is not recorded as persisted (the service logs
+it) and is compiled again after a restart. Without a pipeline cache (`pg_strom.gpu_kernel_cache_dir = none`,
+`PGSTROM_GPUSERV_PIPELINE_CACHE=off`) nothing could be kept, so neither the prewarm nor the gate runs and every first use stalls
+as it did before. The 10 s dispatch watchdog does not apply to a compile (the first dispatch of a pipeline has 600 s).
+
 ## First checks
 
 ```sql

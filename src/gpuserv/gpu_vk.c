@@ -611,7 +611,9 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 		return -1;
 	}
 	vkGetDeviceQueue(ctx->dev, ctx->queue_family, 0, &ctx->queue);
+	pthread_mutex_init(&ctx->queue_lock, NULL);
 	pcache_open(ctx);
+	ctx->pcache_loaded = ctx->pcache_saved;
 
 	{
 		VkCommandPoolCreateInfo cpi;
@@ -1404,6 +1406,9 @@ int
 gpu_vk_pipeline_create(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void *spirv,
 					   size_t spirv_bytes, uint32_t nbind, uint32_t pc_size)
 {
+	if (ctx->create_gate &&
+		ctx->create_gate(ctx->create_gate_arg, spirv, spirv_bytes, nbind, pc_size, ctx->err, sizeof(ctx->err)) != 0)
+		return -1;
 	return gpu_vk_pipeline_create_ex(ctx, p, spirv, spirv_bytes, nbind, pc_size, ctx->err, sizeof(ctx->err));
 }
 
@@ -1518,7 +1523,9 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 	si.commandBufferCount = 1;
 	si.pCommandBuffers = &ctx->cmd;
 	t0 = now_ms();
+	pthread_mutex_lock(&ctx->queue_lock);
 	rc = vkQueueSubmit(ctx->queue, 1, &si, ctx->fence);
+	pthread_mutex_unlock(&ctx->queue_lock);
 	if (rc != VK_SUCCESS)
 	{
 		if (rc == VK_ERROR_DEVICE_LOST)
@@ -1551,4 +1558,147 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 	}
 	p->dispatched = 1;
 	return 0;
+}
+
+const char *
+gpu_vk_pcache_path(const gpu_vk_ctx *ctx)
+{
+	return ctx->pcache ? ctx->pcache_path : "";
+}
+
+size_t
+gpu_vk_pcache_saved(const gpu_vk_ctx *ctx)
+{
+	return ctx->pcache_saved;
+}
+
+int
+gpu_vk_warm_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, char *err, size_t errlen)
+{
+	gpu_vk_buffer bufs[8];
+	gpu_vk_buffer *bp[8];
+	VkCommandPool pool = VK_NULL_HANDLE;
+	VkCommandBuffer cmd = VK_NULL_HANDLE;
+	VkFence		fence = VK_NULL_HANDLE;
+	uint32_t	nb = p->nbind < 8 ? p->nbind : 8, k, made = 0;
+	char		pc[64];
+	int			rv = -1;
+	VkResult	rc;
+
+	memset(bufs, 0, sizeof(bufs));
+	memset(pc, 0, sizeof(pc));
+	for (k = 0; k < nb; k++)
+	{
+		bp[k] = &bufs[k];
+		if (gpu_vk_buffer_create(ctx, &bufs[k], 4096, 0) != 0)
+		{
+			set_err(err, errlen, "warm dispatch: cannot create a buffer");
+			goto out;
+		}
+		made++;
+	}
+	{
+		VkCommandPoolCreateInfo cpi;
+		VkCommandBufferAllocateInfo cai;
+		VkFenceCreateInfo fci;
+		VkCommandBufferBeginInfo cbi;
+		VkSubmitInfo si;
+		VkDescriptorBufferInfo dbi[8];
+		VkWriteDescriptorSet wds[8];
+
+		memset(&cpi, 0, sizeof(cpi));
+		cpi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		cpi.queueFamilyIndex = ctx->queue_family;
+		if (vkCreateCommandPool(ctx->dev, &cpi, NULL, &pool) != VK_SUCCESS)
+		{
+			set_err(err, errlen, "warm dispatch: vkCreateCommandPool failed");
+			goto out;
+		}
+		memset(&cai, 0, sizeof(cai));
+		cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cai.commandPool = pool;
+		cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cai.commandBufferCount = 1;
+		if (vkAllocateCommandBuffers(ctx->dev, &cai, &cmd) != VK_SUCCESS)
+		{
+			set_err(err, errlen, "warm dispatch: vkAllocateCommandBuffers failed");
+			goto out;
+		}
+		memset(&fci, 0, sizeof(fci));
+		fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+		if (vkCreateFence(ctx->dev, &fci, NULL, &fence) != VK_SUCCESS)
+		{
+			set_err(err, errlen, "warm dispatch: vkCreateFence failed");
+			goto out;
+		}
+		if (nb > 0)
+		{
+			memset(wds, 0, sizeof(wds));
+			for (k = 0; k < nb; k++)
+			{
+				dbi[k].buffer = bufs[k].buf;
+				dbi[k].offset = 0;
+				dbi[k].range = VK_WHOLE_SIZE;
+				wds[k].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+				wds[k].dstSet = p->dset;
+				wds[k].dstBinding = k;
+				wds[k].descriptorCount = 1;
+				wds[k].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				wds[k].pBufferInfo = &dbi[k];
+			}
+			vkUpdateDescriptorSets(ctx->dev, nb, wds, 0, NULL);
+		}
+		memset(&cbi, 0, sizeof(cbi));
+		cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		if (vkBeginCommandBuffer(cmd, &cbi) != VK_SUCCESS)
+		{
+			set_err(err, errlen, "warm dispatch: vkBeginCommandBuffer failed");
+			goto out;
+		}
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p->pipeline);
+		if (p->nbind > 0)
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p->layout, 0, 1, &p->dset, 0, NULL);
+		if (p->pc_size > 0 && p->pc_size <= sizeof(pc))
+			vkCmdPushConstants(cmd, p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, p->pc_size, pc);
+		vkCmdDispatch(cmd, 0, 1, 1);
+		if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
+		{
+			set_err(err, errlen, "warm dispatch: vkEndCommandBuffer failed");
+			goto out;
+		}
+		memset(&si, 0, sizeof(si));
+		si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		si.commandBufferCount = 1;
+		si.pCommandBuffers = &cmd;
+		pthread_mutex_lock(&ctx->queue_lock);
+		rc = vkQueueSubmit(ctx->queue, 1, &si, fence);
+		pthread_mutex_unlock(&ctx->queue_lock);
+		if (rc != VK_SUCCESS)
+		{
+			if (rc == VK_ERROR_DEVICE_LOST)
+				ctx->lost = 1;
+			set_err(err, errlen, "warm dispatch: vkQueueSubmit failed: %s", vkr_str(rc));
+			goto out;
+		}
+		rc = vkWaitForFences(ctx->dev, 1, &fence, VK_TRUE, (uint64_t) GPU_VK_FIRST_DISPATCH_TIMEOUT_MS * 1000000ULL);
+		if (rc != VK_SUCCESS)
+		{
+			if (rc == VK_ERROR_DEVICE_LOST || rc == VK_TIMEOUT)
+				ctx->lost = 1;
+			set_err(err, errlen, "warm dispatch: the fence wait failed: %s", vkr_str(rc));
+			goto out;
+		}
+		rv = 0;
+	}
+out:
+	if (fence)
+		vkDestroyFence(ctx->dev, fence, NULL);
+	if (pool)
+		vkDestroyCommandPool(ctx->dev, pool, NULL);
+	while (made-- > 0)
+		gpu_vk_buffer_destroy(ctx, &bufs[made]);
+	if (rv == 0)
+		pcache_save(ctx, 0);
+	return rv;
 }

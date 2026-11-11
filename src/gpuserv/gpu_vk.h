@@ -9,6 +9,7 @@
 #define GPU_VK_H
 #include <stddef.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <vulkan/vulkan.h>
 
 #define GPU_VK_ERRLEN			512
@@ -74,6 +75,19 @@ typedef struct gpu_vk_ctx
 	VkPipelineCache		pcache_sp;				/* the same for the specialized kernels (their own file) */
 	size_t				pcache_sp_saved;
 	char				pcache_sp_path[768];
+	size_t				pcache_loaded;			/* size of the interpreter cache data read from its file at open (0: empty, damaged or foreign) */
+	/*
+	 * A9 part 3: vkQueueSubmit needs the queue externally synchronized, and the prewarm thread (kprewarm.c) submits its empty dispatches
+	 * from a second thread; every submit takes this lock (not held while waiting for the fence).
+	 */
+	pthread_mutex_t		queue_lock;
+	/*
+	 * Readiness gate for gpu_vk_pipeline_create() (not the _ex / _spec variants, which the prewarm and specializer threads use): if set
+	 * and it returns non-zero (message in err) the pipeline is not created. Set by the service after it is ready.
+	 */
+	int				  (*create_gate)(void *arg, const void *spirv, size_t spirv_bytes, uint32_t nbind, uint32_t pc_size,
+									 char *err, size_t errlen);
+	void			   *create_gate_arg;
 
 	gpu_vk_devinfo		info;
 	gpu_vk_feat			feat;
@@ -165,6 +179,15 @@ int  gpu_vk_pipeline_create_spec(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, const void
 								 size_t spirv_bytes, uint32_t nbind, uint32_t pc_size,
 								 char *err, size_t errlen);
 void gpu_vk_pipeline_destroy(gpu_vk_ctx *ctx, gpu_vk_pipeline *p);
+/*
+ * An empty dispatch (0 workgroups) of 'p' on private command buffer and fence, callable from a second thread while the main
+ * thread dispatches: the driver finishes its lazy compile and records it in the pipeline cache (the file is written if it grew).
+ */
+int  gpu_vk_warm_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, char *err, size_t errlen);
+/* path of the interpreter pipeline cache file ("" if the cache is off) */
+const char *gpu_vk_pcache_path(const gpu_vk_ctx *ctx);
+/* the size the cache file had when last written (0 if never) */
+size_t gpu_vk_pcache_saved(const gpu_vk_ctx *ctx);
 
 /*
  * Bind bufs[0..nbind-1], push 'pc', dispatch gx*gy*gz workgroups and wait for the fence

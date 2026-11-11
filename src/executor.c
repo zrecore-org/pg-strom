@@ -752,6 +752,14 @@ pgstromBuildSessionInfo(pgstromTaskState *pts,
 		session->fallback_desc_nitems = nitems;
 	}
 
+	/*
+	 * A9 part 3: a kernel the GPU driver has not compiled yet (first use after an install) must not stall the query for
+	 * minutes: the service refuses the task after this budget and the node continues on the CPU. A node that cannot
+	 * continue on the CPU waits for the compile.
+	 */
+	session->kernel_wait_ms = (pts->cpu_fallback_ok && pgstrom_gpu_kernel_wait >= 0)
+		? (uint32_t) pgstrom_gpu_kernel_wait + 1 : 0;
+
 	/* fault injection (tests) */
 	if (pgstrom_gpuserv_fault && pgstrom_gpuserv_fault[0] != '\0')
 		session->fault_spec = __appendBinaryStringInfo(&buf, pgstrom_gpuserv_fault,

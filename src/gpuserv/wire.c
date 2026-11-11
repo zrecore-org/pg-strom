@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include "xpu_common.h"
 #include "wire.h"
+#include "kprewarm.h"
 #include "gcache.h"
 
 #define WIRE_MAX_FRAME		((uint64_t)1 << 31)
@@ -565,6 +566,9 @@ handle_task_exec(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 static void
 handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 {
+	/* A9 part 3: the kernel readiness gate uses this session's wait budget; the prewarm thread waits for a quiet service */
+	kpw_task_begin();
+	kpw_set_session_wait(wc->session ? wc->session->u.session.kernel_wait_ms : 0);
 	switch (xcmd->tag)
 	{
 		case XpuCommandTag__OpenSession:
@@ -646,6 +650,7 @@ handle_command(wire_server *ws, wire_client *wc, const XpuCommand *xcmd)
 			reply_error(wc, "wire", "unknown command tag %u", xcmd->tag);
 			break;
 	}
+	kpw_task_end();
 }
 
 /* ----------------------------------------------------------------

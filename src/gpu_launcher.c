@@ -28,6 +28,7 @@
 #include "pg_strom.h"
 #include "funcapi.h"
 #include "libpq/libpq.h"
+#include "utils/guc.h"
 #include "gpuserv/gpuserv_proto.h"
 
 /* GUC variables */
@@ -35,6 +36,15 @@ static char	   *gpuserv_path = NULL;
 static bool		gpu_allow_cpu_device = false;
 static char	   *gpu_specialize = NULL;			/* "", off, auto, force, check */
 static char	   *gpu_kernel_cache_dir = NULL;
+static int		gpu_prewarm = GPUSERV_PREWARM_LITE;			/* pg_strom.gpu_prewarm */
+static const struct config_enum_entry gpu_prewarm_options[] = {
+	{"off", GPUSERV_PREWARM_OFF, false},
+	{"lite", GPUSERV_PREWARM_LITE, false},
+	{"geometry", GPUSERV_PREWARM_GEOMETRY, false},
+	{"all", GPUSERV_PREWARM_ALL, false},
+	{"on", GPUSERV_PREWARM_LITE, true},
+	{NULL, 0, false}
+};
 static int		gpuserv_probe_timeout = 60000;		/* ms */
 static int		gpuserv_group_memory = 1024;		/* MB */
 
@@ -159,6 +169,9 @@ gpuserv_run_probe(void)
 	argv[argc++] = "--probe";
 	if (gpu_allow_cpu_device)
 		argv[argc++] = "--allow-cpu";
+	argv[argc++] = "--prewarm-set";
+	argv[argc++] = (gpu_prewarm == GPUSERV_PREWARM_OFF ? "off" : gpu_prewarm == GPUSERV_PREWARM_GEOMETRY ? "geometry" :
+					gpu_prewarm == GPUSERV_PREWARM_ALL ? "all" : "lite");
 	argv[argc] = NULL;
 
 	if (pipe(pfd) != 0)
@@ -261,7 +274,7 @@ launcher_spawn_service(int *p_lifeline_write)
 {
 	char		devbuf[32], grpbuf[32];
 	char		fdbuf[16];
-	char	   *argv[16];
+	char	   *argv[24];
 	int			argc = 0;
 	int			lifeline[2];
 	pid_t		pid;
@@ -528,6 +541,20 @@ pgstrom_init_gpu_launcher(void)
 							   PGC_POSTMASTER,
 							   GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
+	DefineCustomEnumVariable("pg_strom.gpu_prewarm",
+							 "Interpreter kernels the GPU service compiles in the background after it is ready: off, lite, geometry or all",
+							 "The GPU driver compiles each kernel for the GPU at its first use (seconds for the lite and nogeom "
+							 "tiers, minutes for the large ones) and keeps the result in the pipeline cache. lite: the lite and "
+							 "nogeom tiers of the common kernels (a few minutes); geometry: also the geometry tiers of the join "
+							 "kernels; all: every kernel including the full tier (about an hour). The thread works one kernel at "
+							 "a time while no task runs; a kernel a query needs first is compiled first (pg_strom.gpu_kernel_wait). "
+							 "See pgstrom.gpu_prewarm_state() and gpu_kernel_state().",
+							 &gpu_prewarm,
+							 GPUSERV_PREWARM_LITE,
+							 gpu_prewarm_options,
+							 PGC_POSTMASTER,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
 	DefineCustomIntVariable("pg_strom.gpuserv_group_memory",
 							"Memory (MB) one GpuPreAgg session may use for its GROUP BY groups on the GPU service",
 							"Half bounds the hash table in device memory (rows that find no slot are aggregated on the CPU), the whole bounds the groups the service keeps for the session; a query that needs more fails with an error",
@@ -719,6 +746,122 @@ pgstrom_gpu_service_state(PG_FUNCTION_ARGS)
 			nulls[6] = true;
 	}
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/* pgstrom.gpu_prewarm_state(): progress of the first-use kernel compile (A9 part 3) */
+PG_FUNCTION_INFO_V1(pgstrom_gpu_prewarm_state);
+Datum
+pgstrom_gpu_prewarm_state(PG_FUNCTION_ARGS)
+{
+	TupleDesc	tupdesc;
+	Datum		values[13];
+	bool		nulls[13];
+	const gpuserv_prewarm_state *ps;
+	const char *mode, *phase;
+	struct timespec ts;
+	double		now;
+
+	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "return type must be a row type");
+	tupdesc = BlessTupleDesc(tupdesc);
+	memset(nulls, 0, sizeof(nulls));
+	if (!gpuserv_ctl || gpuserv_ctl->selected_device == UINT32_MAX)
+	{
+		memset(nulls, 1, sizeof(nulls));
+		values[0] = CStringGetTextDatum("unavailable");
+		nulls[0] = false;
+		PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+	}
+	ps = &gpuserv_ctl->prewarm;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	now = ts.tv_sec + ts.tv_nsec / 1e9;
+	switch (ps->mode)
+	{
+		case GPUSERV_PREWARM_OFF:		mode = "off"; break;
+		case GPUSERV_PREWARM_GEOMETRY:	mode = "geometry"; break;
+		case GPUSERV_PREWARM_ALL:		mode = "all"; break;
+		default:						mode = "lite"; break;
+	}
+	if (ps->nkernels == 0)
+		phase = "inactive";			/* the service has not started it: not ready yet, or no pipeline cache */
+	else if (ps->phase == GPUSERV_PHASE_RUNNING)
+		phase = "running";
+	else if (ps->phase == GPUSERV_PHASE_DONE)
+		phase = "done";
+	else
+		phase = (ps->mode == GPUSERV_PREWARM_OFF ? "off" : "waiting");
+	values[0] = CStringGetTextDatum(phase);
+	values[1] = CStringGetTextDatum(mode);
+	values[2] = Int32GetDatum(ps->nkernels);
+	values[3] = Int32GetDatum(ps->target);
+	values[4] = Int32GetDatum(ps->target_ready);
+	values[5] = Int32GetDatum(ps->nfailed);
+	values[6] = Int32GetDatum(ps->persisted);
+	if (ps->current[0])
+		values[7] = CStringGetTextDatum(ps->current);
+	else
+		nulls[7] = true;
+	if (ps->current[0] && ps->current_since > 0)
+		values[8] = Float8GetDatum(now - ps->current_since);
+	else
+		nulls[8] = true;
+	if (ps->started_at > 0)
+		values[9] = Float8GetDatum((ps->finished_at > 0 ? ps->finished_at : now) - ps->started_at);
+	else
+		nulls[9] = true;
+	values[10] = Int64GetDatum((int64) ps->refused);
+	values[11] = Int64GetDatum((int64) ps->waited);
+	values[12] = Int64GetDatum((int64) ps->demanded);
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+/* pgstrom.gpu_kernel_state(): one row per interpreter kernel */
+PG_FUNCTION_INFO_V1(pgstrom_gpu_kernel_state);
+Datum
+pgstrom_gpu_kernel_state(PG_FUNCTION_ARGS)
+{
+	const gpuserv_prewarm_state *ps;
+
+	InitMaterializedSRF(fcinfo, 0);
+	if (!gpuserv_ctl)
+		return (Datum) 0;
+	ps = &gpuserv_ctl->prewarm;
+	for (uint32 i = 0; i < ps->nkernels && i < GPUSERV_KERNEL_MAX; i++)
+	{
+		const gpuserv_kernel_state *k = &ps->k[i];
+		ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+		Datum		values[7];
+		bool		nulls[7];
+		const char *tier, *state;
+
+		memset(nulls, 0, sizeof(nulls));
+		switch (k->tier)
+		{
+			case GPUSERV_KTIER_LITE:	tier = "lite"; break;
+			case GPUSERV_KTIER_NOGEOM:	tier = "nogeom"; break;
+			case GPUSERV_KTIER_GEOM:	tier = "geometry"; break;
+			default:					tier = "full"; break;
+		}
+		switch (__atomic_load_n(&k->state, __ATOMIC_SEQ_CST))
+		{
+			case GPUSERV_KSTATE_COMPILING:	state = "compiling"; break;
+			case GPUSERV_KSTATE_READY:		state = "ready"; break;
+			case GPUSERV_KSTATE_FAILED:		state = "failed"; break;
+			default:						state = "not compiled"; break;
+		}
+		values[0] = CStringGetTextDatum(k->name);
+		values[1] = CStringGetTextDatum(tier);
+		values[2] = CStringGetTextDatum(state);
+		values[3] = BoolGetDatum(k->in_set != 0);
+		values[4] = BoolGetDatum(k->from_disk != 0);
+		if (k->compile_secs > 0)
+			values[5] = Float8GetDatum((double) k->compile_secs);
+		else
+			nulls[5] = true;
+		values[6] = Int32GetDatum((int32) k->spirv_kb);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+	return (Datum) 0;
 }
 
 /* pgstrom.gpu_service_ping(): connect to the service and read its handshake reply */

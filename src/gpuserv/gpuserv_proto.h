@@ -90,6 +90,57 @@ typedef struct gpuserv_devcaps
 #define GPUSERV_STATE_READY			2
 #define GPUSERV_STATE_FAILED		3
 
+/*
+ * A9 part 3: first-use kernel compile. The service keeps the state of every interpreter kernel (kprewarm.c) here, so that
+ * pgstrom.gpu_prewarm_state() / gpu_kernel_state() read it without asking the service.
+ */
+#define GPUSERV_KERNEL_MAX			320
+#define GPUSERV_KSTATE_PENDING		0		/* not compiled by this installation (as far as the service knows) */
+#define GPUSERV_KSTATE_COMPILING	1
+#define GPUSERV_KSTATE_READY		2		/* the pipeline cache holds it: creating the pipeline takes milliseconds */
+#define GPUSERV_KSTATE_FAILED		3
+#define GPUSERV_KTIER_LITE			0
+#define GPUSERV_KTIER_NOGEOM		1
+#define GPUSERV_KTIER_GEOM			2
+#define GPUSERV_KTIER_FULL			3
+#define GPUSERV_PREWARM_OFF			0
+#define GPUSERV_PREWARM_LITE		1
+#define GPUSERV_PREWARM_GEOMETRY	2
+#define GPUSERV_PREWARM_ALL			3
+#define GPUSERV_PHASE_NONE			0		/* the service has not started it (not ready yet, or no pipeline cache) */
+#define GPUSERV_PHASE_RUNNING		1
+#define GPUSERV_PHASE_DONE			2		/* the selected set is compiled (or failed) */
+
+typedef struct gpuserv_kernel_state
+{
+	char		name[32];
+	uint8_t		tier;					/* GPUSERV_KTIER_* */
+	uint8_t		state;					/* GPUSERV_KSTATE_* (atomic) */
+	uint8_t		in_set;					/* part of the selected prewarm set */
+	uint8_t		from_disk;				/* ready because the persisted state said so */
+	float		compile_secs;			/* of the last compile in this installation, 0 if none */
+	uint32_t	spirv_kb;
+} gpuserv_kernel_state;
+
+typedef struct gpuserv_prewarm_state
+{
+	uint32_t	nkernels;
+	int32_t		mode;					/* GPUSERV_PREWARM_* */
+	int32_t		phase;					/* GPUSERV_PHASE_* */
+	uint32_t	target;					/* kernels of the selected set */
+	uint32_t	target_ready;
+	uint32_t	nfailed;
+	uint32_t	persisted;				/* kernels ready from the persisted state at start */
+	uint64_t	refused;				/* tasks answered "kernel not compiled yet" (the backend continues on the CPU) */
+	uint64_t	waited;					/* tasks that waited for a compile within the budget and then ran */
+	uint64_t	demanded;				/* kernels a task asked for that were not ready */
+	char		current[32];			/* the kernel being compiled, "" if none */
+	double		started_at;				/* CLOCK_REALTIME seconds of the start of the prewarm, 0 if none */
+	double		finished_at;			/* of the end of the selected set, 0 if not yet */
+	double		current_since;			/* CLOCK_REALTIME seconds the current compile started */
+	gpuserv_kernel_state k[GPUSERV_KERNEL_MAX];
+} gpuserv_prewarm_state;
+
 typedef struct gpuserv_control
 {
 	uint32_t	magic;
@@ -104,6 +155,7 @@ typedef struct gpuserv_control
 	uint32_t	generation;				/* bumped on each (re)start of the service */
 	char		socket_path[104];
 	char		last_error[256];
+	gpuserv_prewarm_state prewarm;		/* written by the service's prewarm thread, read by backends */
 } gpuserv_control;
 
 /*
