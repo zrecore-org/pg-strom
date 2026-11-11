@@ -10,7 +10,12 @@ name: NVIDIA debug
 #   "SPEC=off nvidia_probe.sh; float8_dev.sh"
 # extra_env: lines of VAR=value exported for every script (e.g. PGSTROM_GPUSERV_TRACE=1)
 
+# workflow_dispatch only works for a workflow on the default branch; until this file is merged there, a push of the request file
+# .github/nvidia-debug-run.txt to the branch nvidia-fix starts a run: line 1 is the script input, the other lines the extra_env.
 on:
+  push:
+    branches: [nvidia-fix]
+    paths: ['.github/nvidia-debug-run.txt']
   workflow_dispatch:
     inputs:
       script:
@@ -115,6 +120,9 @@ jobs:
           SCRIPTS: ${{ inputs.script }}
           EXTRA_ENV: ${{ inputs.extra_env }}
         run: |
+          if [ "${{ github.event_name }}" = push ]; then
+            SCRIPTS=$(sed -n 1p .github/nvidia-debug-run.txt); EXTRA_ENV=$(sed -n '2,$p' .github/nvidia-debug-run.txt)
+          fi
           mkdir -p "$RUNNER_TEMP/out"
           for l in $(printf '%s\n' "$EXTRA_ENV" | tr '\n' ' '); do export "$l"; done
           IFS=';'
