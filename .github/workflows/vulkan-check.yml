@@ -218,6 +218,12 @@ jobs:
             .cache/xdg
           key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ env.CPUKEY }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
 
+      - name: Save the apt packages
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/apt-cache-save
+        with:
+          key-extra: lavapipe
+
       - name: Server and GPU service logs of the failed test
         if: failure()
         run: |
@@ -527,6 +533,12 @@ jobs:
             fi
           done
           exit $bad
+
+      - name: Save the apt packages
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/apt-cache-save
+        with:
+          key-extra: gpu
 
       - name: Upload the PostgreSQL logs of the failed tests
         if: failure()

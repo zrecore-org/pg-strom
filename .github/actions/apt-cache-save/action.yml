@@ -1,0 +1,26 @@
+name: Keep the apt packages between runs (save)
+description: >
+  The last step of a job that used the apt-cache action: copies the .deb files and indexes out of apt's working
+  directories (their lock files and partial/ directories belong to root and tar cannot read them) into ~/apt-store, owned
+  by the runner user, and saves that as the Actions cache.
+inputs:
+  key-extra:
+    description: "Same value as the apt-cache action of this job"
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Collect the apt files
+      shell: bash
+      run: |
+        rm -rf "$HOME/apt-store"; mkdir -p "$HOME/apt-store/archives" "$HOME/apt-store/lists"
+        sudo find "$HOME/apt-cache/archives" -maxdepth 1 -type f -name '*.deb' -exec cp -p {} "$HOME/apt-store/archives/" \;
+        sudo find "$HOME/apt-cache/lists" -maxdepth 1 -type f ! -name lock -exec cp -p {} "$HOME/apt-store/lists/" \;
+        sudo chown -R "$(id -u):$(id -g)" "$HOME/apt-store"
+        echo "apt store: $(ls "$HOME/apt-store/archives" | wc -l) .deb files, $(ls "$HOME/apt-store/lists" | wc -l) index files, $(du -sh "$HOME/apt-store" | cut -f1)"
+
+    - name: Save the apt cache
+      uses: actions/cache/save@v4
+      with:
+        path: ~/apt-store
+        key: apt-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-${{ hashFiles('.github/workflows/vulkan-check.yml', '.github/actions/apt-cache/action.yml', '.github/actions/apt-cache-save/action.yml') }}

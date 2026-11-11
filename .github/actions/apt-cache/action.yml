@@ -1,38 +1,35 @@
-name: Keep the apt packages between runs
+name: Keep the apt packages between runs (restore)
 description: >
-  Points apt at directories under $HOME, restores them from the Actions cache and saves them after a successful job, so that
-  a Ubuntu mirror outage (security.ubuntu.com and azure.archive.ubuntu.com did not resolve on 2026-11-11) does not stop a
-  job whose packages were installed once before. The cache holds the downloaded .deb files and the package indexes of
-  that moment: apt-get update keeps the old indexes when a mirror does not answer, and apt-get install finds the .deb
-  files in the archive directory before it downloads.
+  Restores the downloaded .deb files and package indexes of an earlier successful run (the Actions cache, kept in
+  ~/apt-store, owned by the runner user) and points apt at working directories under $HOME that start from them. The job
+  ends with the apt-cache-save action. With the Ubuntu mirrors unreachable (security.ubuntu.com and azure.archive.ubuntu.com
+  did not resolve on 2026-11-11) apt-get update keeps the restored indexes and apt-get install finds the .deb files in the
+  archive directory before it downloads.
 inputs:
   offline:
     description: "Block the Ubuntu mirrors in /etc/hosts (a test of the cache: the job must still install its packages)"
     default: "false"
   key-extra:
-    description: "Added to the cache key (use the job name: the jobs install different packages)"
+    description: "Added to the cache key (use the job kind: the jobs install different packages)"
     default: ""
 runs:
   using: composite
   steps:
     - name: Restore the apt cache
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
-        # the lock files and the partial/ directories belong to root (or _apt) and tar cannot open them: leave them out
-        path: |
-          ~/apt-cache
-          !~/apt-cache/lists/lock
-          !~/apt-cache/lists/partial
-          !~/apt-cache/archives/lock
-          !~/apt-cache/archives/partial
-        key: apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-${{ hashFiles('.github/workflows/vulkan-check.yml') }}
+        path: ~/apt-store
+        key: apt-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-${{ hashFiles('.github/workflows/vulkan-check.yml', '.github/actions/apt-cache/action.yml', '.github/actions/apt-cache-save/action.yml') }}
         restore-keys: |
-          apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-
+          apt-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-
 
     - name: Configure apt to use it
       shell: bash
       run: |
         mkdir -p "$HOME/apt-cache/archives/partial" "$HOME/apt-cache/lists/partial"
+        # start the working directories from the restored files (the .deb files and the indexes)
+        if [ -d "$HOME/apt-store/archives" ]; then cp -a "$HOME/apt-store/archives/." "$HOME/apt-cache/archives/"; fi
+        if [ -d "$HOME/apt-store/lists" ]; then cp -a "$HOME/apt-store/lists/." "$HOME/apt-cache/lists/"; fi
         printf '%s\n' \
           "Dir::Cache::archives \"$HOME/apt-cache/archives\";" \
           "Dir::State::lists \"$HOME/apt-cache/lists\";" \
