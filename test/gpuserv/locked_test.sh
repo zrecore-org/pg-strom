@@ -147,6 +147,14 @@ fi
 # with the test for the compiler and the GPU). firstuse_dev.sh clears both: it tests them.
 : "${PGSTROM_GPUSERV_KERNEL_WAIT_MS:=-1}" "${PGSTROM_GPUSERV_PREWARM:=off}"
 export PGSTROM_GPUSERV_KERNEL_WAIT_MS PGSTROM_GPUSERV_PREWARM
+# The kernel and pipeline caches of the test runs (the service's $XDG_CACHE_HOME/pgstrom: 2+ GB of pipeline cache files and
+# thousands of specialized kernels) live on the external volume, in <main checkout>/.cache/pgstrom (git-ignored), not in
+# ~/.cache: the local drive is nearly full. All worktrees share the one directory (the main checkout is the parent of the
+# git common directory). Only when that directory exists and the caller has not set XDG_CACHE_HOME itself.
+if [ -z "$XDG_CACHE_HOME" ]; then
+	MAINROOT=$(cd "$(git -C "$TREE" rev-parse --git-common-dir 2>/dev/null)/.." 2>/dev/null && pwd)
+	if [ -n "$MAINROOT" ] && [ -d "$MAINROOT/.cache/pgstrom" ]; then XDG_CACHE_HOME=$MAINROOT/.cache; export XDG_CACHE_HOME; fi
+fi
 GPUSERV_BIN=${GPUSERV_BIN:-$PKGLIB/pgstrom-gpuserv} $LOWPRI sh "$SCRIPT"
 rc=$?
 
