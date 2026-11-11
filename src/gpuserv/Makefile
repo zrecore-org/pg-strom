@@ -227,6 +227,13 @@ f64soft_check.o: f64soft_check.c kernels_vm/f64_soft.inc gpu_vk.h
 f64soft_check: f64soft_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ f64soft_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
+# S0 of A10 part 6 (test/gpuserv/df64_probe.sh): double-float (df64) probe kernels and the host half; not part of "all"
+df64_probe.o: df64_probe.c df64_cover.inc kernels_vm/df64.inc gpu_vk.h
+	$(CC) $(CFLAGS) -ffp-contract=off -fno-fast-math -c -o $@ $<
+
+df64_probe: df64_probe.o gpu_vk.o
+	$(CC) $(CFLAGS) -o $@ df64_probe.o gpu_vk.o $(VK_LIBS) -lpthread -lm
+
 # self-check of the string hash of the join kernels (kernels_vm/hash_bytes.inc) against PostgreSQL's hashtext() (test/gpuserv/hash_check.sh)
 build/hash_check.spv: kernels_check/hash_check.slang kernels_vm/hash_bytes.inc | build
 	$(SLANGC) kernels_check/hash_check.slang -I kernels_vm -target spirv -entry main -stage compute -o $@
@@ -326,6 +333,6 @@ check: gpuserv-probe proto_check
 	@cat build/probe.out
 
 clean:
-	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check feat_check f64soft_check pcache_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
+	rm -rf build gen *.o libgpuserv.a gpuserv-probe pgstrom-gpuserv proto_check gcache_check spec_check feat_check f64soft_check df64_probe pcache_check kernels_spv.c kernels_spv.h kernels_src.c kernels_src.h
 
 .PHONY: all check clean
