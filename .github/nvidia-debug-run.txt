@@ -1,1 +1,1 @@
-TMO=60 PIPE_PATTERN=gpuscan8_nogeom+gpuscan16_nogeom+gpuscan32_nogeom+gtab16_nogeom+gtab32_nogeom+gpuscan8_lite pipeline_check.sh; TMO=1800 float8_dev.sh
+TMO=480 SPEC=check float8_dev.sh; TMO=480 SPEC=off float8_dev.sh

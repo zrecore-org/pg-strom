@@ -130,6 +130,9 @@ jobs:
             SCRIPTS=$(sed -n 1p .github/nvidia-debug-run.txt); EXTRA_ENV=$(sed -n '2,$p' .github/nvidia-debug-run.txt)
           fi
           mkdir -p "$RUNNER_TEMP/out"
+          # memory sampler: the device memory and host memory next to the service's resident size (VK_ERROR_OUT_OF_DEVICE_MEMORY hunt)
+          ( while true; do echo "$(date +%T) gpu=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader | tr -d ' ') host=$(free -m | awk '/Mem:/{print $3"/"$2}') svc_rss_kb=$(ps -C pgstrom-gpuserv -o rss= | tr '\n' ' ')"; sleep 10; done ) > "$RUNNER_TEMP/out/mem.log" 2>&1 &
+          SAMPLER=$!
           for l in $(printf '%s\n' "$EXTRA_ENV" | tr '\n' ' '); do export "$l"; done
           IFS=';'
           for seg in $SCRIPTS; do
@@ -152,6 +155,8 @@ jobs:
             case "$name" in nvidia_probe*) cat "$log" | cut -c1-300 ;; esac
             IFS=';'
           done
+          kill $SAMPLER 2>/dev/null || true
+          echo "=== memory samples"; cat "$RUNNER_TEMP/out/mem.log" | cut -c1-200
           # what the service logged (kernel errors, specialization mismatches)
           grep -hiE "error|mismatch|differs|spec.*(fail|bad)|device lost|restart" /tmp/f8_dev/log /tmp/pg_dev/log 2>/dev/null | cut -c1-300 | sort | uniq -c | sort -rn | head -30 || true
 
