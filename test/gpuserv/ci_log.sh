@@ -14,6 +14,6 @@ while IFS="$(printf '\t')" read -r id name concl; do
 	echo "== $name ($concl)"
 	gh api "repos/$REPO/actions/jobs/$id" --jq '.steps[] | select(.conclusion=="failure") | "   failed step \(.number): \(.name)"'
 	gh api "repos/$REPO/actions/jobs/$id/logs" --allow-escape-sequences 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' |
-		grep -E '##\[error\]|error:|Err:|E: |FAIL|undefined reference|Permission denied|Temporary failure|timed out|Cannot|No such file' |
+		grep -E '##\[error\]|error:|Err:| E: |FAIL|undefined reference|Permission denied|Temporary failure|timed out|Cannot|No such file' |
 		cut -c29-230 | head -"$LINES"
 done

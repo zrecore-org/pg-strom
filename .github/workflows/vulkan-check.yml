@@ -409,7 +409,7 @@ jobs:
     if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline || inputs.skip_gpu_job))
     needs: gpu-changes
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
-    timeout-minutes: 120
+    timeout-minutes: 150
     # TEMPORARY: the NVIDIA T4 run found 9 wrong results in float8_dev (branch nvidia-fix investigates). The job still runs on
     # every push and shows its failure, but it does not turn the whole run red until that is fixed. Remove this line then.
     continue-on-error: true
@@ -468,15 +468,18 @@ jobs:
       # A kernel changes rarely, so the driver's compiled shaders (lavapipe: Mesa's shader cache; the service's
       # pipeline cache) are kept between runs. The key follows the kernel sources: a changed kernel recompiles,
       # the others are found in the restored cache.
-      - name: Restore the shader and pipeline caches
-        uses: actions/cache@v4
+      # The NVIDIA driver compiles every kernel on the first use (one join-aggregation kernel took 17 minutes on the T4, a
+      # whole float8_dev run over an hour): the service's VkPipelineCache holds the compiled binaries. It is saved after the
+      # job (even a failed one) under its own key (not the lavapipe job's: a pipeline cache of another device is ignored)
+      # and restored by the next run; a changed kernel recompiles only itself.
+      - name: Restore the pipeline cache (NVIDIA)
+        uses: actions/cache/restore@v4
         with:
           path: |
-            .cache/mesa
             .cache/xdg
-          key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+          key: nvidia-pipeline-cache-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
           restore-keys: |
-            shader-cache-${{ runner.os }}-${{ runner.arch }}-
+            nvidia-pipeline-cache-${{ runner.arch }}-
 
       # The GPU-optimized image (Ubuntu 24.04, driver 590 "server" packages) already ships the NVIDIA Vulkan ICD
       # (libnvidia-gl-590-server). Check it here so that a missing driver fails this step, not the service test.
@@ -508,7 +511,7 @@ jobs:
         run: sh test/gpuserv/service_test.sh
 
       - name: Differential tests (float8, PostGIS, GiST join, GPU-Cache)
-        timeout-minutes: 60
+        timeout-minutes: 105   # a cold NVIDIA kernel compile takes tens of minutes; with the pipeline cache a run is much shorter
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
@@ -533,6 +536,14 @@ jobs:
             fi
           done
           exit $bad
+
+      - name: Save the pipeline cache (NVIDIA)
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/xdg
+          key: nvidia-pipeline-cache-${{ runner.arch }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
 
       - name: Save the apt packages
         if: ${{ !cancelled() }}
