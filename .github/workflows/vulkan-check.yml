@@ -347,7 +347,8 @@ jobs:
     # doc/ci-gpu-runners.md. Unlike the lavapipe job this runs the full GPU path with ALLOW_CPU off: the service
     # must pick the GPU, and the differential tests compare it with the CPU.
     name: Linux x86_64, real GPU (${{ vars.GPU_RUNNER_LABEL }}), PostgreSQL 17
-    if: vars.GPU_RUNNER_LABEL != ''
+    # Never for a pull request from a fork: the runner is billed and shared with the organization.
+    if: vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
     timeout-minutes: 120
     steps:
