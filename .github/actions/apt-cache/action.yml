@@ -1,0 +1,46 @@
+name: Keep the apt packages between runs
+description: >
+  Points apt at directories under $HOME, restores them from the Actions cache and saves them after a successful job, so that
+  a Ubuntu mirror outage (security.ubuntu.com and azure.archive.ubuntu.com did not resolve on 2026-11-11) does not stop a
+  job whose packages were installed once before. The cache holds the downloaded .deb files and the package indexes of
+  that moment: apt-get update keeps the old indexes when a mirror does not answer, and apt-get install finds the .deb
+  files in the archive directory before it downloads.
+inputs:
+  offline:
+    description: "Block the Ubuntu mirrors in /etc/hosts (a test of the cache: the job must still install its packages)"
+    default: "false"
+  key-extra:
+    description: "Added to the cache key (use the job name: the jobs install different packages)"
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Restore the apt cache
+      uses: actions/cache@v4
+      with:
+        path: ~/apt-cache
+        key: apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-${{ hashFiles('.github/workflows/vulkan-check.yml') }}
+        restore-keys: |
+          apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-
+
+    - name: Configure apt to use it
+      shell: bash
+      run: |
+        mkdir -p "$HOME/apt-cache/archives/partial" "$HOME/apt-cache/lists/partial"
+        printf '%s\n' \
+          "Dir::Cache::archives \"$HOME/apt-cache/archives\";" \
+          "Dir::State::lists \"$HOME/apt-cache/lists\";" \
+          'APT::Keep-Downloaded-Packages "true";' \
+          | sudo tee /etc/apt/apt.conf.d/98ci-apt-cache >/dev/null
+        # Ubuntu images clean the archive directory after an install in some configurations: switch that off
+        sudo rm -f /etc/apt/apt.conf.d/docker-clean
+        echo "apt cache: $(ls "$HOME/apt-cache/archives" 2>/dev/null | wc -l) files in archives, $(ls "$HOME/apt-cache/lists" 2>/dev/null | wc -l) in lists"
+
+    - name: Block the Ubuntu mirrors (test of the cache)
+      if: inputs.offline == 'true'
+      shell: bash
+      run: |
+        for h in archive.ubuntu.com azure.archive.ubuntu.com security.ubuntu.com ports.ubuntu.com azure.ports.ubuntu.com; do
+          echo "127.0.0.1 $h" | sudo tee -a /etc/hosts >/dev/null
+        done
+        getent hosts security.ubuntu.com
