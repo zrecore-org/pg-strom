@@ -10,7 +10,7 @@ type runerr >/dev/null 2>&1 || runerr() { # table, label, query-with-%T, text of
 	if [ "$plan" -ge 1 ] && echo "$g" | grep -q "$want" && echo "$c" | grep -q "$want"; then echo "  ok    $tbl: $label ($want)"
 	else echo "  FAIL  $tbl: $label (plan GpuScan=$plan, expected '$want')"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
-[ -n "$ROOT" ] && [ -f "$ROOT/log" ] && { if grep -q "df64 prefilter on" "$ROOT/log"; then echo "  note: the service runs with the df64 prefilter"; else echo "  NOTE: the df64 prefilter is OFF in this service ($(grep -o 'df64 prefilter off[^\n]*' "$ROOT/log" | head -1))"; fi; }
+[ -n "$ROOT" ] && [ -f "$ROOT/log" ] && { if grep -q "df64 prefilter on" "$ROOT/log"; then echo "  note: the service runs with the df64 prefilter"; else echo "  NOTE: the df64 prefilter is OFF in this service ($(sed -n 's/.*\(df64 prefilter off.*\)/\1/p' "$ROOT/log" | head -1))"; fi; }
 DFROWS=${DFROWS:-120000}
 sql "drop table if exists f8_df"
 # x, y: values around the thresholds of the queries below. Row class i % 16: the margin of the row from its threshold is 10^-(1 + i % 16) of the operand
@@ -65,3 +65,21 @@ runerr $t "1e300 * z overflows (the prefilter must not decide it)" "select i fro
 runerr $t "z * 1e-300 underflows on a nonzero z" "select i from %T where i % 10 = 6 and z * 1e-300 > 1" "value out of range: underflow"
 echo "  a null leaf next to an overflowing one: PostgreSQL still evaluates both operands"
 runerr $t "(x * 2) + (z * 1e300) with a NULL x row first" "select i from %T where (x * 2) + (z * 1e300) > 1 and i % 10 = 3" "value out of range: overflow"
+echo "  float4 under the service's fast-math-off setting (the switch is global; FARITH must still equal PostgreSQL's float4 arithmetic bit for bit)"
+sql "drop table if exists f8_df4"
+sql "create table f8_df4 (i int4, p float4, q float4, r float4)"
+sql "insert into f8_df4 select i,
+	case i % 11 when 0 then 'NaN'::float4 when 1 then 'Infinity'::float4 when 2 then '-Infinity'::float4 when 3 then 1.0e-40::float4 when 4 then 3.0e38::float4
+	     when 5 then -0.0::float4 else (((i::int8 * 7919) % 200001 - 100000) / 37.0)::float4 end,
+	case i % 7 when 0 then 1.1754944e-38::float4 when 1 then 16777216::float4 when 2 then 0.1::float4 else (((i::int8 * 104729) % 1000003 - 500000) / 1009.0)::float4 end,
+	((i % 997) + 1) / 16.0
+	from generate_series(1, $DFROWS) i"
+sql "vacuum analyze f8_df4"
+t=f8_df4
+run $t "float4: p * q + r < 50" "select i, p, q, r from %T where p * q + r < 50"
+run $t "float4: (p + q) * r > 1000" "select i from %T where (p + q) * r > 1000"
+run $t "float4: p * 0.1 + q * 0.7 = q * 0.7 + p * 0.1 (fused or not: the sums are one ulp apart)" "select i from %T where p * 0.1::float4 + q * 0.7::float4 = q * 0.7::float4 + p * 0.1::float4"
+run $t "float4: p / r <= q" "select i, p / r, q from %T where p / r <= q"
+run $t "float4: results in the target list" "select i, p * q, p + q, p - q, p * q + r, (p + q) * r from %T where i % 5 = 0"
+run $t "float4 and float8 mixed: p::float8 * q::float8 + r < 50" "select i from %T where p::float8 * q::float8 + r::float8 < 50"
+run_any $t "float4: abs(p - q) < r (float4 abs stays on the CPU)" "select i from %T where abs(p - q) < r"

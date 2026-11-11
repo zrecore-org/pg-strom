@@ -219,13 +219,19 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 			return 3;
 		}
 		log_msg("VM self-test %s", msg);
-		/* A10 part 6: the df64 prefilter of float8 comparisons needs exact error-free transformations (gpu_vk.c switches MoltenVK's
-		 * fast math off); PGSTROM_GPUSERV_DF64=off keeps the exact path only */
+		/*
+		 * A10 part 6: the df64 prefilter of float8 comparisons needs exact error-free transformations. It is validated on MoltenVK only
+		 * (gpu_vk.c switches its fast math off); on another driver it needs PGSTROM_GPUSERV_DF64=on, and in every case the device must
+		 * pass gpuserv_df64_selfcheck. PGSTROM_GPUSERV_DF64=off keeps the exact path only.
+		 */
 		{
 			const char *e = getenv("PGSTROM_GPUSERV_DF64");
+			int			mvk = strstr(ss.vk.info.driver_name, "MoltenVK") != NULL || strstr(ss.vk.info.name, "MoltenVK") != NULL;
 
 			if (e && !strcmp(e, "off"))
 				log_msg("df64 prefilter off (PGSTROM_GPUSERV_DF64=off)");
+			else if (!mvk && !(e && !strcmp(e, "on")))
+				log_msg("df64 prefilter off: validated on MoltenVK only (PGSTROM_GPUSERV_DF64=on to try it after the self-check)");
 			else if (gpuserv_df64_selfcheck(&ss.vk, msg, sizeof(msg)) != 0)
 				log_msg("df64 prefilter off: the device does not keep the error-free transformations exact (%s)", msg);
 			else
