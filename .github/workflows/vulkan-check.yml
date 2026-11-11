@@ -408,6 +408,18 @@ jobs:
           restore-keys: |
             shader-cache-${{ runner.os }}-${{ runner.arch }}-
 
+      # The GPU-optimized image has the NVIDIA kernel driver but may lack the userspace Vulkan driver (libnvidia-gl),
+      # without which the service sees only lavapipe and, with ALLOW_CPU off, finds no device.
+      - name: NVIDIA Vulkan driver
+        timeout-minutes: 10
+        run: |
+          nvidia-smi
+          if ! ls /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null; then
+            V=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 | cut -d. -f1)
+            sudo apt-get install -y "libnvidia-gl-${V}" || sudo apt-get install -y "libnvidia-gl-${V}-server"
+          fi
+          ls /usr/share/vulkan/icd.d /etc/vulkan/icd.d 2>/dev/null || true
+
       - name: What the GPU runner has (informational)
         continue-on-error: true
         run: |
