@@ -658,7 +658,9 @@ emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *n
 		const kern_expression *kx = KEXP_FIRST_ARG(kmk);
 
 		/* a point in the first place suits st_within / st_coveredby, in the second st_contains / st_covers */
-		if (kmk0 ? fc.kind == SOP_GPIP_POLY_POINT : fc.kind == SOP_GPIP_POINT_POLY)
+		if (fc.kind != SOP_GPIP_DISJOINT && fc.kind > SOP_GPIP_EITHER)
+			return fail(b, "%s of a fused point", scan_vm_opcode_name(kexp->opcode));
+		if (fc.kind != SOP_GPIP_DISJOINT && (kmk0 ? fc.kind == SOP_GPIP_POLY_POINT : fc.kind == SOP_GPIP_POINT_POLY))
 			return fail(b, "the point of %s is in the wrong place", scan_vm_opcode_name(kexp->opcode));
 		if (kmk0)
 			srid1 = srid0;
@@ -673,6 +675,8 @@ emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *n
 		if (ry < 0)
 			return -1;
 		flags = SOP_GPIP_FUSED;
+		if (fc.kind > SOP_GPIP_EITHER)
+			flags |= (uint32_t) (fc.kind - 2) << SOP_GPIP_MODE_SHIFT;
 		k1 = (uint32_t) ry | ((uint32_t) srid0 << 8);
 	}
 	else
@@ -691,7 +695,9 @@ emit_geompip(builder *b, const kern_expression *kexp, scan_func_class fc, int *n
 		rb = expr_to_reg(b, kb, next);
 		if (rb < 0)
 			return -1;
-		flags = (fc.kind == SOP_GPIP_EITHER ? SOP_GPIP_SYMM : 0);
+		flags = ((fc.kind == SOP_GPIP_EITHER || fc.kind > SOP_GPIP_EITHER) ? SOP_GPIP_SYMM : 0);
+		if (fc.kind > SOP_GPIP_EITHER)
+			flags |= (uint32_t) (fc.kind - 2) << SOP_GPIP_MODE_SHIFT;
 	}
 	*next = mark;
 	dst = new_reg(b, next);

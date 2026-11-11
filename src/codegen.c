@@ -2052,6 +2052,9 @@ vulkan_geom_pip_args_ok(scan_func_class fc, List *func_args)
 	s1 = vulkan_geom_operand_shape(lsecond(func_args));
 	if (s0 < 0 || s1 < 0 || (s0 && s1))
 		return false;
+	/* R6: only ST_Disjoint takes a fused point (it is the negated ST_Intersects); the relations of two columns / constants */
+	if (fc.kind > SOP_GPIP_EITHER && fc.kind != SOP_GPIP_DISJOINT && (s0 || s1))
+		return false;
 	if (fc.kind == SOP_GPIP_POLY_POINT && s0)
 		return false;
 	if (fc.kind == SOP_GPIP_POINT_POLY && s1)
@@ -3179,6 +3182,9 @@ vulkan_text_func_allowed(codegen_context *context, devfunc_info *dfunc,
 	 * geometry column (a string register that points into the inner buffer); the kernel hands a row it cannot
 	 * decide back to the backend (the poison records of the join task). Nothing else reads a geometry in a join.
 	 */
+	/* R6: ST_Disjoint / ST_Touches / ... are scan quals only (a join kernel would have to carry the segment code: the Metal compile probe) */
+	if (fc.cls == SOP_GEOMPIP && fc.kind > SOP_GPIP_EITHER && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
+		return false;
 	if (fc.cls == SOP_GEOMPIP && (context->xpu_task_flags & DEVTASK__MASK) == DEVTASK__JOIN)
 	{
 		Node	   *poly;

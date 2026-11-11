@@ -3225,6 +3225,7 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
 #ifndef WITH_INNER
 // R5: lines and polygons against each other (the default join kernels stay as they were: their non-point operands are poison records)
 #define GP_FN
+#define GP_NOINL [noinline]
 #define GP_T(n) n
 #define GP_SRC_T uint
 #define GP_LD32(src, off) ldw_s(src, off)
@@ -3252,15 +3253,44 @@ uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM
     uint bb = str_off(y);
     uint lb = str_len(y);
 #ifndef WITH_INNER
+    // the relation: bits 2-4 of k0 (SOP_GPIP_MODE_SHIFT): 0 the function of the kind, 1 ST_Disjoint (the negated ST_Intersects), 2.. R6
+    uint gmode = (k0 >> 2) & 7u;
+    bool gneg = (gmode == 1u);
     if (!fused)
     {
-        uint gr = gp_try(sa, ba, la, sb, bb, lb, (k0 & SOP_GPIP_SYMM) != 0u ? 1u : 0u);
+        uint gm = GPM_CONTAINS;
+        if (gmode >= 2u)
+            gm = gmode;
+        else if ((k0 & SOP_GPIP_SYMM) != 0u || gneg)
+            gm = GPM_INTERSECTS;
+        uint gr = gp_try(sa, ba, la, sb, bb, lb, gm);
         if (gr == GP_RECHECK)
             return SOP_RECHECK_CODE;
         if (gr != GP_NA)
         {
             regs[dst].isnull = 0u;
-            regs[dst].v = b2l(gr == GP_TRUE);
+            regs[dst].v = b2l((gr == GP_TRUE) != gneg);
+            return 0u;
+        }
+        if (gmode >= 2u)
+            return SOP_RECHECK_CODE;
+    }
+    else
+    {
+        // a Z or M polygon against the fused point: the rings are read by their own stride
+        GpGeo ga = gp_head(sa, ba, la, 0u);
+        if (ga.ok != 0u && (ga.flags & 3u) != 0u && (ga.gtype == 3u || ga.gtype == 6u))
+        {
+            uint64_t fpx = uint64_t(y.v);
+            uint64_t fpy = uint64_t(regs[yreg].v);
+            GpInfo gi = gp_prep(sa, ga);
+            if (gi.ok == 0u || ga.srid != (k1 >> 8) || f64_nonfinite(fpx) || f64_nonfinite(fpy))
+                return SOP_RECHECK_CODE;
+            uint pr = gp_pip_area(sa, ga, fpx, fpy);
+            if (pr == GPP_UNSURE)
+                return SOP_RECHECK_CODE;
+            regs[dst].isnull = 0u;
+            regs[dst].v = b2l((pr == GPP_IN) != gneg);
             return 0u;
         }
     }
@@ -3367,7 +3397,11 @@ uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM
         }
     }
     regs[dst].isnull = 0u;
+#ifndef WITH_INNER
+    regs[dst].v = b2l(res != gneg);
+#else
     regs[dst].v = b2l(res);
+#endif
     return 0u;
 }
 

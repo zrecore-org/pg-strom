@@ -109,3 +109,124 @@ done
 run pg_pr_inv "ST_Intersects with a pentagram ring (winding versus parity)" "select id from %T where ST_Intersects(a, b)"
 run pg_pr_inv "ST_Contains with a pentagram ring" "select id from %T where ST_Contains(a, b)"
 run pg_pr_inv "ST_Within with a pentagram ring" "select id from %T where ST_Within(b, a)"
+
+# ---- R5 remainder: a point / multipoint against a line, polygon (also Z, M, ZM); R8: Z/M polygons in the point-in-polygon path ----
+echo "PostGIS R5 remainder: points against lines, multipoints, Z/M polygons"
+sql "create table pg_pt as select i id, a, p, mp, n from (select i, pg_pr_shape(i, ((i * 7919) % 60000) / 1000.0 + 0.0137, ((i * 104729) % 60000) / 1000.0 + 0.0291) a,
+	case when i % 7 = 0 then ST_MakePoint(((i * 7919) % 60000) / 1000.0 + 0.0137, ((i * 104729) % 60000) / 1000.0 + 0.0291)
+		when i % 11 = 0 then ST_MakePoint(((i * 7919) % 60000) / 1000.0 + 0.0137 + 3.5, ((i * 104729) % 60000) / 1000.0 + 0.0291 + 6.5)
+		else ST_MakePoint(((i * 7919) % 60000) / 1000.0 + 0.0137 + ((i * 31) % 301) / 20.0, ((i * 104729) % 60000) / 1000.0 + 0.0291 + ((i * 17) % 301) / 20.0) end p,
+	ST_Collect(ARRAY[ST_MakePoint(((i * 7919) % 60000) / 1000.0 + 1.1, ((i * 104729) % 60000) / 1000.0 + 1.3), ST_MakePoint(((i * 7919) % 60000) / 1000.0 + 5.7, ((i * 104729) % 60000) / 1000.0 + 8.9),
+		ST_MakePoint(((i * 7919) % 60000) / 1000.0 + ((i * 3) % 40), ((i * 104729) % 60000) / 1000.0 + ((i * 5) % 40))]) mp,
+	i % 1000 n from generate_series(1, $PRN) i) s"
+sql "insert into pg_pt values (-1, NULL, 'POINT(1 1)', 'POINT(1 1)', 0), (-2, 'LINESTRING(0 0,10 10)', 'POINT EMPTY', 'MULTIPOINT((1 1),(2 2))', 0),
+	(-3, 'LINESTRING(0 0,10 10)', 'POINT(5 5)', 'MULTIPOINT((1 1),(2 2))', 0), (-4, 'LINESTRING(0 0,10 10)', 'POINT(5 5.000000000000001)', 'MULTIPOINT((1 1),(20 20))', 0),
+	(-5, 'POLYGON((0 0,10 0,10 10,0 10,0 0))', 'POINT(0 5)', 'MULTIPOINT((1 1),(10 10))', 0), (-6, 'POLYGON((0 0,10 0,10 10,0 10,0 0))', 'POINT(3 3)', 'MULTIPOINT((1 1),(2 2))', 0),
+	(-7, 'POLYGON((0 0,10 0,10 10,0 10,0 0))', 'POINT(13 3)', 'MULTIPOINT((1 1),(12 2))', 0), (-8, 'POLYGON EMPTY', 'POINT(1 1)', 'MULTIPOINT((1 1))', 0),
+	(-9, 'LINESTRING(0 0,10 0)', 'POINT(5 0)', 'MULTIPOINT EMPTY', 0), (-10, 'MULTIPOINT((1 1),(2 2))', 'POINT(1 1)', 'MULTIPOINT((1 1))', 0),
+	(-11, 'POINT(1 1)', 'POINT(1 1)', 'MULTIPOINT((1 1))', 0), (-12, 'LINESTRING(0 0,0 0)', 'POINT(0 0)', 'MULTIPOINT((0 0))', 0)"
+sql "analyze pg_pt"
+sql "create table pg_pt_z as select id, ST_Force3DZ(a, 5) a, ST_Force3DZ(p, 2) p, ST_Force3DZ(mp, 1) mp, n from pg_pt"
+sql "create table pg_pt_m as select id, ST_Force3DM(a, 5) a, ST_Force3DM(p, 2) p, ST_Force3DM(mp, 1) mp, n from pg_pt"
+sql "create table pg_pt_zm as select id, ST_Force4D(a, 5, 6) a, ST_Force4D(p, 2, 3) p, ST_Force4D(mp, 1, 4) mp, n from pg_pt"
+sql "analyze pg_pt_z"; sql "analyze pg_pt_m"; sql "analyze pg_pt_zm"
+# polygons only (Z/M polygons against a point: the R8 case, also a fused ST_MakePoint)
+sql "create table pg_pg_z as select id, a, p from pg_pt_z where ST_GeometryType(a) in ('ST_Polygon', 'ST_MultiPolygon') or id < 0"
+sql "create table pg_pg_zm as select id, a, p from pg_pt_zm where ST_GeometryType(a) in ('ST_Polygon', 'ST_MultiPolygon') or id < 0"
+sql "analyze pg_pg_z"; sql "analyze pg_pg_zm"
+for t in pg_pt pg_pt_z pg_pt_m pg_pt_zm; do
+	echo "table $t"
+	run $t "ST_Intersects(a, p)" "select id from %T where ST_Intersects(a, p)"
+	run $t "ST_Intersects(p, a)" "select id from %T where ST_Intersects(p, a)"
+	run $t "ST_Disjoint(a, p)" "select id from %T where ST_Disjoint(a, p)"
+	run $t "ST_Contains(a, p)" "select id from %T where ST_Contains(a, p)"
+	run $t "ST_Within(p, a)" "select id from %T where ST_Within(p, a)"
+	run $t "ST_Covers(a, p)" "select id from %T where ST_Covers(a, p)"
+	run $t "ST_CoveredBy(p, a)" "select id from %T where ST_CoveredBy(p, a)"
+	run $t "ST_Contains(p, a)" "select id from %T where ST_Contains(p, a)"
+	run $t "ST_Intersects(a, mp)" "select id from %T where ST_Intersects(a, mp)"
+	run $t "ST_Contains(a, mp)" "select id from %T where ST_Contains(a, mp)"
+	run $t "ST_Covers(a, mp)" "select id from %T where ST_Covers(a, mp)"
+	run $t "ST_Within(mp, a)" "select id from %T where ST_Within(mp, a)"
+	run $t "ST_CoveredBy(mp, a)" "select id from %T where ST_CoveredBy(mp, a)"
+	run $t "ST_Contains(mp, a)" "select id from %T where ST_Contains(mp, a)"
+	run $t "ST_Disjoint(mp, a)" "select id from %T where ST_Disjoint(mp, a)"
+	run $t "ST_Intersects(mp, CP)" "select id from %T where ST_Intersects(mp, $CP)"
+	run $t "ST_Contains(CL, p)" "select id from %T where ST_Contains($CL, p)"
+	run $t "ST_Intersects(CL, mp)" "select id from %T where ST_Intersects($CL, mp)"
+	runagg_any $t "count of ST_Intersects(a, p)" "select count(*), sum(n) from %T where ST_Intersects(a, p)"
+	runagg_any $t "count of ST_Disjoint(a, mp)" "select count(*) from %T where ST_Disjoint(a, mp)"
+done
+for t in pg_pg_z pg_pg_zm; do
+	echo "table $t (Z / M polygons against a fused point)"
+	run $t "ST_Contains(a, ST_MakePoint(x, y))" "select id from %T where ST_Contains(a, ST_MakePoint(ST_X(p) + 0.001, ST_Y(p) - 0.002))"
+	run $t "ST_Within(ST_MakePoint, a)" "select id from %T where ST_Within(ST_MakePoint(ST_X(p) + 0.001, ST_Y(p) - 0.002), a)"
+	run $t "ST_Intersects with a fused point" "select id from %T where ST_Intersects(a, ST_MakePoint(ST_X(p), ST_Y(p)))"
+	run $t "ST_Disjoint with a fused point" "select id from %T where ST_Disjoint(a, ST_MakePoint(ST_X(p) + 0.001, ST_Y(p)))"
+	run $t "ST_Disjoint with a fused 3D point" "select id from %T where ST_Disjoint(ST_MakePoint(ST_X(p), ST_Y(p), 3), a)"
+done
+for t in pg_pt pg_pt_zm; do
+	echo "table $t (decided on the GPU)"
+	nrows=$(sql "select count(*) from $t")
+	for q in "ST_Intersects(a, p)" "ST_Contains(a, p)" "ST_Within(p, a)" "ST_Intersects(a, mp)" "ST_Contains(a, mp)" "ST_Disjoint(a, p)" "ST_Intersects($CL, mp)"; do
+		n=$(recheck_rows $t "select id from %T where $q")
+		[ "$n" -le $((nrows / 5)) ]; check "$t: $q: $n of $nrows rows rechecked (at most 20%)" $?
+	done
+done
+t=pg_pg_zm
+nrows=$(sql "select count(*) from $t")
+n=$(recheck_rows $t "select id from %T where ST_Contains(a, ST_MakePoint(ST_X(p) + 0.001, ST_Y(p) - 0.002))")
+[ "$n" -le $((nrows / 5)) ]; check "$t: Z/M polygon against a fused point: $n of $nrows rows rechecked (at most 20%)" $?
+
+# ---- R6: ST_Disjoint, ST_Touches, ST_Crosses, ST_Overlaps, ST_Equals ----
+echo "PostGIS R6: ST_Disjoint / ST_Touches / ST_Crosses / ST_Overlaps / ST_Equals"
+for t in pg_pr pg_pr_z pg_pr_m pg_pr_zm; do
+	echo "table $t"
+	for f in ST_Disjoint ST_Touches ST_Crosses ST_Overlaps ST_Equals; do
+		run $t "$f(a, b)" "select id from %T where $f(a, b)"
+		run $t "NOT $f(a, b)" "select id from %T where not $f(a, b)"
+		run $t "$f(b, a)" "select id from %T where $f(b, a)"
+		for c in "CP:$CP" "CPH:$CPH" "CL:$CL" "CM:$CM"; do
+			cn=${c%%:*}; cv=${c#*:}
+			run $t "$f(a, $cn)" "select id from %T where $f(a, $cv) and n < 800"
+		done
+	done
+	runagg_any $t "count of ST_Disjoint" "select count(*) from %T where ST_Disjoint(a, b)"
+	runagg_any $t "count of ST_Crosses / ST_Overlaps" "select count(*), sum(n) from %T where ST_Crosses(a, b) or ST_Overlaps(a, b)"
+	runagg_any $t "count by n % 5 of ST_Touches" "select n % 5, count(*) from %T where not ST_Touches(a, $CP) group by 1 order by 1"
+	run $t "ST_Crosses and ST_Intersects" "select id from %T where ST_Intersects(a, b) and not ST_Crosses(a, b) and not ST_Disjoint(a, b)"
+done
+run pg_pr_srid "mixed SRIDs raise the same error (ST_Touches)" "select id from %T where ST_Touches(a, b)"
+run pg_pr_srid "mixed SRIDs raise the same error (ST_Disjoint)" "select id from %T where ST_Disjoint(a, b)"
+run pg_pr_srid2 "ST_Crosses with the same SRID 4326" "select id from %T where ST_Crosses(a, b)"
+run pg_pr_srid2 "ST_Disjoint with the same SRID 4326" "select id from %T where ST_Disjoint(a, b)"
+run pg_pr_inv "ST_Disjoint with a pentagram ring" "select id from %T where ST_Disjoint(a, b)"
+run pg_pr_inv "ST_Touches with a pentagram ring" "select id from %T where ST_Touches(a, b)"
+run pg_pr_inv "ST_Crosses with a pentagram ring" "select id from %T where ST_Crosses(a, b)"
+# pairs of lines: crossing, collinear, shared end points, T junctions
+sql "create table pg_ll as select i id, ST_MakeLine(ARRAY[ST_MakePoint(i * 0.37, 0.011), ST_MakePoint(i * 0.37 + 7.3, 9.1 + (i % 7))]) a,
+	case i % 5 when 0 then ST_MakeLine(ST_MakePoint(i * 0.37 + 6, 0.5), ST_MakePoint(i * 0.37 + 1, 12.3))
+		when 1 then ST_MakeLine(ST_MakePoint(i * 0.37 + 100, 0.5), ST_MakePoint(i * 0.37 + 101, 12.3))
+		when 2 then ST_MakeLine(ST_MakePoint(i * 0.37, 0.011), ST_MakePoint(i * 0.37 - 7.3, 9.1))
+		when 3 then ST_MakeLine(ST_MakePoint(i * 0.37 + 3.65, 4.5555), ST_MakePoint(i * 0.37 + 20, 4.5555))
+		else ST_MakeLine(ARRAY[ST_MakePoint(i * 0.37 + 1, 0.011), ST_MakePoint(i * 0.37 + 3, 2.5), ST_MakePoint(i * 0.37 + 9, 3.1)]) end b, i % 1000 n
+	from generate_series(1, 4000) i"
+sql "insert into pg_ll values (-1, 'LINESTRING(0 0,10 0)', 'LINESTRING(5 0,15 0)', 0), (-2, 'LINESTRING(0 0,10 10)', 'LINESTRING(0 10,10 0)', 0), (-3, 'LINESTRING(0 0,10 10)', 'LINESTRING(0 0,5 5,10 10)', 0),
+	(-4, 'LINESTRING(0 0,10 10)', 'LINESTRING(10 10,20 0)', 0), (-5, 'MULTILINESTRING((0 0,10 10),(0 10,10 0))', 'MULTILINESTRING((0 0,10 10),(0 10,10 0))', 0), (-6, 'LINESTRING(0 0,10 10)', 'LINESTRING(5 5,5 20)', 0),
+	(-7, 'MULTILINESTRING((0 0,10 10),(20 20,30 30))', 'LINESTRING(0 10,10 0)', 0), (-8, 'LINESTRING(0 0,0 0)', 'LINESTRING(0 0,0 0)', 0)"
+sql "analyze pg_ll"
+for f in ST_Disjoint ST_Touches ST_Crosses ST_Overlaps ST_Equals ST_Intersects; do
+	run pg_ll "$f of two lines" "select id from %T where $f(a, b)"
+done
+for t in pg_pr pg_pr_zm; do
+	echo "table $t (R6 decided on the GPU)"
+	nrows=$(sql "select count(*) from $t")
+	for q in "ST_Disjoint(a, b)" "ST_Touches(a, b)" "ST_Crosses(a, b)" "ST_Overlaps(a, b)" "ST_Crosses(a, $CL)"; do
+		n=$(recheck_rows $t "select id from %T where $q")
+		[ "$n" -le $((nrows / 5)) ]; check "$t: $q: $n of $nrows rows rechecked (at most 20%)" $?
+	done
+	pl=$($PSQL -d scantest -c "$GPU explain select id from $t where ST_Crosses(a, b) and ST_Touches(a, b) is not null and ST_Equals(a, b) is not null" 2>&1 | grep "GPU Scan Quals" | grep -ci "st_crosses")
+	[ "${pl:-0}" -ge 1 ]; check "$t: ST_Crosses / ST_Touches / ST_Equals are in the GPU's scan quals" $?
+done
+pl=$($PSQL -d scantest -c "$GPU explain select id from pg_pg_zm where ST_Contains(a, ST_MakePoint(ST_X(p) + 0.001, ST_Y(p) - 0.002)) and ST_Disjoint(a, ST_MakePoint(ST_X(p), ST_Y(p)))" 2>&1 | grep "GPU Scan Quals" | grep -ci "st_disjoint")
+[ "${pl:-0}" -ge 1 ]; check "pg_pg_zm: ST_Disjoint with a fused point is in the GPU's scan quals" $?

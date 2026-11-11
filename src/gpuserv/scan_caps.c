@@ -1425,6 +1425,16 @@ classify_geometry(const char *name)
 		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_POINT_POLY; }
 	else if (!strcmp(name, "st_intersects"))
 		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_EITHER; }
+	else if (!strcmp(name, "st_disjoint"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_DISJOINT; }
+	else if (!strcmp(name, "st_touches"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_TOUCHES; }
+	else if (!strcmp(name, "st_crosses"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_CROSSES; }
+	else if (!strcmp(name, "st_overlaps"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_OVERLAPS; }
+	else if (!strcmp(name, "st_equals"))
+		{ fc.cls = SOP_GEOMPIP; fc.kind = SOP_GPIP_EQUALS; }
 	/* ST_DWithin(geometry, geometry, float8) of two points (A11 part 3): the planner checks the argument shapes */
 	else if (!strcmp(name, "st_dwithin"))
 		{ fc.cls = SOP_GEOMDWITHIN; fc.kind = 0; }
