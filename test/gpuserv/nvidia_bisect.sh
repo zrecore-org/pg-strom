@@ -40,3 +40,16 @@ try v5_no_output "$OUT/v5/scan.slang" scan_main 5 16 $NUMONLY
 mk v6 's/hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs);/hit = eval_row(pbase, page, lp, coloff, ncols, insnoff, nq, nins, qreg, regs); if (!hit) regs[0].v = 0;/'
 try v6_hit_use "$OUT/v6/scan.slang" scan_main 5 16 $NUMONLY
 try arrow8_num kernels_vm/arrow.slang arrow_main 5 16 $NUMONLY
+# compiler options and the SPIR-V optimizer
+try o0_numonly kernels_vm/scan.slang scan_main 5 16 $NUMONLY -O0
+try o1_numonly kernels_vm/scan.slang scan_main 5 16 $NUMONLY -O1
+try o3_numonly kernels_vm/scan.slang scan_main 5 16 $NUMONLY -O3
+try via_glsl kernels_vm/scan.slang scan_main 5 16 $NUMONLY -emit-spirv-via-glsl
+try wg32 kernels_vm/scan.slang scan_main 5 16 $NUMONLY -DSCAN_WG=32
+try wg128 kernels_vm/scan.slang scan_main 5 16 $NUMONLY -DSCAN_WG=128
+if command -v spirv-opt >/dev/null 2>&1; then
+	for o in -O -Os; do
+		spirv-opt $o "$OUT/s_orig.spv" -o "$OUT/s_opt$o.spv" 2>/dev/null || continue
+		out=$(timeout 90 "$GPUSERV_BIN" --prewarm 5 16 "$OUT/s_opt$o.spv" --device "${DEVICE:-0}" 2>&1) && echo "  OK    spirv-opt $o" || echo "  FAIL  spirv-opt $o: $(echo "$out" | tr '\n' ' ' | cut -c1-120)"
+	done
+fi
