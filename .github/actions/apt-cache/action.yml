@@ -18,7 +18,13 @@ runs:
     - name: Restore the apt cache
       uses: actions/cache@v4
       with:
-        path: ~/apt-cache
+        # the lock files and the partial/ directories belong to root (or _apt) and tar cannot open them: leave them out
+        path: |
+          ~/apt-cache
+          !~/apt-cache/lists/lock
+          !~/apt-cache/lists/partial
+          !~/apt-cache/archives/lock
+          !~/apt-cache/archives/partial
         key: apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-${{ hashFiles('.github/workflows/vulkan-check.yml') }}
         restore-keys: |
           apt-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.key-extra }}-

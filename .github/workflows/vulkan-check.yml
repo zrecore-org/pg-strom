@@ -37,6 +37,10 @@ on:
         description: "Run the GPU tests on a self-hosted Apple Silicon runner"
         type: boolean
         default: false
+      skip_gpu_job:
+        description: "Do not run the billed NVIDIA T4 job in this manual run"
+        type: boolean
+        default: false
       apt_offline:
         description: "Block the Ubuntu mirrors in the Linux jobs: the cached apt packages must be enough (a test of the cache)"
         type: boolean
@@ -395,7 +399,7 @@ jobs:
     # Never for a pull request from a fork: the runner is billed and shared with the organization.
     # Nor for a manual run that probes the macOS runner or tests the apt cache with the mirrors blocked (those runs exist to
     # spend only the minutes they test).
-    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline))
+    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline || inputs.skip_gpu_job))
     needs: gpu-changes
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
     timeout-minutes: 120
