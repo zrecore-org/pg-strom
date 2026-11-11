@@ -3,10 +3,10 @@
 # one summary. Meant for an hour on a cloud box (AWS g4dn = NVIDIA T4, g4ad = AMD Radeon Pro V520, Lambda, RunPod, Vast.ai)
 # that you shut down afterwards; the same sequence as the `linux-gpu` job of .github/workflows/vulkan-check.yml.
 #
-#   curl -fsSL https://raw.githubusercontent.com/zrecore/pg-strom/vulkan-gpu/test/cloud/gpu_check.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/zrecore-org/pg-strom/vulkan-gpu/test/cloud/gpu_check.sh | sh
 #   (or clone the repository and run: sh test/cloud/gpu_check.sh)
 #
-# Environment: BRANCH (default vulkan-gpu), REPO (default https://github.com/zrecore/pg-strom), WORK (default ~/pgstrom-gpu-check),
+# Environment: BRANCH (default vulkan-gpu), REPO (default https://github.com/zrecore-org/pg-strom), WORK (default ~/pgstrom-gpu-check),
 # STAGES (default "service float8 postgis gist gpucache"; add "scan" for the 2500-check scan_test.sh, about an hour on a GPU).
 # NVIDIA: the Vulkan ICD ships with the graphics driver package (libnvidia-gl-<major>), which a compute-only image may lack: the
 # script installs it when `vulkaninfo` lists no NVIDIA device. AMD/Intel: Mesa (mesa-vulkan-drivers).
@@ -14,7 +14,7 @@
 # on lavapipe.
 set -u
 BRANCH=${BRANCH:-vulkan-gpu}
-REPO=${REPO:-https://github.com/zrecore/pg-strom}
+REPO=${REPO:-https://github.com/zrecore-org/pg-strom}
 WORK=${WORK:-$HOME/pgstrom-gpu-check}
 STAGES=${STAGES:-"service float8 postgis gist gpucache"}
 PG_MAJOR=${PG_MAJOR:-17}
