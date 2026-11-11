@@ -37,6 +37,14 @@ on:
         description: "Run the GPU tests on a self-hosted Apple Silicon runner"
         type: boolean
         default: false
+      skip_gpu_job:
+        description: "Do not run the billed NVIDIA T4 job in this manual run"
+        type: boolean
+        default: false
+      apt_offline:
+        description: "Block the Ubuntu mirrors in the Linux jobs: the cached apt packages must be enough (a test of the cache)"
+        type: boolean
+        default: false
       try_xlarge_runner:
         description: "Probe for a Metal device on the GitHub-hosted macos-latest-xlarge runner (billed per minute)"
         type: boolean
@@ -45,9 +53,10 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same ref replaces the run in progress (a lavapipe run is long).
+# A newer push to the same ref replaces the run in progress (a lavapipe run is long). A manual run is its own group: starting
+# one must not cancel another (a cancelled T4 run is billed for the minutes it ran).
 concurrency:
-  group: vulkan-check-${{ github.ref }}
+  group: vulkan-check-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-manual-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 env:
@@ -82,6 +91,12 @@ jobs:
 
       # A slow mirror once spent 36 minutes in the PostgreSQL install and the job ran out of its 120 minutes before
       # any test started: the install steps fail fast instead, and apt retries a stalled download.
+      - name: Apt cache
+        uses: ./.github/actions/apt-cache
+        with:
+          offline: ${{ inputs.apt_offline || 'false' }}
+          key-extra: lavapipe
+
       - name: Install build and runtime packages
         timeout-minutes: 10
         run: |
@@ -112,7 +127,7 @@ jobs:
         run: |
           wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
           sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
-          sudo apt-get update
+          sudo apt-get update || echo "apt-get update had errors; continuing with the indexes that answered"
           sudo apt-get install -y libarrow-dev libparquet-dev
 
       - name: Install Slang ${{ env.SLANG_VERSION }}
@@ -202,6 +217,12 @@ jobs:
             .cache/mesa
             .cache/xdg
           key: shader-cache-${{ runner.os }}-${{ runner.arch }}-${{ env.CPUKEY }}-${{ hashFiles('src/gpuserv/kernels_vm/**', 'src/gpuserv/kernels/**') }}
+
+      - name: Save the apt packages
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/apt-cache-save
+        with:
+          key-extra: lavapipe
 
       - name: Server and GPU service logs of the failed test
         if: failure()
@@ -383,8 +404,9 @@ jobs:
     # must pick the GPU, and the differential tests compare it with the CPU.
     name: Linux x86_64, real GPU (NVIDIA T4), PostgreSQL 17
     # Never for a pull request from a fork: the runner is billed and shared with the organization.
-    # Nor for a manual run that probes the macOS runner (that run exists to spend only the macOS minutes).
-    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.try_xlarge_runner)
+    # Nor for a manual run that probes the macOS runner or tests the apt cache with the mirrors blocked (those runs exist to
+    # spend only the minutes they test).
+    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline || inputs.skip_gpu_job))
     needs: gpu-changes
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
     timeout-minutes: 120
@@ -397,6 +419,12 @@ jobs:
 
       # A slow mirror once spent 36 minutes in the PostgreSQL install and the job ran out of its 120 minutes before
       # any test started: the install steps fail fast instead, and apt retries a stalled download.
+      - name: Apt cache
+        uses: ./.github/actions/apt-cache
+        with:
+          offline: ${{ inputs.apt_offline || 'false' }}
+          key-extra: gpu
+
       - name: Install build and runtime packages
         timeout-minutes: 10
         run: |
@@ -421,7 +449,7 @@ jobs:
         run: |
           wget -q "https://packages.apache.org/artifactory/arrow/$(lsb_release --id --short | tr 'A-Z' 'a-z')/apache-arrow-apt-source-latest-$(lsb_release --codename --short).deb"
           sudo apt-get install -y ./apache-arrow-apt-source-latest-*.deb
-          sudo apt-get update
+          sudo apt-get update || echo "apt-get update had errors; continuing with the indexes that answered"
           sudo apt-get install -y libarrow-dev libparquet-dev
 
       - name: Install Slang ${{ env.SLANG_VERSION }}
@@ -505,6 +533,12 @@ jobs:
             fi
           done
           exit $bad
+
+      - name: Save the apt packages
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/apt-cache-save
+        with:
+          key-extra: gpu
 
       - name: Upload the PostgreSQL logs of the failed tests
         if: failure()
