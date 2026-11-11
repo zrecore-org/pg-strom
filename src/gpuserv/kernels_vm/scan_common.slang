@@ -291,6 +291,14 @@ int64_t num_p10(uint d)
 }
 static const int64_t NUM_MAX = 9223372036854775807;
 
+// Remainder of the truncated division (C's %, PostgreSQL's int mod). The NVIDIA driver (T4, 590.48) computes a signed 64-bit
+// OpSRem with a negative operand wrongly (the floored remainder: -1 % 4 = 3), so the remainder is taken from the quotient, which
+// it divides correctly. b != 0, and not (a == INT64_MIN && b == -1): the callers exclude both.
+int64_t srem64(int64_t a, int64_t b)
+{
+    return a - (a / b) * b;
+}
+
 // v = v * 10^d; false on overflow
 bool num_up(inout int64_t v, uint d)
 {
@@ -534,7 +542,7 @@ uint num_divide(uint k0, Reg x, Reg y, out int64_t r, out uint rsc)
         return SOP_RECHECK_CODE;
     if (k0 == SOP_NUMDIV_MOD)
     {
-        r = (b == -1) ? 0 : (a % b);
+        r = (b == -1) ? 0 : srem64(a, b);
         rsc = sc;
     }
     else
@@ -604,7 +612,14 @@ void num_unary(uint k0, Reg x, out int64_t r)
 {
     if (k0 == SOP_NUMOP_SIGN)
     {
-        r = (x.v > 0) ? 1 : ((x.v < 0) ? -1 : 0);
+        // not "(x.v > 0) ? 1 : ((x.v < 0) ? -1 : 0)": the NVIDIA driver's compiler (T4, 590.48) rejects a scan kernel that
+        // contains that nested conditional ("NVVM compilation failed: 3"); a numeric group in the scan kernel then never ran
+        int64_t sg = 0;
+        if (x.v > 0)
+            sg = 1;
+        else if (x.v < 0)
+            sg = -1;
+        r = sg;
         return;
     }
     uint64_t m = uint64_t(x.v < 0 ? -x.v : x.v);
@@ -3240,7 +3255,7 @@ uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg reg
             else
             {
                 r = t / 86400000000;
-                if (t % 86400000000 < 0)
+                if (srem64(t, 86400000000) < 0)
                     r -= 1;                 // floor
             }
             regs[dst].v = r;
@@ -3664,7 +3679,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
                 else if (y.v == -1)
                     r = 0;
                 else
-                    r = x.v % y.v;
+                    r = srem64(x.v, y.v);
                 break;
             }
             if (bad)

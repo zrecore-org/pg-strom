@@ -1042,6 +1042,25 @@ gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bd
 		mai.pNext = &mafi;
 	}
 	rc = vkAllocateMemory(ctx->dev, &mai, NULL, &b->mem);
+	if (rc == VK_ERROR_OUT_OF_DEVICE_MEMORY || rc == VK_ERROR_OUT_OF_HOST_MEMORY)
+	{
+		/*
+		 * The preferred type can be a small heap: a discrete NVIDIA GPU without resizable BAR (the T4) offers its
+		 * device-local host-visible type in a 256 MB window, which the working set of a join exhausted
+		 * (VK_ERROR_OUT_OF_DEVICE_MEMORY for a 2.5 MB buffer while the card was empty). Try the other
+		 * host-visible coherent types (system memory) before giving up.
+		 */
+		for (uint32_t i = 0; i < ctx->mem.memoryTypeCount && rc != VK_SUCCESS; i++)
+		{
+			VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+			if ((int) i == mt || !(req.memoryTypeBits & (1u << i)) ||
+				(ctx->mem.memoryTypes[i].propertyFlags & hv) != hv)
+				continue;
+			mai.memoryTypeIndex = i;
+			rc = vkAllocateMemory(ctx->dev, &mai, NULL, &b->mem);
+		}
+	}
 	if (rc != VK_SUCCESS)
 	{
 		CTX_ERR(ctx, "vkAllocateMemory(%zu) failed: %s", (size_t) req.size, vkr_str(rc));

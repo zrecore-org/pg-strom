@@ -489,6 +489,21 @@ jobs:
           sh test/gpuserv/gist_dev.sh
           sh test/gpuserv/gpucache_dev.sh
 
+      # A node whose GPU task fails continues on the CPU and returns the CPU's rows (A14), so a differential test passes even when
+      # the device's shader compiler rejected the kernel (the T4 did that for every scan kernel with the numeric group). A pass of
+      # this job must mean that the GPU path ran: no pipeline creation or device error may appear in the service logs.
+      # (Injected faults, which float8_dev uses once, say "injected fault" and are not matched.)
+      - name: No GPU task fell back to the CPU
+        run: |
+          bad=0
+          for f in /tmp/f8_dev/log /tmp/pg_dev/log /tmp/pg_gist_dev/log /tmp/gc_dev/log; do
+            [ -f "$f" ] || continue
+            if grep -E "cannot create the .* pipeline|NVVM compilation failed|vkCreateComputePipelines failed|VK_ERROR_|device lost" "$f" | grep -v "injected fault" | head -5 | grep .; then
+              echo "::error::$f: the GPU service reported device errors (the CPU fallback hid them from the differential tests)"; bad=1
+            fi
+          done
+          exit $bad
+
       - name: Upload the PostgreSQL logs of the failed tests
         if: failure()
         uses: actions/upload-artifact@v4

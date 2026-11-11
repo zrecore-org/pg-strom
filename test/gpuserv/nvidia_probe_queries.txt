@@ -1,0 +1,28 @@
+select min(z), max(z), count(z) from f8p
+select min(z), max(z), count(z) from f8p
+select max(z) from f8p
+select max(z), count(z) from f8p
+select min(z), max(z) from f8p
+select max(z), min(z), count(z) from f8p
+select min(z), max(z), count(z) from f8p where i > 0
+select min(z), max(z), count(z) from np2
+select max(z) from f8p where i <= 25000
+select max(z) from f8p where i > 25000 and i <= 50000
+select max(z) from f8p where i > 50000 and i <= 75000
+select max(z) from f8p where i > 75000 and i <= 100000
+select max(z) from f8p where i > 100000 and i <= 125000
+select max(z) from f8p where i > 125000 and i <= 150000
+select max(z) from f8p where i > 150000 and i <= 175000
+select max(z) from f8p where i > 175000
+select max(z) from f8p where i <= 100000
+select max(z) from f8p where i <= 10000
+select max(z) from f8p where i <= 1000
+select max(z), count(*) from f8p where i % 24 = 0
+select max(z), count(*) from f8p where i % 24 in (0, 1)
+select max(z), min(z), count(z) from f8p where i > 100000
+select max(z), min(z), count(z) from f8p where i % 2 = 0
+select max(x), min(x), max(y), min(y), max(w), min(w) from f8p
+select max(d), min(d) from f8p
+select max(z) from f8p where ctid < '(100,0)'
+select max(z), min(z), count(z) from f8p
+select max(z) from f8p where z > 1e300 or z <> z

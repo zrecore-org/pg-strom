@@ -1,0 +1,1 @@
+TMO=480 SPEC=check float8_dev.sh; TMO=480 SPEC=off float8_dev.sh

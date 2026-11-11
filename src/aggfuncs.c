@@ -169,6 +169,31 @@ pgstrom_partial_minmax_fp64(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(r);
 }
 
+/*
+ * float8 min / max of two partial states with PostgreSQL's float8 order: NaN is larger than every number (float8larger /
+ * float8smaller).  The Min() / Max() macros compare with < and >, which are false for a NaN: max(NaN, Infinity) came out as
+ * Infinity when the partial states were merged here (a CPU fallback of a GpuPreAgg, several partial rows).
+ */
+static inline float8
+__fp64_max(float8 a, float8 b)
+{
+	if (isnan(a))
+		return a;
+	if (isnan(b))
+		return b;
+	return a > b ? a : b;
+}
+
+static inline float8
+__fp64_min(float8 a, float8 b)
+{
+	if (isnan(a))
+		return b;
+	if (isnan(b))
+		return a;
+	return a < b ? a : b;
+}
+
 #define __MINMAX_TRANS_TEMPLATE(TYPE,OPER)								\
 	kagg_state__pminmax_##TYPE##_packed *state;							\
 	kagg_state__pminmax_##TYPE##_packed *arg;							\
@@ -213,7 +238,7 @@ pgstrom_fmin_trans_int64(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_fmin_trans_fp64(PG_FUNCTION_ARGS)
 {
-	__MINMAX_TRANS_TEMPLATE(fp64,Min);
+	__MINMAX_TRANS_TEMPLATE(fp64,__fp64_min);
 }
 
 PUBLIC_FUNCTION(Datum)
@@ -225,7 +250,7 @@ pgstrom_fmax_trans_int64(PG_FUNCTION_ARGS)
 PUBLIC_FUNCTION(Datum)
 pgstrom_fmax_trans_fp64(PG_FUNCTION_ARGS)
 {
-	__MINMAX_TRANS_TEMPLATE(fp64,Max);
+	__MINMAX_TRANS_TEMPLATE(fp64,__fp64_max);
 }
 
 PUBLIC_FUNCTION(Datum)
