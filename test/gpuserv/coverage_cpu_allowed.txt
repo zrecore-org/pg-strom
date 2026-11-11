@@ -9,13 +9,7 @@
 # Sources: srcfull.arrow / srcfull.parquet hold the cf columns except uuid and the unconstrained numeric (pg2arrow cannot write them).
 
 # Each distinct reason is one row of the gap table printed by the test, so the same gap always carries the same text here.
-join.key.null_safe.inner | IS NOT DISTINCT FROM as a join clause: a DistinctExpr is not an opcode and the clause is not hash-joinable | gap:A14
-join.nl.nonequi.* | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
-join.nl.range.inner | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
-join.nl.cross | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
-join.type.cross_small | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
 join.type.lateral | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
-aggjoin.type.nestloop | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
 spatial.join.nl_no_index | nest-loop join without a hash or GiST key (non-equi, range, cross, LATERAL): there is no GpuNestLoop | gap:A4
 join.type.not_in_subquery | NOT IN (subquery) is a hashed SubPlan, not an opcode | by-design
 join.type.text_qual | text ordering / LIKE under a non-C collation (the cluster's initdb locale) stay on the CPU | by-design
