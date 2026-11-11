@@ -14,10 +14,9 @@ three places:
 
 GPU larger runners are generally available (2024-07-08) for Linux and Windows: NVIDIA Tesla T4. They are a *larger runner*, which
 GitHub offers to organizations and enterprises on the Team or Enterprise Cloud plan, not to repositories owned by a personal
-account. `zrecore/pg-strom` is a fork under a personal account, so:
+account. `zrecore-org/pg-strom` is now under an organization (moved from a personal account on 2026-11-10), so:
 
-1. Put the repository in an organization on the Team plan (fork `heterodb/pg-strom` into the organization, or create the
-   repository there and push the branch).
+1. Make sure the organization is on the Team plan (GPU larger runners need it).
 2. As an organization owner: Settings > Actions > Runners > New runner > New GitHub-hosted runner. Pick the Linux (Ubuntu) image,
    the GPU size, a name (for example `gpu-t4`) and a runner group that includes the repository.
 3. In the repository: Settings > Secrets and variables > Actions > Variables > New repository variable
