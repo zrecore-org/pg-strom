@@ -1,1 +1,1 @@
-SPEC=off nvidia_probe.sh; SPEC=default nvidia_probe.sh; SPEC=check nvidia_probe.sh
+TMO=150 SPEC=off F8PARTS=agg float8_dev.sh; TMO=150 SPEC=check PGSTROM_GPUSERV_SPEC_LOG=1 F8PARTS=agg float8_dev.sh; TMO=600 SPEC=check F8PARTS=join+agg float8_dev.sh
