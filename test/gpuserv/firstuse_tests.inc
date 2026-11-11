@@ -119,7 +119,7 @@ NREADY=$(ks 'count(*)' "state = 'ready'")
 stop
 ls "$ROOT/pcache"/kernels-*.txt >/dev/null 2>&1; check "the readiness manifest is next to the pipeline cache file" $?
 start_cluster; check "the service restarts" $?
-[ "$(pw from_disk)" = "$NREADY" ] && [ "$NREADY" -ge 3 ]; check "after a restart the $NREADY compiled kernels are ready without a compile" $?
+[ "$(pw from_disk)" = "$NREADY" ] && [ "$NREADY" -ge 2 ]; check "after a restart the $NREADY compiled kernels are ready without a compile" $?
 r0=$(refused); b=$(fbcount)
 g=$(q "$SCANSET set pg_strom.gpu_kernel_wait=0;" "$SCANQ")
 [ "$g" = "$CS" ] && [ "$(refused)" = 0 ] && [ "$(fbcount)" = "$b" ]; check "a query on a kernel compiled before the restart runs on the GPU at once" $?

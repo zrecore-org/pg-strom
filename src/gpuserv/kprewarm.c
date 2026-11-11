@@ -61,7 +61,7 @@ static const struct { const char *name; const unsigned char *spv; const unsigned
 
 /* the base names (without the tier suffix) a typical program uses: the smallest register file of each family */
 static const char *const common_bases[] = {
-	"gpuscan8", "gpuagg8_4", "gagg16_4", "gtab16", "gpujoin8", "jagg16_4", "jgagg16_4",
+	"gpuscan8", "gpuagg8_4", "gpuagg8_12", "gagg16_4", "gagg16_12", "gtab16", "gpujoin8", "jagg16_4", "jgagg16_4",
 	"gpuarrow8", "aagg16_4", "agagg16_4", "agtab16", "ajoin16", "ajagg16_4", "ajgagg16_4",
 	"jagg32_4", "jgagg32_4", "ajagg32_4", "ajgagg32_4", NULL
 };

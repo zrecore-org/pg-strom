@@ -156,8 +156,8 @@ What PG-Strom does about it:
 1. **Background prewarm.** After the service is ready, a low-priority thread compiles a set of kernels one at a
    time, only while no task is running (it waits for 2 s of quiet before each kernel; `PGSTROM_GPUSERV_PREWARM_IDLE_MS`).
    `pg_strom.gpu_prewarm` picks the set: `lite` (default: the `lite` and `nogeom` tiers of the common kernels: scan,
-   aggregation, GROUP BY, group table, join, join aggregation and the Arrow twins, 36 kernels), `geometry` (also the
-   geometry tiers of the join kernels, 66), `all` (every kernel including the full tier, 207; about an hour on a
+   aggregation, GROUP BY, group table, join, join aggregation and the Arrow twins, 40 kernels), `geometry` (also the
+   geometry tiers of the join kernels, 70), `all` (every kernel including the full tier, 207; about an hour on a
    cold machine), `off`.
 2. **Readiness gate.** A query whose kernel is not compiled yet must not stall for minutes. Its first task waits for
    the compile for `pg_strom.gpu_kernel_wait` (default 2000 ms) and is then refused with the message "kernel ... is not
