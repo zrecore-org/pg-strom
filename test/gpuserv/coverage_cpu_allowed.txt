@@ -26,7 +26,6 @@ agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU fun
 agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
-aggjoin.type.group_three_keys | GROUP BY with three or more keys over a join: the join kernels hold two (the session-wide table is not ported to the join walk) | gap:A3
 agg.group.grouping_sets | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14

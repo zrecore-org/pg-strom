@@ -185,6 +185,10 @@ add("aggjoin.type.group_fact_key", "aggjoin", "aggjoin", "select f.g4, count(*),
 add("aggjoin.type.group_two_keys", "aggjoin", "aggjoin", "select f.g4, d.dg, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1, 2")
 add("aggjoin.type.group_three_keys", "aggjoin", "aggjoin",
     "select f.g4, f.g2, d.dg, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1, 2, 3")
+add("aggjoin.type.group_four_keys", "aggjoin", "aggjoin",
+    "select f.g4, f.g2, d.dg, f.gb, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1, 2, 3, 4")
+add("aggjoin.type.group_float4_key", "aggjoin", "aggjoin", "select f.gf4, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1")
+add("aggjoin.type.group_float8_key", "aggjoin", "aggjoin", "select f.gf8, d.dg, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1, 2")
 add("aggjoin.type.group_text_key", "aggjoin", "aggjoin", "select f.gt, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1")
 add("aggjoin.type.sum_numeric", "aggjoin", "aggjoin", "select d.dg, sum(f.vn) from cf f join cd d on f.k4 = d.k4 group by 1")
 add("aggjoin.type.sum_float8", "aggjoin", "aggjoin", "select d.dg, sum(f.vf8) from cf f join cd d on f.k4 = d.k4 group by 1")

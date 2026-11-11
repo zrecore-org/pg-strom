@@ -223,6 +223,8 @@ bool	scan_vm_agg_action_supported(int action);
  * SCAN_GROUP_KEYS_SHARED for the shared-memory kernels (gagg.slang's GA_NK), Arrow/GPU-Cache sources and joins */
 #define SCAN_GROUP_KEYS		4
 #define SCAN_GROUP_KEYS_SHARED	2
+/* GROUP BY over a join: the key columns of the workgroup tables of jgagg.slang (its GA_NK) */
+#define SCAN_GROUP_KEYS_JOIN	4
 #define SCAN_JOIN_MAXDEPTH	4		/* inner relations of one GpuJoin; must equal JOIN_MAXD of join.slang */
 bool	scan_vm_groupkey_type_supported(int type_code);
 bool	scan_vm_joinkey_type_supported(int type_code);

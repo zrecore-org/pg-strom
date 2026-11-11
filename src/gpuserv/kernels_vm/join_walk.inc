@@ -531,7 +531,7 @@
 #ifdef SPEC_PROG
                 spec_stage(regs, tid);
 #else
-                int64_t k0 = 0, k1 = 0;
+                int64_t k0 = 0, k1 = 0, k2 = 0, k3 = 0;
                 uint kn = 0;
                 if (nkeys > 0)
                 {
@@ -543,9 +543,31 @@
                     Reg r = regs[prog[keyoff + 1]];
                     if (r.isnull != 0) kn |= 2u; else k1 = r.v;
                 }
+                if (nkeys > 2)
+                {
+                    Reg r = regs[prog[keyoff + 2]];
+                    if (r.isnull != 0) kn |= 4u; else k2 = r.v;
+                }
+                if (nkeys > 3)
+                {
+                    Reg r = regs[prog[keyoff + 3]];
+                    if (r.isnull != 0) kn |= 8u; else k3 = r.v;
+                }
                 st_key[tid * GA_NK + 0] = k0;
                 st_key[tid * GA_NK + 1] = k1;
-                st_hash[tid] = hash_keys(k0, k1, kn);
+                st_key[tid * GA_NK + 2] = k2;
+                st_key[tid * GA_NK + 3] = k3;
+                {
+                    uint h = 0x811c9dc5u;
+                    h = hash_fold(h, k0, kn & 1u);
+                    h = hash_fold(h, k1, (kn >> 1) & 1u);
+                    if (nkeys > 2)
+                    {
+                        h = hash_fold(h, k2, (kn >> 2) & 1u);
+                        h = hash_fold(h, k3, (kn >> 3) & 1u);
+                    }
+                    st_hash[tid] = hash_fin(h);
+                }
                 st_kn[tid] = kn | 0x80000000u;
                 for (uint k = 0; k < naggs; k++)
                 {
@@ -597,9 +619,11 @@
             }
             if (emit && fits)
             {
-                uint kn = st_kn[tid] & 3u;
+                uint kn = st_kn[tid] & 15u;
                 int64_t k0 = st_key[tid * GA_NK + 0];
                 int64_t k1 = st_key[tid * GA_NK + 1];
+                int64_t k2 = st_key[tid * GA_NK + 2];
+                int64_t k3 = st_key[tid * GA_NK + 3];
                 uint s = st_hash[tid] % GA_C;
                 for (uint p = 0; p < GA_MAXPROBE; p++)
                 {
@@ -617,21 +641,25 @@
                     }
                     // somebody owns the slot: is it our key?
                     uint skn;
-                    int64_t s0, s1;
+                    int64_t s0, s1, s2, s3;
                     if (o == COMMITTED)
                     {
                         skn = sh_knull[s];
                         s0 = sh_key[s * GA_NK + 0];
                         s1 = sh_key[s * GA_NK + 1];
+                        s2 = sh_key[s * GA_NK + 2];
+                        s3 = sh_key[s * GA_NK + 3];
                     }
                     else
                     {
                         uint c = o - 1;                     // a thread of this round
-                        skn = st_kn[c] & 3u;
+                        skn = st_kn[c] & 15u;
                         s0 = st_key[c * GA_NK + 0];
                         s1 = st_key[c * GA_NK + 1];
+                        s2 = st_key[c * GA_NK + 2];
+                        s3 = st_key[c * GA_NK + 3];
                     }
-                    if (skn == kn && s0 == k0 && s1 == k1)
+                    if (skn == kn && s0 == k0 && s1 == k1 && s2 == k2 && s3 == k3)
                     {
                         slot = s;
                         break;
@@ -648,7 +676,7 @@
                 if (idx < ovf_cap)
                 {
                     uint rb = ovf_base + 1 + idx * OV_REC;
-                    outb[rb + 0] = st_kn[tid] & 3u;
+                    outb[rb + 0] = st_kn[tid] & 15u;
                     for (uint i = 0; i < GA_NK; i++)
                     {
                         uint64_t kv = uint64_t(st_key[tid * GA_NK + i]);
@@ -771,9 +799,11 @@
                 if (o != 0 && o != COMMITTED)
                 {
                     uint c = o - 1;
-                    sh_knull[s] = st_kn[c] & 3u;
+                    sh_knull[s] = st_kn[c] & 15u;
                     sh_key[s * GA_NK + 0] = st_key[c * GA_NK + 0];
                     sh_key[s * GA_NK + 1] = st_key[c * GA_NK + 1];
+                    sh_key[s * GA_NK + 2] = st_key[c * GA_NK + 2];
+                    sh_key[s * GA_NK + 3] = st_key[c * GA_NK + 3];
                     sh_owner[s] = COMMITTED;
                 }
             }
