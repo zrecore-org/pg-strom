@@ -26,14 +26,11 @@ agg.group.expr_text | GROUP BY key computed to a non-device type or by a CPU fun
 agg.group.expr_case | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.interval_key | GROUP BY key computed to a non-device type or by a CPU function (extract(), upper(), CASE returning text, interval) | gap:A6
 agg.group.json_key | GROUP BY a computed jsonb ->> text value (computed jsonb/text stays on the CPU) | gap:A8
-aggjoin.type.group_three_keys | GROUP BY with three or more keys over a join: the join kernels hold two (the session-wide table is not ported to the join walk) | gap:A3
 agg.group.grouping_sets | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.rollup | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.cube | GROUPING SETS / ROLLUP / CUBE: GpuPreAgg does not take grouping sets | gap:A14
 agg.group.composite_key | GROUP BY a row value or an array: not hashable on the device | by-design
 agg.group.array_key | GROUP BY a row value or an array: not hashable on the device | by-design
-agg.fn.stddev_int | variance / stddev of integer and numeric arguments: PostgreSQL's state is exact (int128 / numeric, numeric result), a float state cannot reproduce it, and the exact int128-limb partial with a numeric final function is not built (A10 part 5; float4/float8 variance, stddev, covar, corr and regr_* run on the GPU since 2026-11-09) | gap:A10
-agg.fn.variance_int | variance / stddev of integer and numeric arguments: PostgreSQL's state is exact (int128 / numeric, numeric result), a float state cannot reproduce it, and the exact int128-limb partial with a numeric final function is not built (A10 part 5; float4/float8 variance, stddev, covar, corr and regr_* run on the GPU since 2026-11-09) | gap:A10
 agg.fn.sum.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.avg.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 agg.fn.min.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6

@@ -1653,11 +1653,12 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				/* A10: PostgreSQL's float8_accum / float8_regr_accum states (variance, stddev; covar, corr, regr_*) */
 				case KAGG_ACTION__STDDEV:		cls = 10; break;
 				case KAGG_ACTION__COVAR:		cls = 11; break;
+				case KAGG_ACTION__STDDEV_INT:	cls = 13; break;		/* exact integer variance: three entries (13, 12, 12) */
 				default:
 					fail(&b, "aggregate action %u is not implemented by the Vulkan service", d->action);
 					goto error;
 			}
-			if (cls == 11 && nagg + 3 > SCAN_AGG_MAX)
+			if ((cls == 11 || cls == 13) && nagg + 3 > SCAN_AGG_MAX)
 			{
 				fail(&b, "the aggregates need %d accumulators (up to %d are supported; covar/corr/regr take three each)", nagg + 3, SCAN_AGG_MAX);
 				goto error;
@@ -1712,7 +1713,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			agg_tab[4 * nagg + 3] = (prog->agg_scale[nagg] >= 0) ? (uint32_t) prog->agg_scale[nagg] + 1 : 0;
 			prog->agg_ent_action[nagg] = (uint16_t) d->action;
 			nagg++;
-			if (cls == 11)
+			if (cls == 11 || cls == 13)
 				for (int c = 0; c < 2; c++)
 				{
 					agg_tab[4 * nagg + 0] = 12;
@@ -1730,6 +1731,11 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 				fail(&b, "a numeric GROUP BY key %d is not an output column", k + 1);
 				goto error;
 			}
+		if (nagg > SCAN_AGG_MAX)
+		{
+			fail(&b, "the aggregates need %d accumulators (up to %d are supported)", nagg, SCAN_AGG_MAX);
+			goto error;
+		}
 		for (int k = 0; k < nagg; k++)
 			if ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10)
 				b.feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
@@ -2055,6 +2061,7 @@ join_agg_class(uint32_t action)
 		case KAGG_ACTION__PMAX_FP64:	return 8;
 		case KAGG_ACTION__STDDEV:		return 10;
 		case KAGG_ACTION__COVAR:		return 11;
+		case KAGG_ACTION__STDDEV_INT:	return 13;
 		default:
 			break;
 	}
@@ -2091,7 +2098,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 	const kern_expression *kagg = SESSION_KEXP_GROUPBY_ACTIONS(session);
 	const kern_expression *ksave = KEXP_FIRST_ARG(kagg);
 	int			slot_reg[SCAN_MAX_REGS];
-	int			key_slot[SCAN_GROUP_KEYS_SHARED];
+	int			key_slot[SCAN_GROUP_KEYS_JOIN];
 	int			perm = b->nslots;
 	int			nagg = 0, nkeys = 0, nattrs_out = kagg->u.pagg.nattrs;
 
@@ -2107,8 +2114,8 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 			((const char *) session + session->xpucode_groupby_keyhash);
 		const kern_expression *kk = KEXP_FIRST_ARG(khash);
 
-		if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS_SHARED)
-			return fail(b, "%u GROUP BY keys (up to %d are supported over a join)", khash->nr_args, SCAN_GROUP_KEYS_SHARED);
+		if (khash->nr_args < 1 || khash->nr_args > SCAN_GROUP_KEYS_JOIN)
+			return fail(b, "%u GROUP BY keys (up to %d are supported over a join)", khash->nr_args, SCAN_GROUP_KEYS_JOIN);
 		for (uint32_t j = 0; j < khash->nr_args; j++, kk = KEXP_NEXT_ARG(kk))
 		{
 			int		bytes, vt, r, nx = perm;
@@ -2116,16 +2123,31 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 			if (kk->opcode != FuncOpCode__SaveExpr || kk->nr_args != 1 || kk->u.save.sv_slot_id >= b->nslots)
 				return fail(b, "unexpected GROUP BY key element %s", scan_vm_opcode_name(kk->opcode));
 			vt = reg_vtype(kk->exptype, &bytes);
-			if (vt != SOP_VT_INT && vt != SOP_VT_BOOL)
+			if (vt != SOP_VT_INT && vt != SOP_VT_BOOL && vt != SOP_VT_FLOAT4 && vt != SOP_VT_FLOAT8)
 				return fail(b, "GROUP BY key of an unsupported type (opcode type %u)", kk->exptype);
 			r = expr_to_reg(b, KEXP_FIRST_ARG(kk), &nx);
 			if (r < 0)
 				return -1;
 			if (r >= (int) b->nslots)
 				perm = r + 1;
+			if (vt == SOP_VT_FLOAT4 || vt == SOP_VT_FLOAT8)
+			{
+				/* -0 and +0 are one group (and all NaNs, which are equal bit patterns): the key is x + 0.0 (see the scan builder) */
+				int		z, d;
+
+				nx = perm;
+				z = new_reg(b, &nx);
+				d = new_reg(b, &nx);
+				if (z < 0 || d < 0 || emit(b, SOP_CONST, z, 0, 0, 0, 0) < 0 ||
+					emit(b, vt == SOP_VT_FLOAT4 ? SOP_FARITH : SOP_DARITH, d, r, z, SOP_ARITH_PL, 0) < 0)
+					return -1;
+				r = d;
+				perm = r + 1;
+			}
 			slot_reg[kk->u.save.sv_slot_id] = r;
 			key_slot[nkeys] = (int) kk->u.save.sv_slot_id;
 			key_reg_tab[nkeys] = (uint32_t) r;
+			prog->key_scale[nkeys] = -1;
 			nkeys++;
 		}
 	}
@@ -2174,7 +2196,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 		if (cls == 0)
 			return fail(b, "aggregate action %u is not implemented by the Vulkan service", d->action);
 		prog->agg_of_col[i] = (int8_t) nagg;
-		if (cls == 11 && nagg + 3 > SCAN_AGG_MAX)
+		if ((cls == 11 || cls == 13) && nagg + 3 > SCAN_AGG_MAX)
 			return fail(b, "the aggregates need %d accumulators (up to %d are supported; covar/corr/regr take three each)", nagg + 3, SCAN_AGG_MAX);
 		for (int k = 0; k < 3; k++)
 		{
@@ -2200,7 +2222,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 		agg_tab[4 * nagg + 3] = 0;
 		prog->agg_ent_action[nagg] = (uint16_t) d->action;
 		nagg++;
-		if (cls == 11)
+		if (cls == 11 || cls == 13)
 			for (int c = 0; c < 2; c++)
 			{
 				agg_tab[4 * nagg + 0] = 12;
@@ -2212,6 +2234,8 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 				nagg++;
 			}
 	}
+	if (nagg > SCAN_AGG_MAX)
+		return fail(b, "the aggregates need %d accumulators (up to %d are supported)", nagg, SCAN_AGG_MAX);
 	for (int k = 0; k < nagg; k++)
 		if ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10)
 			b->feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
@@ -2268,7 +2292,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	int			max_src = 0;
 	int			agg_mode, nagg = 0, nkeys = 0;
 	uint32_t	agg_tab[4 * SCAN_AGG_MAX];
-	uint32_t	key_reg_tab[SCAN_GROUP_KEYS_SHARED];
+	uint32_t	key_reg_tab[2 * SCAN_GROUP_KEYS_JOIN];		/* registers, then the scale words (none over a join: zeros) */
 
 	memset(prog, 0, sizeof(*prog));
 	memset(&b, 0, sizeof(b));
@@ -2570,7 +2594,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 	}
 	for (int depth = 1; depth <= nrels; depth++)
 		inc_total += incols[depth];
-	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp + 4 * nagg + nkeys + b.pool_len / 4;
+	nwords = PROG_HDR_WORDS + ncols + inc_total + JDT_WORDS * nrels + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys + b.pool_len / 4;
 	if (nwords > 16384)
 	{
 		fail(&b, "the join program is too large");
@@ -2663,7 +2687,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 		}
 		w[17] = prog->oj_words;
 		/* the constant pool (string literals) follows the aggregate table and the key registers */
-		w[20] = insnoff + 6 * b.ninsn + ncomp + 4 * nagg + nkeys;
+		w[20] = insnoff + 6 * b.ninsn + ncomp + 4 * nagg + 2 * nkeys;
 		if (b.pool_len > 0)
 			memcpy(w + w[20], b.pool, b.pool_len);
 		/* which parts of the program can recheck (A14): see scan_prog.h */
@@ -2693,6 +2717,7 @@ scan_prog_build_join(const kern_session_info *session, const kern_data_store *kd
 			w[13] = aggoff + 4 * nagg;
 			memcpy(w + aggoff, agg_tab, sizeof(uint32_t) * 4 * nagg);
 			memcpy(w + aggoff + 4 * nagg, key_reg_tab, sizeof(uint32_t) * nkeys);
+			/* (the scale words after the registers stay zero: no numeric key over a join) */
 		}
 	}
 	prog->words = w;

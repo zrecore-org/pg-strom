@@ -264,7 +264,7 @@ if [ -n "$(f8part agg)" ]; then
 	runagg f8_var "a qual" "select round(var_pop(xo)::numeric, 4), round(regr_slope(yo, xo)::numeric, 5), count(*) from %T where i % 7 = 1 and xs > 0"
 	runagg f8_var "float4 arguments" "select round(variance(k)::numeric, 5), round(stddev_pop(k)::numeric, 6), round(corr(k, ys)::numeric, 8), round(regr_slope(ys, k)::numeric, 7), round(covar_pop(k, k)::numeric, 5) from %T"
 	runagg f8_var "computed arguments" "select round(var_pop(xs * 2 + 1)::numeric, 5), round(covar_pop(xs, ys * 3 - xs)::numeric, 4), round(corr(xs + ys, xs - ys)::numeric, 8) from %T where i % 5 = 2"
-	runagg_any f8_var "variance and stddev of integers stay on the CPU (exact numeric state) and agree" "select var_pop(g2), stddev(g2), variance(g) from %T"
+	runagg_any f8_var "variance and stddev of integers (exact integer state, A10 part 5b) agree" "select var_pop(g2), stddev(g2), variance(g) from %T"
 	runagg f8_var "variance together with sum, count, min and max" "select count(*), round(sum(xs)::numeric, 3), min(xo), max(yo), round(var_pop(xs)::numeric, 6), round(corr(ys, xs)::numeric, 8), round(avg(ys)::numeric, 6) from %T"
 	runagg f8_var "four regression aggregates at once (twelve accumulators)" "select round(regr_slope(ys, xs)::numeric, 6), round(regr_intercept(ys, xs)::numeric, 5), round(corr(yn, xn)::numeric, 8), round(covar_pop(yo, xo)::numeric, 3) from %T"
 	runagg_any f8_var "regr_count stays on the CPU" "select regr_count(ys, xs), regr_count(yn, xn) from %T"
@@ -289,7 +289,7 @@ if [ -n "$(f8part agg)" ]; then
 	rungrp f8_var "variance next to other float8 and integer aggregates" "select g, count(*), round(sum(xs)::numeric, 3), min(xo), max(yo), round(var_pop(xs)::numeric, 6), round(regr_slope(ys, xs)::numeric, 6), round(avg(xs)::numeric, 6) from %T group by 1"
 	rungrp f8_var "float4 arguments per group" "select g, round(variance(k)::numeric, 5), round(corr(k, ys)::numeric, 8) from %T group by 1"
 	GRPANY=1
-	rungrp f8_var "variance of integers per group (CPU)" "select g, var_pop(g2), stddev(g300) from %T group by 1"
+	rungrp f8_var "variance of integers per group (A10 part 5b)" "select g, var_pop(g2), stddev(g300) from %T group by 1"
 	GRPANY=0
 	runerr_agg f8_1 "variance overflows in a group" "select g5, var_pop(z) from %T where z = 1.7976931348623157e308 or z = -1.7976931348623157e308 group by 1" "value out of range: overflow"
 	runerr_agg f8_1 "covariance overflows in a group" "select g5, covar_samp(z, z) from %T where z = 1.7976931348623157e308 or z = -1.7976931348623157e308 group by 1" "value out of range: overflow"

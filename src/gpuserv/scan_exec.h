@@ -217,9 +217,9 @@ void	scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32
 /* the keys of the groups the session has so far (what a specialized GROUP BY kernel is made for) */
 void	scan_group_keystats(const agg_state *st, int nkeys, spec_keystats *ks);
 int		scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-								uint32_t cap, uint32_t rec_words, uint32_t blk_words);
+								uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk);
 int		scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
-								  uint32_t ov_rec);
+								  uint32_t ov_rec, int nk);
 void	scan_join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out, size_t base);
 
 /* Arrow record batches as the outer relation (arrow_exec.c): aggregation, GROUP BY, join, join aggregation */

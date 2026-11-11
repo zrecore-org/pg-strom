@@ -58,6 +58,9 @@ PG_FUNCTION_INFO_V1(pgstrom_favg_final_fp);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_num);
 PG_FUNCTION_INFO_V1(pgstrom_favg_final_numeric);
 
+PG_FUNCTION_INFO_V1(pgstrom_partial_varint2);
+PG_FUNCTION_INFO_V1(pgstrom_partial_varint4);
+PG_FUNCTION_INFO_V1(pgstrom_partial_varint8);
 PG_FUNCTION_INFO_V1(pgstrom_partial_variance);
 PG_FUNCTION_INFO_V1(pgstrom_stddev_trans);
 PG_FUNCTION_INFO_V1(pgstrom_stddev_samp_final);
@@ -1107,6 +1110,211 @@ __call_float8_final(PGFunction fn, ArrayType *a, bool *isnull)
 	return datum;
 }
 
+
+/*
+ * variance / stddev of int2, int4, int8 (A10): PostgreSQL's integer accumulator state, exactly (N, sum x, sum x^2). The GPU service
+ * adds them as 128 / 192-bit integers (any order gives the same sums); the final function hands the state to PostgreSQL's own
+ * numeric_var_samp, numeric_var_pop, numeric_stddev_samp, numeric_stddev_pop (numeric_stddev_internal), so the numeric result is
+ * PostgreSQL's, digit for digit. The state is passed in numeric_serialize()'s wire format (N, sumX, sumX2 as numerics, maxScale,
+ * maxScaleCount, NaNcount, pInfcount, nInfcount) through numeric_deserialize(); test/gpuserv/intvar_tests.inc compares the results.
+ */
+typedef unsigned __int128 __ivar_u128;
+
+static void
+__ivar_add_sq(kagg_state__ivar_packed *st, __ivar_u128 sq)
+{
+	__ivar_u128	lo = ((__ivar_u128) st->sum_x2[1] << 64) | st->sum_x2[0];
+
+	lo += sq;
+	if (lo < sq)
+		st->sum_x2[2] += 1;
+	st->sum_x2[0] = (uint64_t) lo;
+	st->sum_x2[1] = (uint64_t) (lo >> 64);
+}
+
+static void
+__ivar_add_state(kagg_state__ivar_packed *st, const kagg_state__ivar_packed *a)
+{
+	__ivar_u128	sx = ((__ivar_u128) st->sum_x[1] << 64) | st->sum_x[0];
+	__ivar_u128	ax = ((__ivar_u128) a->sum_x[1] << 64) | a->sum_x[0];
+
+	sx += ax;
+	st->sum_x[0] = (uint64_t) sx;
+	st->sum_x[1] = (uint64_t) (sx >> 64);
+	__ivar_add_sq(st, ((__ivar_u128) a->sum_x2[1] << 64) | a->sum_x2[0]);
+	st->sum_x2[2] += a->sum_x2[2];
+	st->nitems += a->nitems;
+}
+
+static kagg_state__ivar_packed *
+__ivar_one_row(int64 x)
+{
+	kagg_state__ivar_packed *r = palloc0(sizeof(kagg_state__ivar_packed));
+	uint64_t	ax = (x < 0) ? (0 - (uint64_t) x) : (uint64_t) x;
+	__ivar_u128	sx = (__ivar_u128)(__int128) x;
+
+	r->nitems = 1;
+	r->sum_x[0] = (uint64_t) sx;
+	r->sum_x[1] = (uint64_t) (sx >> 64);
+	__ivar_add_sq(r, (__ivar_u128) ax * ax);
+	SET_VARSIZE(r, sizeof(kagg_state__ivar_packed));
+	return r;
+}
+
+static Datum
+__partial_varint(FunctionCallInfo fcinfo, int64 x)
+{
+	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+		PG_RETURN_NULL();
+	PG_RETURN_POINTER(__ivar_one_row(x));
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_varint2(PG_FUNCTION_ARGS)
+{
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	return __partial_varint(fcinfo, (int64) PG_GETARG_INT16(0));
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_varint4(PG_FUNCTION_ARGS)
+{
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	return __partial_varint(fcinfo, (int64) PG_GETARG_INT32(0));
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_varint8(PG_FUNCTION_ARGS)
+{
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+	return __partial_varint(fcinfo, PG_GETARG_INT64(0));
+}
+
+/* the combine function of the Agg node for the integer state */
+static Datum
+__ivar_trans(FunctionCallInfo fcinfo, MemoryContext aggcxt)
+{
+	kagg_state__ivar_packed *state;
+	kagg_state__ivar_packed *arg = (kagg_state__ivar_packed *) PG_GETARG_BYTEA_P(1);
+
+	if (PG_ARGISNULL(0))
+	{
+		state = MemoryContextAlloc(aggcxt, sizeof(*state));
+		memcpy(state, arg, sizeof(*state));
+	}
+	else
+	{
+		state = (kagg_state__ivar_packed *) PG_GETARG_BYTEA_P(0);
+		__ivar_add_state(state, arg);
+	}
+	PG_RETURN_POINTER(state);
+}
+
+/* a numeric as numericvar_serialize() writes it: ndigits, weight, sign, dscale (int32 each), the base-10000 digits (int16) */
+static void
+__ivar_send_numeric(StringInfo buf, bool neg, const uint64_t mag[3])
+{
+	uint32_t	w[6];
+	int16		dg[16];			/* least significant group first */
+	int			nd = 0, first = 0;
+
+	for (int i = 0; i < 3; i++)
+	{
+		w[2 * i] = (uint32_t) mag[i];
+		w[2 * i + 1] = (uint32_t) (mag[i] >> 32);
+	}
+	for (;;)
+	{
+		uint64_t	rem = 0;
+		bool		any = false;
+
+		for (int i = 5; i >= 0; i--)
+		{
+			uint64_t	cur = (rem << 32) | w[i];
+
+			w[i] = (uint32_t) (cur / 10000);
+			rem = cur % 10000;
+			if (w[i])
+				any = true;
+		}
+		dg[nd++] = (int16) rem;
+		if (!any)
+			break;
+	}
+	while (nd > 0 && dg[nd - 1] == 0)
+		nd--;					/* the most significant group is never zero unless the value is */
+	while (first < nd && dg[first] == 0)
+		first++;				/* trailing zero groups are dropped, the weight stays */
+	if (nd == 0)
+	{
+		pq_sendint32(buf, 0);
+		pq_sendint32(buf, 0);
+		pq_sendint32(buf, 0);	/* NUMERIC_POS */
+		pq_sendint32(buf, 0);
+		return;
+	}
+	pq_sendint32(buf, nd - first);
+	pq_sendint32(buf, nd - 1);
+	pq_sendint32(buf, neg ? 0x4000 : 0x0000);
+	pq_sendint32(buf, 0);
+	for (int i = nd - 1; i >= first; i--)
+		pq_sendint16(buf, dg[i]);
+}
+
+/* the final function: PostgreSQL's numeric_var_samp ... numeric_stddev_pop on the state rebuilt by numeric_deserialize() */
+static Datum
+__ivar_final(FunctionCallInfo fcinfo, PGFunction numfn)
+{
+	kagg_state__ivar_packed *st = (kagg_state__ivar_packed *) PG_GETARG_BYTEA_P(0);
+	StringInfoData buf;
+	__ivar_u128	sx = ((__ivar_u128) st->sum_x[1] << 64) | st->sum_x[0];
+	bool		neg = ((int64_t) st->sum_x[1] < 0);
+	uint64_t	mag[3];
+	uint64_t	mag2[3];
+	bytea	   *ser;
+	LOCAL_FCINFO(dfc, 2);
+	LOCAL_FCINFO(ffc, 1);
+	Datum		state, result;
+
+	if (neg)
+		sx = (__ivar_u128) 0 - sx;
+	mag[0] = (uint64_t) sx;
+	mag[1] = (uint64_t) (sx >> 64);
+	mag[2] = 0;
+	mag2[0] = st->sum_x2[0];
+	mag2[1] = st->sum_x2[1];
+	mag2[2] = st->sum_x2[2];
+	pq_begintypsend(&buf);
+	pq_sendint64(&buf, st->nitems);
+	__ivar_send_numeric(&buf, neg, mag);
+	__ivar_send_numeric(&buf, false, mag2);
+	pq_sendint32(&buf, 0);		/* maxScale */
+	pq_sendint64(&buf, 0);		/* maxScaleCount */
+	pq_sendint64(&buf, 0);		/* NaNcount */
+	pq_sendint64(&buf, 0);		/* pInfcount */
+	pq_sendint64(&buf, 0);		/* nInfcount */
+	ser = pq_endtypsend(&buf);
+
+	InitFunctionCallInfoData(*dfc, NULL, 2, InvalidOid, fcinfo->context, NULL);
+	dfc->args[0].value = PointerGetDatum(ser);
+	dfc->args[0].isnull = false;
+	dfc->args[1].value = PointerGetDatum(NULL);
+	dfc->args[1].isnull = false;
+	state = numeric_deserialize(dfc);
+	if (dfc->isnull)
+		PG_RETURN_NULL();
+	InitFunctionCallInfoData(*ffc, NULL, 1, InvalidOid, fcinfo->context, NULL);
+	ffc->args[0].value = state;
+	ffc->args[0].isnull = false;
+	result = numfn(ffc);
+	if (ffc->isnull)
+		PG_RETURN_NULL();
+	PG_RETURN_DATUM(result);
+}
+
 PUBLIC_FUNCTION(Datum)
 pgstrom_partial_variance(PG_FUNCTION_ARGS)
 {
@@ -1135,6 +1343,9 @@ pgstrom_stddev_trans(PG_FUNCTION_ARGS)
 
 	if (!AggCheckCallContext(fcinfo, &aggcxt))
 		elog(ERROR, "aggregate function called in non-aggregate context");
+	/* the exact integer state of variance(int2/int4/int8) (A10) has its own size */
+	if (!PG_ARGISNULL(1) && VARSIZE(PG_GETARG_BYTEA_P(1)) == sizeof(kagg_state__ivar_packed))
+		return __ivar_trans(fcinfo, aggcxt);
 	if (PG_ARGISNULL(0))
 	{
 		if (PG_ARGISNULL(1))
@@ -1183,21 +1394,26 @@ STDDEV_FINAL(pgstrom_stddev_sampf_final, float8_stddev_samp)
 STDDEV_FINAL(pgstrom_stddev_popf_final, float8_stddev_pop)
 
 /* the numeric-typed finals (the variance of integers and numerics: not offered to the GPU, kept for the catalog) */
-#define STDDEV_FINAL_NUMERIC(NAME, FLOATFN)									\
+#define STDDEV_FINAL_NUMERIC(NAME, FLOATFN, NUMFN)							\
 PUBLIC_FUNCTION(Datum)														\
 NAME(PG_FUNCTION_ARGS)														\
 {																			\
-	Datum	datum = FLOATFN(fcinfo);										\
+	Datum	datum;															\
 																			\
+	if (PG_ARGISNULL(0))													\
+		PG_RETURN_NULL();													\
+	if (VARSIZE(PG_GETARG_BYTEA_P(0)) == sizeof(kagg_state__ivar_packed))	\
+		return __ivar_final(fcinfo, NUMFN);									\
+	datum = FLOATFN(fcinfo);												\
 	if (fcinfo->isnull)														\
 		PG_RETURN_NULL();													\
 	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, datum));			\
 }
 
-STDDEV_FINAL_NUMERIC(pgstrom_var_samp_final, pgstrom_var_sampf_final)
-STDDEV_FINAL_NUMERIC(pgstrom_var_pop_final, pgstrom_var_popf_final)
-STDDEV_FINAL_NUMERIC(pgstrom_stddev_samp_final, pgstrom_stddev_sampf_final)
-STDDEV_FINAL_NUMERIC(pgstrom_stddev_pop_final, pgstrom_stddev_popf_final)
+STDDEV_FINAL_NUMERIC(pgstrom_var_samp_final, pgstrom_var_sampf_final, numeric_var_samp)
+STDDEV_FINAL_NUMERIC(pgstrom_var_pop_final, pgstrom_var_popf_final, numeric_var_pop)
+STDDEV_FINAL_NUMERIC(pgstrom_stddev_samp_final, pgstrom_stddev_sampf_final, numeric_stddev_samp)
+STDDEV_FINAL_NUMERIC(pgstrom_stddev_pop_final, pgstrom_stddev_popf_final, numeric_stddev_pop)
 
 /*
  * COVAR/REGR_*

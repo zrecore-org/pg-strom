@@ -5,6 +5,7 @@
 #
 #   sh test/gpuserv/locked_test.sh "$PWD" keys_dev.sh
 #
+# JKEYS_ONLY=1 runs only jkeys_tests.inc (GROUP BY keys over a join: three and four keys, float keys) and skips the Arrow / GPU-Cache / big tables.
 # ADHOC=<file> runs the SQL file (psql -f) against the loaded data first (SKIP_TESTS=1: instead of the tests); NROWS (default 300000) sizes the big tables.
 PGBIN=${PGBIN:-/opt/homebrew/opt/postgresql@17/bin}
 GPUSERV_BIN=${GPUSERV_BIN:?set GPUSERV_BIN to the pgstrom-gpuserv binary}
@@ -90,6 +91,7 @@ sql "create table tfo as select i,
 sql "create table tfi as select * from (values (0::float4, 0::float8, 1), (-0.0::float4, -0.0::float8, 2), ('NaN'::float4, 'NaN'::float8, 3),
 	('Infinity'::float4, 'Infinity'::float8, 4), (1.5::float4, 1.5::float8, 5), (null::float4, null::float8, 6), (-1.5::float4, -1.5::float8, 7),
 	(1e-45::float4, 5e-324::float8, 8), (0.25::float4, 0.25::float8, 9), (0.5::float4, 0.5::float8, 10)) v(f4, f8, w)"
+sql "alter table tfi add column wn int4"; sql "update tfi set wn = w - 1"
 sql "analyze tfo"; sql "analyze tfi"
 # numeric keys: equal values of different scales (1.5, 1.50, 1.500), zero in several scales, NaN, a value beyond 18 digits (the backend
 # joins those rows), NULLs
@@ -104,6 +106,16 @@ sql "create table tni as select * from (values (1.5, 1), (1.50, 2), ('NaN'::nume
 	(-0.25, 6), (100.000, 7), (null::numeric, 8), (0.5, 9), (2.25, 10), (0.75, 11), (1.000, 12)) v(nm, w)"
 sql "alter table tno alter column nc type numeric(12,3)"	# (a CASE loses the typmod of its branches)
 sql "analyze tno"; sql "analyze tni"
+# GROUP BY keys over a join (jkeys_tests.inc): plain key columns with few values (the planner estimates an expression as one group per row and
+# then keeps the aggregate on the CPU); tjo joins tjd on k (tjo.k reaches beyond the 3000 keys of tjd: unmatched outer rows)
+sql "create table tjo as select i as id, (i % 4000)::int4 as k, (i % 7)::int4 as a, (i % 5)::int4 as b, (i % 3)::int4 as c, (i % 4)::int4 as e,
+	case when i % 7 = 0 then null else (i % 6)::int4 end as an,
+	((i % 5) / 4.0)::float4 as fa, (i * 13)::int8 as pay from generate_series(1, 200000) i"
+sql "create table tjd as select j::int4 as k, (j % 5)::int4 as x, (j % 4)::int4 as y, (j % 3)::int4 as z,
+	case when j % 6 = 0 then null else (j % 6)::int4 end as xn, (j % 3)::int4 as zz,
+	(case j % 4 when 0 then '-0'::float8 when 1 then 0::float8 when 2 then 1.5::float8 else 'NaN'::float8 end) as fz, (j * 3)::int8 as w from generate_series(0, 2999) j"
+sql "vacuum analyze tjo"; sql "analyze tjd"
+if [ -z "$JKEYS_ONLY" ]; then
 # GROUP BY tables: tkm has 100 distinct keys when it is analyzed, then 100,000 more that the planner does not know (the group
 # table is sized for the estimate and overflows); tkb is big enough for several tasks
 sql "create table tkm as select md5((i % 100)::text) as k, (i % 7)::int4 as n, i::int8 as v from generate_series(1, 20000) i"
@@ -129,6 +141,7 @@ sql "create table tkog as select $KSEL, u from tko where i <= 30000"
 sql "vacuum analyze tkog"
 sql "create trigger gc_sync after insert or update or delete on tkog for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=90000')"
 sql "analyze tkoa"; sql "analyze tkop"
+fi
 
 GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 CPU="set max_parallel_workers_per_gather=0; set pg_strom.enabled=off;"
@@ -154,6 +167,7 @@ if [ -n "$ADHOC" ]; then
 	[ -n "$TRACE" ] && LC_ALL=C grep -a "pgstrom-gpuserv: .*task" "$ROOT/log" | tail -${TRACE_LINES:-40}
 	[ -n "$SKIP_TESTS" ] && exit 0
 fi
-. "${0%/*}/keys_tests.inc"
+[ -z "$JKEYS_ONLY" ] && . "${0%/*}/keys_tests.inc"
+. "${0%/*}/jkeys_tests.inc"
 echo
 if [ $fail -eq 0 ]; then echo "KEYS DEV: ALL PASSED"; else echo "KEYS DEV: $fail FAILED"; exit 1; fi

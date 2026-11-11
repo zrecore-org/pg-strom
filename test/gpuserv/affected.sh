@@ -21,7 +21,7 @@ full=0
 for f in $files; do
 	case $f in
 		src/gpuserv/kernels_vm/*|src/gpuserv/kernels/*)
-			add spec_compile_check.sh; for s in float8_dev.sh postgis_dev.sh gist_dev.sh arrow_dev.sh gpucache_dev.sh joinagg_dev.sh gpusort_dev.sh spec_dev.sh recheck_dev.sh; do add $s; done ;;
+			add spec_compile_check.sh; for s in float8_dev.sh intvar_dev.sh postgis_dev.sh gist_dev.sh arrow_dev.sh gpucache_dev.sh joinagg_dev.sh gpusort_dev.sh spec_dev.sh recheck_dev.sh; do add $s; done ;;
 		src/gpuserv/specialize.c|src/gpuserv/spec_*.c|src/gpuserv/spec_*.h)
 			add spec_compile_check.sh; add spec_dev.sh ;;
 		src/gpuserv/scan_prog.c|src/gpuserv/scan_caps.c|src/gpuserv/cpu_vm.c|src/codegen.c|src/xpu_opcodes.h|src/gpuserv/scan_exec.c|src/gpuserv/arrow_exec.c)
@@ -37,6 +37,7 @@ for f in $files; do
 		test/gpuserv/postgis3d_*|test/gpuserv/postgis/*) add postgis3d_dev.sh; add postgis_dev.sh ;;
 		test/gpuserv/postgis_*) add postgis_dev.sh ;;
 		test/gpuserv/float8_*) add float8_dev.sh ;;
+		test/gpuserv/intvar_*) add intvar_dev.sh ;;
 		test/gpuserv/spec_*) add spec_dev.sh ;;
 		test/gpuserv/jsonb_*) add jsonb_test.sh ;;
 		test/gpuserv/numeric_*) add numeric_test.sh ;;

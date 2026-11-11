@@ -2393,6 +2393,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PAVG_FP		603		/* <int4>,<float8> - NROWS+PSUM */
 #define KAGG_ACTION__PAVG_NUMERIC	604		/* <int4>,<int8+8> - NROWS+PSUM */
 #define KAGG_ACTION__STDDEV			701		/* variance, stddev of float4/float8: PostgreSQL's float8_accum state N, Sx, Sxx (A10) */
+#define KAGG_ACTION__STDDEV_INT		703		/* variance, stddev of int2/int4/int8: the exact N, sum x (int128), sum x^2 (192 bits), numeric final (A10) */
 #define KAGG_ACTION__STDDEV_NUM		702		/* variance, stddev of integers and numeric: an exact int128 / numeric state, CPU only */
 #define KAGG_ACTION__COVAR			801		/* covar, corr, regr_*: float8_regr_accum state N, Sx, Sxx, Sy, Syy, Sxy (A10) */
 #define KAGG_ACTION__COVAR_CNT		802		/* regr_count: CPU only (the catalog's final function returns float8, PostgreSQL's bigint) */
@@ -2498,6 +2499,16 @@ typedef struct
 	float8_t	sum_x;
 	float8_t	sum_x2;
 } kagg_state__stddev_packed;
+
+/* variance / stddev of int2, int4, int8 (PostgreSQL's int4_accum / int8_accum state, exactly): the sums as little-endian 64-bit words */
+typedef struct
+{
+	int32_t		vl_len_;
+	uint32_t	attrs;			/* reserved for future use */
+	int64_t		nitems;
+	uint64_t	sum_x[2];		/* signed 128 bits */
+	uint64_t	sum_x2[3];		/* unsigned 192 bits */
+} kagg_state__ivar_packed;
 
 typedef struct
 {

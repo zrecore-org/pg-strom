@@ -276,4 +276,5 @@ run_any pg_gc "GPU-Cache table: ST_DWithin on a point column" "select id from %T
 # the register-pressure ladder of the fused-point instructions (a program the builder refuses has no CPU fallback)
 . "${0%/*}/postgis_ladder.inc"
 . "${0%/*}/postgis3d_tests.inc"
+. "${0%/*}/postgis_pred_tests.inc"
 fi

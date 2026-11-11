@@ -16,7 +16,7 @@
 #ifndef GA_NA
 #define GA_NA 4
 #endif
-#define GA_NK 2
+#define GA_NK 4                                // the record layout of jgagg.slang; this kernel groups on at most two keys
 #ifndef GA_C
 #define GA_C 128
 #endif
@@ -113,6 +113,11 @@ void jgagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         outb[rb + 3] = uint(uint64_t(k0) >> 32);
         outb[rb + 4] = uint(uint64_t(k1) & 0xffffffffu);
         outb[rb + 5] = uint(uint64_t(k1) >> 32);
+        for (uint i = 2; i < GA_NK; i++)
+        {
+            outb[rb + 2 + 2 * i] = 0;
+            outb[rb + 3 + 2 * i] = 0;
+        }
         for (uint k = 0; k < GA_NA; k++)
         {
             uint a = s * GA_NA + k;

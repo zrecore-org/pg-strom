@@ -4,6 +4,7 @@
 #
 #   sh test/gpuserv/locked_test.sh "$PWD" postgis_dev.sh
 #
+# PRED_ONLY=1 runs only postgis_pred_tests.inc (R5; PRN sizes its tables).
 # ADHOC=<file> runs the SQL file (psql -f) against the loaded data instead of the tests; PGROWS (default 200000) sizes the
 # tables. The service runs with PGSTROM_GPUSERV_SPECIALIZE=check (every dispatch runs the VM kernel and the specialized one
 # and compares them) unless SPEC is set.
@@ -88,6 +89,6 @@ if [ -n "$ADHOC" ]; then
 	$PSQL -d scantest -f "$ADHOC" 2>&1
 	[ -n "$NOTESTS" ] && exit 0
 fi
-. "${0%/*}/postgis_tests.inc"
+if [ -n "$PRED_ONLY" ]; then . "${0%/*}/postgis_pred_tests.inc"; else . "${0%/*}/postgis_tests.inc"; fi
 echo
 if [ $fail -eq 0 ]; then echo "POSTGIS DEV: ALL PASSED"; else echo "POSTGIS DEV: $fail FAILED"; exit 1; fi

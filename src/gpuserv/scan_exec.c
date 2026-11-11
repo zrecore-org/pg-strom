@@ -1311,7 +1311,65 @@ typedef struct
  * The partials of the workgroups merge with float8_combine / float8_regr_combine (vagg.inc), in workgroup order; an overflow
  * PostgreSQL would raise sets fovf of the first accumulator.
  */
-#define VAGG_ACT(action)	((action) == KAGG_ACTION__STDDEV || (action) == KAGG_ACTION__COVAR)
+#define VAGG_ACT(action)	((action) == KAGG_ACTION__STDDEV || (action) == KAGG_ACTION__COVAR || (action) == KAGG_ACTION__STDDEV_INT)
+#define VAGG_NACC(action)	(((action) == KAGG_ACTION__COVAR || (action) == KAGG_ACTION__STDDEV_INT) ? 3 : 1)
+
+/*
+ * variance / stddev of int2, int4, int8 (action STDDEV_INT, class 13 + two continuation entries; A10): PostgreSQL's integer accumulator
+ * state exactly. The three accumulators hold n and Sx (signed 128 bits: acc[0].sum), Sx2 (unsigned 192 bits: the low 128 in
+ * acc[1].sum, the high 64 in acc[2].val). The kernel records carry them as (b0:a0), (b1:a1) and a2 (scan_common.slang, ivs_acc).
+ */
+typedef struct
+{
+	uint64_t	n;
+	unsigned __int128 sx;			/* two's complement */
+	unsigned __int128 sx2_lo;
+	uint64_t	sx2_hi;
+} ivar_state;
+
+static ivar_state
+ivar_of(const agg_acc *a)
+{
+	ivar_state	v;
+
+	v.n = a[0].n;
+	v.sx = (unsigned __int128) a[0].sum;
+	v.sx2_lo = (unsigned __int128) a[1].sum;
+	v.sx2_hi = (uint64_t) a[2].val;
+	return v;
+}
+
+static void
+ivar_to(agg_acc *a, ivar_state v)
+{
+	for (int i = 0; i < 3; i++)
+		a[i].n = v.n;
+	a[0].sum = (__int128) v.sx;
+	a[1].sum = (__int128) v.sx2_lo;
+	a[2].val = (int64_t) v.sx2_hi;
+}
+
+static void
+ivar_add_sq(ivar_state *v, unsigned __int128 sq)
+{
+	unsigned __int128 lo = v->sx2_lo + sq;
+
+	if (lo < sq)
+		v->sx2_hi += 1;
+	v->sx2_lo = lo;
+}
+
+static void
+ivar_add_value(agg_acc *a, int64_t x)
+{
+	ivar_state	v = ivar_of(a);
+	uint64_t	ax = (x < 0) ? (0 - (uint64_t) x) : (uint64_t) x;
+
+	v.n += 1;
+	v.sx += (unsigned __int128)(__int128) x;
+	ivar_add_sq(&v, (unsigned __int128) ax * ax);
+	ivar_to(a, v);
+}
 
 static VAcc
 vacc_of(const agg_acc *a)
@@ -1382,6 +1440,16 @@ vagg_merge_rec(uint32_t action, agg_acc *acc, const uint32_t *rec)
 		b.err = 0;
 		vacc_to(acc, vacc_merge(vacc_of(acc), b));
 	}
+	else if (action == KAGG_ACTION__STDDEV_INT)
+	{
+		ivar_state	v = ivar_of(acc);
+
+		v.n += rec[0];
+		v.sx += ((unsigned __int128) rec_b(rec) << 64) | rec_a(rec);
+		ivar_add_sq(&v, ((unsigned __int128) rec_b(rec + 6) << 64) | rec_a(rec + 6));
+		v.sx2_hi += rec_a(rec + 12);
+		ivar_to(acc, v);
+	}
 	else
 	{
 		RAcc		b;
@@ -1421,7 +1489,7 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 			if (VAGG_ACT(act))
 			{
 				agg_acc		tmp[3];
-				int			nacc = (act == KAGG_ACTION__COVAR) ? 3 : 1;
+				int			nacc = VAGG_NACC(act);
 
 				memset(tmp, 0, sizeof(tmp));
 				for (int t = 0; t < nacc; t++)
@@ -1826,6 +1894,9 @@ acc_add_value(agg_acc *acc, uint32_t cls, int64_t v, int64_t y)
 		}
 		case 12:		/* the continuation entries: the head adds for them */
 			break;
+		case 13:		/* variance, stddev of integers: the exact state; acc is the head of three (A10) */
+			ivar_add_value(acc, v);
+			break;
 		case 1:			/* count(*) */
 		case 2:			/* count(x) */
 			acc->n += 1;
@@ -2015,6 +2086,30 @@ agg_col_value(uint32_t action, int scale, const agg_acc *acc, col_value *cv, cha
 
 				memcpy(&r->sum_x2, &sxx, sizeof(r->sum_x2));
 			}
+			cv->len = sizeof(*r);
+			break;
+		}
+
+		case KAGG_ACTION__STDDEV_INT:
+		{
+			/* the exact integer state (kagg_state__ivar_packed) of PostgreSQL's int4_accum / int8_accum; acc points to the three accumulators */
+			kagg_state__ivar_packed *r = (kagg_state__ivar_packed *) cv->data;
+			ivar_state	v;
+
+			if (acc->n == 0)
+			{
+				cv->isnull = 1;
+				break;
+			}
+			v = ivar_of(acc);
+			r->vl_len_ = (int32_t)(sizeof(*r) << 2);
+			r->attrs = 0;
+			r->nitems = (int64_t) v.n;
+			r->sum_x[0] = (uint64_t) v.sx;
+			r->sum_x[1] = (uint64_t) (v.sx >> 64);
+			r->sum_x2[0] = (uint64_t) v.sx2_lo;
+			r->sum_x2[1] = (uint64_t) (v.sx2_lo >> 64);
+			r->sum_x2[2] = v.sx2_hi;
 			cv->len = sizeof(*r);
 			break;
 		}
@@ -2515,7 +2610,7 @@ ensure_group_pipeline(scan_engine *eng, int variant, int avariant, char *err, si
  */
 static int
 group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-				   uint32_t cap, uint32_t rec_words, uint32_t blk_words)
+				   uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk)
 {
 	uint32_t	nagg = prog->nagg;
 	uint32_t	agg_col[SCAN_AGG_MAX];
@@ -2542,14 +2637,14 @@ group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, ui
 
 			if (!rec[0])
 				continue;
-			for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
+			for (int i = 0; i < nk && i < prog->nkeys; i++)
 				key[i] = (int64_t)((uint64_t) rec[2 + 2 * i] | ((uint64_t) rec[3 + 2 * i] << 32));
 			e = group_lookup(&st->groups, nagg, key, rec[1]);
 			if (!e)
 				return -1;
 			for (uint32_t a = 0; a < nagg; a++)
 				acc_merge_group_record(&e->acc[a], prog->agg_ent_action[a],
-									   rec + 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * a);
+									   rec + 2 + 2 * nk + 6 * a);
 		}
 	}
 	return 0;
@@ -3403,7 +3498,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		}
 	}
 	/* merge the workgroups' tables */
-	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
+	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED) != 0)
 	{
 		snprintf(err, errlen, "out of memory");
 		goto done;
@@ -3554,7 +3649,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				{
 					/* the session's accumulators of this column: one, or three for covar / corr / regr_* (A10) */
 					int		a = (prog && prog->words && prog->agg_of_col[j] >= 0) ? prog->agg_of_col[j] : (int) j;
-					int		nacc = (action == KAGG_ACTION__COVAR) ? 3 : 1;
+					int		nacc = VAGG_NACC(action);
 
 					memset(acc, 0, sizeof(acc));
 					for (int t = 0; t < nacc; t++)
@@ -4648,9 +4743,9 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	if (grouped)
 	{
 		cap = sh.ga_c;
-		rec_words = 2 + 2 * SCAN_GROUP_KEYS_SHARED + 6 * sh.agg_max;
+		rec_words = 2 + 2 * SCAN_GROUP_KEYS_JOIN + 6 * sh.agg_max;
 		blk_words = 1 + cap * rec_words;
-		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_SHARED + 3 * sh.agg_max;
+		ov_rec = 1 + 2 * SCAN_GROUP_KEYS_JOIN + 3 * sh.agg_max;
 	}
 	if ((sp == vmpipe || spec_check_enabled(eng)) &&
 		ensure_joinagg_pipeline(eng, grouped, variant, avariant, err, errlen) != 0)
@@ -4912,7 +5007,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		const uint32_t *w = prog->words;
 		uint32_t	aggoff = w[11];
 
-		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words) != 0)
+		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN) != 0)
 		{
 			snprintf(err, errlen, "out of memory");
 			goto done;
@@ -4924,7 +5019,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
 
-			for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
+			for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
 				key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
 			g = group_lookup(&st->groups, nagg, key, rec[0]);
 			if (!g)
@@ -4932,7 +5027,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 				goto done;
 			}
-			acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_SHARED);
+			acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_JOIN);
 		}
 	}
 	t3 = now_ms();
@@ -5013,15 +5108,15 @@ scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *o
 
 int
 scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-						uint32_t cap, uint32_t rec_words, uint32_t blk_words)
+						uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk)
 {
-	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words);
+	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, nk);
 }
 
 /* the rows that found no slot in their workgroup's table: { null mask, keys, (ok, value) * aggregates } each */
 int
 scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
-						  uint32_t ov_rec)
+						  uint32_t ov_rec, int nk)
 {
 	const uint32_t *w = prog->words;
 	uint32_t	aggoff = w[11];
@@ -5033,12 +5128,12 @@ scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *
 		int64_t		key[SCAN_GROUP_KEYS] = {0};
 		group_entry *g;
 
-		for (int i = 0; i < SCAN_GROUP_KEYS_SHARED; i++)
+		for (int i = 0; i < nk && i < prog->nkeys; i++)
 			key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
 		g = group_lookup(&st->groups, nagg, key, rec[0]);
 		if (!g)
 			return -1;
-		acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_SHARED);
+		acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * nk);
 	}
 	return 0;
 }
