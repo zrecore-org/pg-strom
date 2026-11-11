@@ -1,45 +1,28 @@
-select sum(a), sum(b), sum(c), count(*) from np
-select sum(a % 8), sum(b % 5), sum(c % 8) from np
-select sum((a % 8)::int4), sum((a::int4) % 8), sum((a::int8) % 8) from np
-select min(a % 8), max(a % 8), min(b % 4), max(b % 4), min(c % 7), max(c % 7) from np
-select sum(a / 8), sum(b / 5), sum(c / 8) from np
-select sum(a * 3), sum(-b), sum(c - 1) from np
-select sum(a % (g4 + 3)), sum(b % (g4 + 3)) from np
-select sum(a % -8), sum(b % -5) from np
-select sum(a::float4), sum(b::float4), sum(a::float8), sum(b::float8) from np
-select sum((a % 8)::float4), sum((b % 5)::float4), sum((a % 8)::float8) from np
-select count(*) from np where a % 8 < 0
-select count(*) from np where b % 4 < 0
-select count(*) from np where a < 0
-select count(*) from np where a % 8 = -3
-select i, a % 8, b % 4, c % 7, a / 4 from nt order by i
-select i from nt where a % 8 < 0 order by i
-select min(a % 8), max(a % 8), sum(a % 8), min(b % 4), max(b % 4), sum(b % 4) from nt
-select g4, b % 4, count(*) from np group by 1, 2 order by 1, 2
-select b % 4, count(*), min(a), max(a) from np group by 1 order by 1
-select a % 4, count(*) from np group by 1 order by 1
-select g3, sum((a % 8)::float4) from np group by 1 order by 1
-select max(z), min(z), count(z) from np
-select max(z) from np where i < 100
-select max(z) from np where i % 24 = 0
-select max(z) from np where i % 24 in (0, 1)
-select max(z) from np where i % 24 = 1
-select min(z), max(z) from np where i % 24 in (0, 2)
-select g4, max(z), min(z) from np group by 1 order by 1
-select max(z), count(*) from np where i < 20000 and i % 24 = 0
-select max(d), min(d), sum(d) from np
+select min(z), max(z), count(z) from f8p
+select min(z), max(z), count(z) from f8p
+select max(z) from f8p
+select max(z), count(z) from f8p
+select min(z), max(z) from f8p
+select max(z), min(z), count(z) from f8p
+select min(z), max(z), count(z) from f8p where i > 0
 select min(z), max(z), count(z) from np2
-select min(z), max(z), count(z) from np2
-select min(z), max(z), count(z) from np2
-select min(z), max(z), count(z) from np2 where i > 5
-select g3, max(z), min(z) from np2 group by 1 order by 1
-select sum((a % 8)::float4), sum((b % 5)::float4), count(*) from np2
-select g5, sum((a % 8)::float4), sum((b % 5)::float4) from np2 group by 1 order by 1
-select g3, b % 4, sum(w), count(*) from np2 group by 1, 2 order by 1, 2
-select i % 300, sum(w), sum((a % 8)::float4) from np2 group by 1 order by 1 limit 5
-select a % (g3 + 1), count(*) from np2 group by 1 order by 1
-select count(*) from np2 where a % (g5 - 3) = -1
-select date_trunc('day', ('2000-01-01'::timestamp - (i || ' hours')::interval))::date, count(*) from np group by 1 order by 1 limit 3
-select count(*), sum((ts::date - '1999-12-31'::date)) from (select '1999-12-31 23:00'::timestamp - (i % 5 || ' hours')::interval as ts from np) s
-select sum(n % 7), sum(n % -7) from (select (a::numeric / 10) as n from np) s
-select sum((a::numeric / 10) % 3) from np
+select max(z) from f8p where i <= 25000
+select max(z) from f8p where i > 25000 and i <= 50000
+select max(z) from f8p where i > 50000 and i <= 75000
+select max(z) from f8p where i > 75000 and i <= 100000
+select max(z) from f8p where i > 100000 and i <= 125000
+select max(z) from f8p where i > 125000 and i <= 150000
+select max(z) from f8p where i > 150000 and i <= 175000
+select max(z) from f8p where i > 175000
+select max(z) from f8p where i <= 100000
+select max(z) from f8p where i <= 10000
+select max(z) from f8p where i <= 1000
+select max(z), count(*) from f8p where i % 24 = 0
+select max(z), count(*) from f8p where i % 24 in (0, 1)
+select max(z), min(z), count(z) from f8p where i > 100000
+select max(z), min(z), count(z) from f8p where i % 2 = 0
+select max(x), min(x), max(y), min(y), max(w), min(w) from f8p
+select max(d), min(d) from f8p
+select max(z) from f8p where ctid < '(100,0)'
+select max(z), min(z), count(z) from f8p
+select max(z) from f8p where z > 1e300 or z <> z

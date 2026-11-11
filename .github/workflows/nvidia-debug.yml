@@ -147,6 +147,8 @@ jobs:
             case "$name" in nvidia_probe*) cat "$log" | cut -c1-300 ;; esac
             IFS=';'
           done
+          # what the service logged (kernel errors, specialization mismatches)
+          grep -hiE "error|mismatch|differs|spec.*(fail|bad)|device lost|restart" /tmp/f8_dev/log /tmp/pg_dev/log 2>/dev/null | cut -c1-300 | sort | uniq -c | sort -rn | head -30 || true
 
       - name: Upload the logs
         if: always()

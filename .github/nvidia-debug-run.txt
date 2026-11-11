@@ -1,2 +1,1 @@
-nvidia_probe.sh; float8_dev.sh
-PGSTROM_GPUSERV_TRACE=0
+SPEC=off nvidia_probe.sh; SPEC=default nvidia_probe.sh; SPEC=check nvidia_probe.sh
