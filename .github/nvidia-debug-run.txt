@@ -1,1 +1,1 @@
-TMO=401 nvidia_bisect3.sh
+TMO=60 PIPE_PATTERN=gpuscan8_nogeom+gpuscan16_nogeom+gpuscan32_nogeom+gtab16_nogeom+gtab32_nogeom+gpuscan8_lite pipeline_check.sh; TMO=1800 float8_dev.sh

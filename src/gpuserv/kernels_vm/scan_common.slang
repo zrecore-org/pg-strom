@@ -612,7 +612,14 @@ void num_unary(uint k0, Reg x, out int64_t r)
 {
     if (k0 == SOP_NUMOP_SIGN)
     {
-        r = (x.v > 0) ? 1 : ((x.v < 0) ? -1 : 0);
+        // not "(x.v > 0) ? 1 : ((x.v < 0) ? -1 : 0)": the NVIDIA driver's compiler (T4, 590.48) rejects a scan kernel that
+        // contains that nested conditional ("NVVM compilation failed: 3"); a numeric group in the scan kernel then never ran
+        int64_t sg = 0;
+        if (x.v > 0)
+            sg = 1;
+        else if (x.v < 0)
+            sg = -1;
+        r = sg;
         return;
     }
     uint64_t m = uint64_t(x.v < 0 ? -x.v : x.v);

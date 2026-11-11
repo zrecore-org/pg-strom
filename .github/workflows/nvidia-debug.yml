@@ -35,7 +35,7 @@ jobs:
   nvidia:
     name: NVIDIA T4 debug run
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -118,7 +118,7 @@ jobs:
         run: sh test/gpuserv/service_test.sh
 
       - name: Run the chosen script(s)
-        timeout-minutes: 28
+        timeout-minutes: 33
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
