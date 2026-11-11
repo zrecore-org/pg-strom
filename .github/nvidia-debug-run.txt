@@ -1,1 +1,1 @@
-SPEC=off nvidia_probe.sh; nvidia_probe.sh
+nvidia_probe.sh; float8_dev.sh

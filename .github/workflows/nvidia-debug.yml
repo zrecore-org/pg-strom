@@ -104,6 +104,12 @@ jobs:
           PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
           make -C src PG_CONFIG=$PG_CONFIG WITH_GPUSERV=1 -j"$(nproc)" install
 
+      - name: Signed remainders in the compiled kernels
+        run: |
+          for f in gpuagg8_4_lite gpuscan16_nogeom; do
+            echo "$f: $(spirv-dis src/gpuserv/build/$f.spv | grep -cE 'OpSRem') OpSRem, $(spirv-dis src/gpuserv/build/$f.spv | grep -cE 'OpSMod') OpSMod"
+          done
+
       - name: Service lifecycle test (the GPU, not lavapipe)
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
@@ -112,7 +118,7 @@ jobs:
         run: sh test/gpuserv/service_test.sh
 
       - name: Run the chosen script(s)
-        timeout-minutes: 25
+        timeout-minutes: 28
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
