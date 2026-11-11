@@ -2648,6 +2648,10 @@ vm_run(const vm_env *env, const uint32_t *insn, uint32_t ip, uint32_t end, vm_re
 				regs[dst].isnull = 0;
 				break;
 			}
+			case SOP_DFCMP:		/* the df64 prefilter (A10 part 6): never decides here, the exact instructions that follow run */
+				regs[dst].isnull = 1;
+				regs[dst].v = 0;
+				break;
 			case SOP_CMPD:
 			{
 				vm_reg	x = regs[ra], y = regs[rb];

@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include "xpu_common.h"
 #include "scan_prog.h"
@@ -273,6 +274,159 @@ emit_conststr(builder *b, const unsigned char *datum, int isnull, int *next)
 }
 
 static int expr_to_reg(builder *b, const kern_expression *kexp, int *next);
+
+/*
+ * A10 part 6 (S1): the df64 prefilter of a float8 comparison. When scan_prog_df64 is set (the service checked at start that the
+ * device keeps the error-free transformations exact, gpuserv_df64_selfcheck), a comparison whose two operands are trees of
+ * float8 columns, constants, + - *, unary minus and abs with at least one arithmetic node is preceded by
+ *
+ *     DFCMP dst; OR dst, dst -> end; AND dst, dst -> end;  <the exact instructions, unchanged>  end:
+ *
+ * DFCMP decides the comparison in double-float arithmetic with a rigorous error bound or leaves dst NULL; when it decides, the
+ * OR / AND jump over the exact (software binary64) instructions, otherwise they run. See scan_vm_ops.inc and vm_dfcmp().
+ */
+int			scan_prog_df64 = 0;
+
+#define DF_MAX_NODES	31
+#define DF_MAX_DEPTH	6
+
+typedef struct
+{
+	uint32_t	w[1 + DF_MAX_NODES * 4];	/* header + a node word (+ 3 words of a constant) per node */
+	uint32_t	nw;
+	uint32_t	nodes;
+	int			depth, maxdepth;
+	int			narith;
+} dfcode;
+
+static int
+df_push(dfcode *c, uint32_t node)
+{
+	if (c->nodes >= DF_MAX_NODES)
+		return 0;
+	c->w[1 + c->nw++] = node;
+	c->nodes++;
+	return 1;
+}
+
+/* 1: the tree is encoded, 0: not a shape of the prefilter, -1: a hard error (message set) */
+static int
+df_collect(builder *b, const kern_expression *e, dfcode *c, int *next)
+{
+	scan_func_class fc;
+
+	if (e->opcode == FuncOpCode__VarExpr)
+	{
+		int			r;
+
+		if (e->exptype != TypeOpCode__float8)
+			return 0;
+		r = expr_to_reg(b, e, next);			/* a variable is its slot register: no instruction */
+		if (r < 0)
+			return -1;
+		if (!df_push(c, (uint32_t) r << 4))
+			return 0;
+		if (++c->depth > c->maxdepth)
+			c->maxdepth = c->depth;
+		return c->maxdepth <= DF_MAX_DEPTH;
+	}
+	if (e->opcode == FuncOpCode__ConstExpr)
+	{
+		uint64_t	v;
+		uint32_t	ex;
+
+		if (e->exptype != TypeOpCode__float8 || e->u.c.const_isnull)
+			return 0;
+		memcpy(&v, e->u.c.const_value, 8);
+		ex = (uint32_t)((v >> 52) & 0x7ff);
+		if ((v & 0x7fffffffffffffffULL) != 0 && (ex < 1023 - 60 || ex > 1023 + 60))
+			return 0;
+		if (c->nodes + 1 >= DF_MAX_NODES || !df_push(c, 2u))
+			return 0;
+		/* converted here, with its exact residual as the error: the kernel's constant node is { hi, lo, error } as float32 bits */
+		{
+			double		dv;
+			float		hi, lo, er;
+			uint32_t	hb, lb, eb;
+
+			memcpy(&dv, &v, 8);
+			hi = (float) dv;
+			lo = (float)(dv - (double) hi);
+			er = (float)(fabs((dv - (double) hi) - (double) lo) * 1.000002);
+			if (er != 0.0f)
+				er = nextafterf(er, INFINITY);
+			memcpy(&hb, &hi, 4);
+			memcpy(&lb, &lo, 4);
+			memcpy(&eb, &er, 4);
+			c->w[1 + c->nw++] = hb;
+			c->w[1 + c->nw++] = lb;
+			c->w[1 + c->nw++] = eb;
+		}
+		if (++c->depth > c->maxdepth)
+			c->maxdepth = c->depth;
+		return c->maxdepth <= DF_MAX_DEPTH;
+	}
+	fc = scan_vm_classify_func(e->opcode);
+	if (fc.cls == SOP_DARITH && fc.width == 0 && e->nr_args == 2 &&
+		(fc.kind == SOP_ARITH_PL || fc.kind == SOP_ARITH_MI || fc.kind == SOP_ARITH_MUL))
+	{
+		const kern_expression *a = KEXP_FIRST_ARG(e);
+		int			rc;
+
+		if ((rc = df_collect(b, a, c, next)) != 1 || (rc = df_collect(b, KEXP_NEXT_ARG(a), c, next)) != 1)
+			return rc;
+		c->depth--;
+		c->narith++;
+		return df_push(c, (fc.kind == SOP_ARITH_PL ? 3u : fc.kind == SOP_ARITH_MI ? 4u : 5u));
+	}
+	if (fc.cls == SOP_DUNARY && (fc.width == 0 || fc.width == 1) && e->nr_args == 1)
+	{
+		int			rc = df_collect(b, KEXP_FIRST_ARG(e), c, next);
+
+		if (rc != 1)
+			return rc;
+		return df_push(c, fc.width == 0 ? 6u : 7u);
+	}
+	return 0;
+}
+
+/*
+ * The instructions in front of a float8 comparison (see above); returns the index of the first jump (the second follows), -1
+ * for a hard error, -2 when the comparison is not a shape of the prefilter (nothing was emitted). The register of the comparison's
+ * result, mark, carries the flag: the operands' temporaries start at the same register afterwards.
+ */
+static int
+df_prefilter(builder *b, const kern_expression *kexp, const scan_func_class *fc, int mark, int *next)
+{
+	dfcode		c;
+	int			rc, d, probe = *next;
+	int64_t		off;
+
+	if (kexp->nr_args != 2)
+		return -2;
+	memset(&c, 0, sizeof(c));
+	rc = df_collect(b, KEXP_FIRST_ARG(kexp), &c, &probe);
+	if (rc == 1)
+		rc = df_collect(b, KEXP_NEXT_ARG(KEXP_FIRST_ARG(kexp)), &c, &probe);
+	if (rc < 0)
+		return -1;
+	if (rc != 1 || c.narith == 0 || c.depth != 2)
+		return -2;
+	c.w[0] = c.nodes;
+	off = pool_add(b, (const unsigned char *) c.w, 4 * (1 + c.nw));
+	if (off < 0)
+		return -1;
+	d = new_reg(b, next);
+	if (d < 0)
+		return -1;
+	*next = mark;
+	if (emit(b, SOP_DFCMP, d, 0, 0, (uint32_t) off, fc->kind) < 0)
+		return -1;
+	rc = emit(b, SOP_OR, d, d, 0, 0, 0);
+	if (rc < 0 || emit(b, SOP_AND, d, d, 0, 0, 0) < 0)
+		return -1;
+	return rc;
+}
 
 static int
 emit_const(builder *b, const kern_expression *kexp, int *next)
@@ -985,6 +1139,7 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 	scan_func_class	fc;
 	int			mark = *next;
 	int			ra, rb, dst;
+	int			djump = -1;			/* the df64 prefilter's first jump (A10 part 6), -1 when there is none */
 
 	switch (kexp->opcode)
 	{
@@ -1153,6 +1308,14 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 	if (kexp->nr_args != 2)
 		return fail(b, "malformed %s", scan_vm_opcode_name(kexp->opcode));
 	karg = KEXP_FIRST_ARG(kexp);
+	if (scan_prog_df64 && fc.cls == SOP_CMPD && fc.width == 0)
+	{
+		djump = df_prefilter(b, kexp, &fc, mark, next);
+		if (djump == -1)
+			return -1;
+		if (djump < 0)
+			djump = -1;
+	}
 	ra = expr_to_reg(b, karg, next);
 	if (ra < 0)
 		return -1;
@@ -1259,6 +1422,11 @@ expr_to_reg(builder *b, const kern_expression *kexp, int *next)
 		case SOP_GEOMBOX:
 			if (emit(b, fc.cls, dst, ra, rb, fc.kind, 0) < 0)
 				return -1;
+			if (djump >= 0)			/* the jumps of the df64 prefilter land after the exact comparison */
+			{
+				b->insn[6 * djump + 3] = b->ninsn;
+				b->insn[6 * (djump + 1) + 3] = b->ninsn;
+			}
 			break;
 		case SOP_DARITH:
 			if (emit(b, SOP_DARITH, dst, ra, rb, fc.kind, kexp->opcode) < 0)

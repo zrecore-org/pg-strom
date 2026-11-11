@@ -63,11 +63,11 @@ start_cluster() { # specialize-mode[:NAME=value,NAME=value ...]
 	esac
 	: > "$ROOT/log"
 	$PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; cat "$ROOT/log"; exit 1; }
-	n=0; while [ $n -lt 40 ]; do
+	n=0; while [ $n -lt 600 ]; do
 		[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
 		n=$((n+1)); sleep 1
 	done
-	[ $n -lt 40 ] || { echo "service not ready"; tail -20 "$ROOT/log"; exit 1; }
+	[ $n -lt 600 ] || { echo "service not ready"; tail -20 "$ROOT/log"; exit 1; }
 	if ! $PSQL -d postgres -c "select 1 from pg_database where datname = 'bench'" | grep -q 1; then
 		$PSQL -d postgres -c "create database bench" >/dev/null
 	fi

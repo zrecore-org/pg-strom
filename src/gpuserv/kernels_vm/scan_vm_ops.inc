@@ -81,6 +81,17 @@
  *   D2I      dst = rint(a) as an integer of k0 bits (range checked, error id k1)
  *   F2D      dst = (float8) a (a float4, exact)
  *   D2F      dst = (float4) a (nearest even; overflow and underflow errors, error id k1)
+ *   DFCMP    (A10 part 6) the df64 prefilter of a float8 comparison whose operands are small trees of float8 columns and constants
+ *            under +, -, *, unary minus and abs. dst = true / false when a double-float (two float32) evaluation with a rigorous error
+ *            bound decides the comparison, NULL when it cannot (a NULL or out-of-range operand, a margin below the bound). It
+ *            is followed by `OR dst, dst -> end` and `AND dst, dst -> end`, which jump over the exact instructions of the same
+ *            comparison (the software binary64 path, unchanged) when dst is decided; so the result is always the exact one and the
+ *            instruction can only save work. k0 = byte offset of the tree in the constant pool (words: header = node count,
+ *            then one word per node: type | arg << 4, a constant node followed by three words { hi, lo, error } of its double-float (float32 bits, converted by the host); types 0 column
+ *            register arg, 2 constant, 3 +, 4 -, 5 *, 6 unary minus, 7 abs; postfix, left tree then right tree, two values left),
+ *            k1 = SCANVM_CMP_*. Only emitted when the service checked at start that the device keeps the error-free transformations
+ *            exact (gpuserv_df64_selfcheck: MoltenVK's fast math switched off, see gpu_vk.c); df64.inc has the arithmetic and the
+ *            bound, vm_dfcmp() the evaluation, cpu_vm.c never decides (NULL).
  *
  * PostGIS (A11): a geometry is a string register (the payload of the varlena: GSERIALIZED v1/v2, xpu_postgis.h), so the
  * loaders, constants and the recheck of compressed or external values are the strings'.
@@ -208,6 +219,7 @@ SCANVM_OP(I2D,        123)
 SCANVM_OP(D2I,        124)
 SCANVM_OP(F2D,        125)
 SCANVM_OP(D2F,        126)
+SCANVM_OP(DFCMP,      127)
 SCANVM_OP(GEOMBOX,    130)
 SCANVM_OP(GEOMPIP,    131)
 /* never emitted: the class of st_makepoint / st_point (kind 0) and st_setsrid (kind 1), which only a GEOMPIP argument may use */
