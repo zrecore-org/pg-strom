@@ -2077,6 +2077,19 @@ __pgstromExecTaskOpenConnection(pgstromTaskState *pts)
 		Assert(nvalids <= pts->css.ss.ps.scandesc->natts);
 		kds_dst_tupdesc = CreateTupleDescTruncatedCopy(pts->css.ss.ps.scandesc, nvalids);
 	}
+	/* A4: a nest-loop join whose real row counts exceed the pair cap runs on the CPU */
+	if (pts->num_inner_rels > 0)
+	{
+		const char *nl_reason = GpuJoinNestLoopOverCap(pts);
+
+		if (nl_reason)
+		{
+			pgstromCpuModeBegin(pts, nl_reason);
+			if (!pgstromTaskStateBeginScan(pts))
+				return false;
+			return true;
+		}
+	}
 	/* build the session information */
 	session = pgstromBuildSessionInfo(pts, inner_handle, kds_dst_tupdesc);
 	if ((pts->xpu_task_flags & DEVTASK__USED_GPUCACHE) != 0 &&
@@ -3158,7 +3171,14 @@ pgstromExplainTaskState(CustomScanState *node,
 		}
 		ntuples = pp_inner->join_nrows;
 
-		if (pp_inner->hash_outer_keys != NIL)
+		if (pp_inner->hash_outer_keys != NIL &&
+			IsA(linitial(pp_inner->hash_outer_keys), Const))
+		{
+			/* a nest-loop join (A4): every inner row is on one chain of a constant hash key */
+			snprintf(label, sizeof(label), "GPU Nest Loop [%d]", i+1);
+			ExplainPropertyText(label, "all inner rows", es);
+		}
+		else if (pp_inner->hash_outer_keys != NIL)
 		{
 			resetStringInfo(&buf);
 			foreach (lc, pp_inner->hash_outer_keys)
@@ -3174,7 +3194,8 @@ pgstromExplainTaskState(CustomScanState *node,
 					 "GPU Outer Hash [%d]", i+1);
 			ExplainPropertyText(label, buf.data, es);
 		}
-		if (pp_inner->hash_inner_keys != NIL)
+		if (pp_inner->hash_inner_keys != NIL &&
+			!IsA(linitial(pp_inner->hash_inner_keys), Const))
 		{
 			resetStringInfo(&buf);
 			foreach (lc, pp_inner->hash_inner_keys)

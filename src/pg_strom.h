@@ -914,6 +914,7 @@ extern CustomScan *PlanGpuJoinPathCommon(PlannerInfo *root,
 										 const CustomScanMethods *methods);
 extern uint32_t	GpuJoinInnerPreload(pgstromTaskState *pts);
 extern void		GpuJoinInnerPreloadAfterWorks(pgstromTaskState *pts);
+extern const char *GpuJoinNestLoopOverCap(pgstromTaskState *pts);
 extern bool		ExecFallbackCpuJoin(pgstromTaskState *pts,
 									int depth,
 									uint64_t l_state,

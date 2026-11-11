@@ -23,6 +23,8 @@ static CustomExecMethods	gpujoin_exec_methods;
 static bool					pgstrom_enable_gpujoin = false;		/* GUC */
 static bool					pgstrom_enable_gpuhashjoin = false;	/* GUC */
 static bool					pgstrom_enable_gpugistindex = false;/* GUC */
+static bool					pgstrom_enable_gpunestloop = false;	/* GUC */
+static double				pgstrom_gpujoin_nestloop_max_pairs = 0.0;	/* GUC */
 int							pgstrom_gist_max_steps = 10000000;	/* GUC */
 static bool					pgstrom_enable_partitionwise_gpujoin = false;
 static int					__pinned_inner_buffer_threshold_mb = 0; /* GUC */
@@ -220,6 +222,13 @@ tryPinnedInnerJoinBufferPath(pgstromPlanInfo *pp_info,
 			   __pp_inner->join_type == JOIN_ANTI);
 	}
 	/*
+	 * A nest-loop join (a constant hash key) is not offered a pinned inner buffer: the service has no pinned
+	 * stores, and the pair cap is checked against the inner rows the backend loaded
+	 */
+	if (pp_inner->hash_inner_keys != NIL &&
+		IsA(linitial(pp_inner->hash_inner_keys), Const))
+		return NULL;
+	/*
 	 * GiST-index buffer must be built by CPU
 	 */
 	if (OidIsValid(pp_inner->gist_index_oid))
@@ -357,6 +366,62 @@ fixup_join_varnullingrels(RelOptInfo *joinrel, pgstromPlanInfo *pp_info)
 /*
  * __buildGpuJoinPlanInfo
  */
+
+/*
+ * A4 (nest-loop): "a IS NOT DISTINCT FROM b" parses to NOT (a IS DISTINCT FROM b), which the VM has no
+ * opcode for; as a join qual (true or not true) it is the same as (a = b) OR (a IS NULL AND b IS NULL).
+ * Returns the rewritten clause, or the clause itself when it has another form.
+ */
+static Expr *
+gpujoin_rewrite_null_safe(Expr *clause)
+{
+	BoolExpr	   *not_expr;
+	DistinctExpr   *dist;
+	Expr		   *a, *b, *eq;
+	NullTest	   *nt1, *nt2;
+
+	if (!IsA(clause, BoolExpr))
+		return clause;
+	not_expr = (BoolExpr *) clause;
+	if (not_expr->boolop != NOT_EXPR || list_length(not_expr->args) != 1 ||
+		!IsA(linitial(not_expr->args), DistinctExpr))
+		return clause;
+	dist = (DistinctExpr *) linitial(not_expr->args);
+	if (list_length(dist->args) != 2 ||
+		contain_volatile_functions((Node *) dist))
+		return clause;
+	a = linitial(dist->args);
+	b = lsecond(dist->args);
+	eq = make_opclause(dist->opno, BOOLOID, false,
+					   (Expr *) copyObject(a), (Expr *) copyObject(b),
+					   dist->opcollid, dist->inputcollid);
+	((OpExpr *) eq)->opfuncid = dist->opfuncid;
+	nt1 = makeNode(NullTest);
+	nt1->arg = (Expr *) copyObject(a);
+	nt1->nulltesttype = IS_NULL;
+	nt1->argisrow = false;
+	nt1->location = -1;
+	nt2 = makeNode(NullTest);
+	nt2->arg = (Expr *) copyObject(b);
+	nt2->nulltesttype = IS_NULL;
+	nt2->argisrow = false;
+	nt2->location = -1;
+	return make_orclause(list_make2(eq, make_andclause(list_make2(nt1, nt2))));
+}
+
+/*
+ * A4 (nest-loop): the join without a hash key is run as a hash join whose key is a constant: every inner
+ * row is on one chain, and each outer row walks the whole chain and evaluates the join qual against every
+ * inner row (all lanes of a subgroup follow the same chain, so the item loads are shared). Semi, anti,
+ * LEFT, RIGHT and FULL joins are the hash join's own bookkeeping.
+ */
+static Const *
+gpujoin_nestloop_key(void)
+{
+	return makeConst(INT4OID, -1, InvalidOid, sizeof(int32_t),
+					 Int32GetDatum(0), false, true);
+}
+
 static pgstromPlanInfo *
 __buildGpuJoinPlanInfo(PlannerInfo *root,
 					   RelOptInfo *joinrel,
@@ -392,9 +457,10 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	bool			clauses_are_immutable = true;
 	pgstromPlanInnerInfo gist_inner;		/* A13: the GiST index the inner side is read through, if any */
 	RestrictInfo   *gist_rinfo = NULL;
+	bool			is_nestloop = false;
 
-	/* cross join is not welcome */
-	if (!restrict_clauses)
+	/* a cross join (no clause at all) is a nest-loop join over a constant key (A4) */
+	if (!restrict_clauses && !pgstrom_enable_gpunestloop)
 		return NULL;
 	/* the Vulkan service joins up to SCAN_JOIN_MAXDEPTH inner relations per GpuJoin */
 	if (list_length(inner_paths_list) > SCAN_JOIN_MAXDEPTH)
@@ -472,6 +538,11 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	foreach (lc, restrict_clauses)
 	{
 		RestrictInfo   *rinfo = lfirst(lc);
+		Expr		   *jclause = rinfo->clause;
+
+		/* a IS NOT DISTINCT FROM b: (a = b) OR (a IS NULL AND b IS NULL) for the VM (nest-loop only) */
+		if (pgstrom_enable_gpunestloop && rinfo != gist_rinfo)
+			jclause = gpujoin_rewrite_null_safe(jclause);
 
 		/* the clause the GiST walk answers (slice 2 keeps its function as a join qual) */
 		if (rinfo == gist_rinfo && !OidIsValid(gist_inner.gist_func_oid))
@@ -486,7 +557,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		 * They are not welcome for xPU-Join workloads regardless of the cost
 		 * estimation.
 		 */
-		if (contain_var_clause((Node *)rinfo->clause))
+		if (contain_var_clause((Node *)jclause))
 			clauses_are_immutable = false;
 
 		/*
@@ -494,7 +565,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		 */
 		{
 			bool	geom_saved = pgstrom_codegen_join_geom(rinfo == gist_rinfo);
-			bool	xpu_ok = pgstrom_xpu_expression(rinfo->clause,
+			bool	xpu_ok = pgstrom_xpu_expression(jclause,
 													(pp_prev->xpu_task_flags & ~DEVTASK__MASK) | DEVTASK__JOIN,
 													pp_prev->base_relid,
 													inner_target_list,
@@ -515,12 +586,12 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 			RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
 		{
 			if (!rinfo->pseudoconstant)
-				other_quals = lappend(other_quals, rinfo->clause);
+				other_quals = lappend(other_quals, jclause);
 			continue;
 		}
 		else
 		{
-			join_quals = lappend(join_quals, rinfo->clause);
+			join_quals = lappend(join_quals, jclause);
 		}
 		/* Is the hash-join enabled? */
 		if (!pgstrom_enable_gpuhashjoin)
@@ -590,7 +661,7 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 	/* the VM's AND takes a limited number of operands (scan_caps.h) */
 	if (list_length(join_quals) + list_length(other_quals) > SCAN_VM_BOOL_ARGS)
 		return NULL;
-	if (clauses_are_immutable)
+	if (clauses_are_immutable && restrict_clauses != NIL)
 	{
 		elog(DEBUG2, "immutable join-clause is not supported: %s",
 			 nodeToString(restrict_clauses));
@@ -605,7 +676,27 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		hash_inner_keys = NIL;
 	}
 	else if (hash_outer_keys == NIL)
-		return NULL;
+	{
+		/*
+		 * A4: no hash key. A nest-loop join of the outer rows with every inner row (a constant hash key), only
+		 * when the number of pairs is bounded: the estimate of the outer rows times the inner rows must not
+		 * exceed pg_strom.gpujoin_nestloop_max_pairs.
+		 */
+		double	outer_total = (PP_INFO_NUM_ROWS(pp_prev) * pp_prev->parallel_divisor);
+		double	pairs = Max(outer_total, 1.0) * Max(inner_path->rows, 1.0);
+
+		if (!pgstrom_enable_gpunestloop)
+			return NULL;
+		if (pairs > pgstrom_gpujoin_nestloop_max_pairs)
+		{
+			elog(DEBUG2, "GpuJoin: nest-loop join of %.0f x %.0f rows exceeds pg_strom.gpujoin_nestloop_max_pairs",
+				 outer_total, inner_path->rows);
+			return NULL;
+		}
+		hash_outer_keys = list_make1(gpujoin_nestloop_key());
+		hash_inner_keys = list_make1(gpujoin_nestloop_key());
+		is_nestloop = true;
+	}
 
 	/*
 	 * The Vulkan service returns an outer row without a match with NULL inner columns, but cannot
@@ -718,6 +809,17 @@ __buildGpuJoinPlanInfo(PlannerInfo *root,
 		comp_cost += gpu_operator_cost * hops * 4.0 * outer_nrows;
 		comp_cost += join_quals_cost.per_tuple * gpu_ratio * outer_nrows;
 	}
+	else if (is_nestloop)
+	{
+		/*
+		 * A4 nest-loop: every outer row walks every inner row (a deform and the join qual per pair),
+		 * the inner side is loaded as a hash store of one chain
+		 */
+		double	pairs = Max(outer_nrows, 1.0) * Max(inner_path->rows, 1.0);
+
+		startup_cost += cpu_operator_cost * inner_path->rows;
+		comp_cost += (join_quals_cost.per_tuple * gpu_ratio + 2.0 * gpu_operator_cost) * pairs;
+	}
 	else if (hash_outer_keys != NIL && hash_inner_keys != NIL)
 	{
 		/*
@@ -821,7 +923,7 @@ tryAddSimpleGpuJoinPath(PlannerInfo *root,
 										   extra->sjinfo,
 										   required_outer,
 										   &restrict_clauses);
-	if (restrict_clauses == NIL)
+	if (restrict_clauses == NIL && !pgstrom_enable_gpunestloop)
 		return;		/* cross join is not welcome */
 	/*
 	 * Build a new pgstromPlanInfo
@@ -2710,6 +2812,58 @@ GpuJoinInnerPreload(pgstromTaskState *pts)
 }
 
 /*
+ * GpuJoinNestLoopOverCap (A4)
+ *
+ * The planner bounds a nest-loop join by its row estimates; a stale estimate must not run a huge
+ * product on the device. Once the inner stores are built, the real number of inner rows times the outer
+ * rows (the relation's rows without the scan qual's selectivity) is compared with
+ * pg_strom.gpujoin_nestloop_max_pairs; above it the node continues on the CPU (A14). Returns the reason, or NULL.
+ */
+const char *
+GpuJoinNestLoopOverCap(pgstromTaskState *pts)
+{
+	pgstromPlanInfo *pp_info = pts->pp_info;
+	Relation	rel = pts->css.ss.ss_currentRelation;
+	double		outer_rows = pp_info->scan_nrows * pp_info->parallel_divisor;
+	static char	reason[160];
+
+	if (!pts->cpu_fallback_ok || !pts->h_kmrels)
+		return NULL;
+	if (rel && rel->rd_rel->relkind == RELKIND_RELATION &&
+		pp_info->scan_npages >= 1.0)
+	{
+		/*
+		 * The rows the table has now, without the selectivity of the scan quals (a wrong selectivity is
+		 * the usual way an estimate fails): the planned tuples per block over the blocks it has now
+		 */
+		double	rows = pp_info->scan_tuples *
+			(double) RelationGetNumberOfBlocks(rel) / pp_info->scan_npages;
+
+		outer_rows = Max(outer_rows, rows);
+	}
+	for (int depth=1; depth <= pp_info->num_inner_rels; depth++)
+	{
+		pgstromPlanInnerInfo *pp_inner = &pp_info->inners[depth-1];
+		kern_data_store *kds;
+		double		pairs;
+
+		if (pp_inner->hash_outer_keys == NIL ||
+			!IsA(linitial(pp_inner->hash_outer_keys), Const))
+			continue;
+		kds = KERN_MULTIRELS_INNER_KDS(pts->h_kmrels, depth);
+		pairs = Max(outer_rows, 1.0) * Max((double) kds->nitems, 1.0);
+		if (pairs > pgstrom_gpujoin_nestloop_max_pairs)
+		{
+			snprintf(reason, sizeof(reason),
+					 "nest-loop join at depth %d: about %.0f x %lu rows exceed pg_strom.gpujoin_nestloop_max_pairs",
+					 depth, outer_rows, (unsigned long) kds->nitems);
+			return reason;
+		}
+	}
+	return NULL;
+}
+
+/*
  * GpuJoinInnerPreload
  */
 void
@@ -2772,6 +2926,25 @@ pgstrom_init_gpu_join(void)
 							 NULL,
 							 &pgstrom_enable_gpuhashjoin,
 							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* A4: nest-loop joins */
+	DefineCustomBoolVariable("pg_strom.enable_gpunestloop",
+							 "Enables GpuJoin without a hash key (non-equi, range, cross joins and IS NOT DISTINCT FROM): every outer row is compared with every inner row",
+							 NULL,
+							 &pgstrom_enable_gpunestloop,
+							 true,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	DefineCustomRealVariable("pg_strom.gpujoin_nestloop_max_pairs",
+							 "Largest number of (outer row, inner row) pairs, as estimated by the planner, for which a GPU nest-loop join is offered",
+							 NULL,
+							 &pgstrom_gpujoin_nestloop_max_pairs,
+							 2.0e9,
+							 0.0,
+							 1.0e18,
 							 PGC_USERSET,
 							 GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
