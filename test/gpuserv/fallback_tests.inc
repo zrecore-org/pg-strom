@@ -157,6 +157,11 @@ echo "$out" | grep -q "cpu-mode: 1 worker(s)"; check "Fallback-stats names the C
 out=$($PSQL -d scantest -c "$GPU $FBAGGSET $FBSET explain (analyze, costs off, timing off, summary off) select a % 7, count(*), sum(b) from fb1 group by 1" 2>&1)
 echo "$out" | grep -q "cpu-mode"; [ $? -ne 0 ]; check "no cpu-mode without a fault" $?
 
+echo "-- an aggregate argument the quals do not read is computed only for the rows that pass them (the CPU fallback raised 'cannot take square root of a negative number')"
+sql "create table fbs as select i as id, case when i % 3 = 0 then -(i % 1000)::float8 - 1 else (i % 1000)::float8 end as x from generate_series(1, 60000) i; analyze fbs" >/dev/null
+fbrun "agg argument: sqrt under a qual that rejects its negative rows" "Custom Scan (GpuPreAgg)" agg "refuse refuse=2 drop" "select max(sqrt(x)), min(sqrt(x)), count(*) from fbs where x >= 0"
+fbrun "agg argument: sum of round(sqrt), rows rejected by the qual (integer-valued: exact in any order)" "Custom Scan (GpuPreAgg)" agg "refuse=2" "select sum(round(sqrt(x))), count(*) from fbs where x >= 0"
+
 echo "-- a service that is killed in the middle of a query"
 b=$(fbcount)
 g=$(q "$GPU $FBJOINSET $FBSET set pg_strom.gpuserv_fault='exit=2';" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k"); c=$(q "$CPU" "select fb1.id, sd.pay from fb1 join sd on fb1.k = sd.k")

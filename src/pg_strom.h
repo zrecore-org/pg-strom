@@ -549,6 +549,8 @@ struct pgstromTaskState
 	List			   *fallback_proj;
 	List			   *fallback_pre_dst;	/* resno of computed, unreturned entries the base quals read */
 	List			   *fallback_pre_expr;	/* their ExprState */
+	List			   *fallback_post_dst;	/* resno of computed, unreturned entries (aggregate arguments) the quals do not read */
+	List			   *fallback_post_expr;	/* their ExprState: evaluated only for the rows that pass the quals */
 	MemoryContext		fallback_pre_cxt;
 	List			   *fallback_load_src;	/* source resno of base-rel */
 	List			   *fallback_load_dst;	/* dest resno of fallback-slot */

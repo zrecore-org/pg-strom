@@ -1443,11 +1443,14 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 	bool		compatible = true;
 	bytea	   *vl_temp;
 	kern_fallback_desc *__fb_desc_array;
+	Bitmapset  *qual_attrs = NULL;
 
 	/*
 	 * WHERE-clause
 	 */
 	pts->base_quals = ExecInitQual(pp_info->scan_quals, &pts->css.ss.ps);
+	/* the entries of the scan tuple the base quals read (a computed entry is evaluated before the quals only then) */
+	pull_varattnos((Node *) pp_info->scan_quals, INDEX_VAR, &qual_attrs);
 	pts->base_slot = MakeSingleTupleTableSlot(RelationGetDescr(rel),
 											  table_slot_callbacks(rel));
 	/*
@@ -1516,11 +1519,23 @@ __execInitTaskStateCpuFallback(pgstromTaskState *pts)
 			}
 			PG_END_TRY();
 			fallback_proj = lappend(fallback_proj, NULL);
+			/*
+			 * An entry the base quals read is computed before them (execCpuFallbackOneTuple()); the others, an
+			 * aggregate argument such as sqrt(x) under "where x >= 0", only for the rows that pass the quals:
+			 * evaluating them first raised "cannot take square root of a negative number" in the CPU fallback.
+			 */
 			if (state)
 			{
-				/* computed before the base quals run (they refer to this entry): execCpuFallbackOneTuple() */
-				pts->fallback_pre_dst = lappend_int(pts->fallback_pre_dst, tle->resno);
-				pts->fallback_pre_expr = lappend(pts->fallback_pre_expr, state);
+				if (bms_is_member(tle->resno - FirstLowInvalidHeapAttributeNumber, qual_attrs))
+				{
+					pts->fallback_pre_dst = lappend_int(pts->fallback_pre_dst, tle->resno);
+					pts->fallback_pre_expr = lappend(pts->fallback_pre_expr, state);
+				}
+				else
+				{
+					pts->fallback_post_dst = lappend_int(pts->fallback_post_dst, tle->resno);
+					pts->fallback_post_expr = lappend(pts->fallback_post_expr, state);
+				}
 			}
 		}
 		else
