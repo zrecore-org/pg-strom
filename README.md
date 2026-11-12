@@ -77,8 +77,8 @@ the repository unless stated; each project keeps its own license.
 | [MoltenVK](https://github.com/KhronosGroup/MoltenVK) | Vulkan on Apple Silicon (Metal) | Apache-2.0 |
 | [Mesa lavapipe](https://www.mesa3d.org/) | CPU Vulkan device used in CI | MIT |
 | [PostGIS](https://postgis.net/) | the extension whose `geometry` type and functions the GPU path accelerates; it is called at planning time to check results (not linked) | GPL-2.0-or-later |
-| J. R. Shewchuk, *Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric Predicates* (1997) | the error bound of the orientation filter for point-in-polygon | public domain algorithm |
-| IEEE 754-2008; T. J. Dekker (1971) and D. Knuth, *TAOCP* vol. 2 (error-free transformations) | the software binary64 (`f64_soft.inc`) and the double-float prefilter (`df64.inc`) | published algorithms |
+| J. R. Shewchuk, [*Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric Predicates*](https://www.cs.cmu.edu/~quake/robust.html), Discrete & Computational Geometry 18 (1997) | the error bound of the orientation filter for point-in-polygon | public domain algorithm |
+| [IEEE 754-2008](https://doi.org/10.1109/IEEESTD.2008.4610935); T. J. Dekker, [*A floating-point technique for extending the available precision*](https://doi.org/10.1007/BF01397083), Numerische Mathematik 18 (1971); D. Knuth, *The Art of Computer Programming* vol. 2, section 4.2.2 (error-free transformations) | the software binary64 (`f64_soft.inc`) and the double-float prefilter (`df64.inc`) | published algorithms |
 
 **PostGIS note (decided 2026-11-11: accept GPL for that file).** The GPU `ST_Area`
 (`src/gpuserv/kernels_vm/area_ring.inc`) reproduces the algorithm of PostGIS 3.7's
