@@ -2380,9 +2380,11 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_ACTION__PMIN_INT32		302		/* <int4>,<int8> - min value */
 #define KAGG_ACTION__PMIN_INT64		303		/* <int4>,<int8> - min value */
 #define KAGG_ACTION__PMIN_FP64		304		/* <int4>,<float8> - min value */
+#define KAGG_ACTION__PMIN_TEXT		305		/* text, varchar, bpchar (C collation) - min value: the partial state is the varlena in a bytea (A6b) */
 #define KAGG_ACTION__PMAX_INT32		402		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_INT64		403		/* <int4>,<int8> - max value */
 #define KAGG_ACTION__PMAX_FP64		404		/* <int4>,<float8> - max value */
+#define KAGG_ACTION__PMAX_TEXT		405		/* text, varchar, bpchar (C collation) - max value (A6b) */
 #define KAGG_ACTION__PSUM_INT		501		/* <int8> - sum of values */
 #define KAGG_ACTION__PSUM_INT64		502		/* <int8>,<int8+8> */
 #define KAGG_ACTION__PSUM_FP		503		/* <float8> - sum of values */
@@ -2415,6 +2417,7 @@ typedef bool  (*xpu_function_t)(XPU_PGFUNCTION_ARGS);
 #define KAGG_FINAL__FMINMAX_TIMESTAMPTZ	1113
 #define KAGG_FINAL__FMINMAX_BOOL		1114
 #define KAGG_FINAL__FMINMAX_NUMX		1115
+#define KAGG_FINAL__FMINMAX_TEXT		1116
 #define KAGG_FINAL__FSUM_INT			1200
 #define KAGG_FINAL__FSUM_INT64			1201
 #define KAGG_FINAL__FSUM_FP32			1202

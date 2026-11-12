@@ -231,7 +231,7 @@ for c in NUMCOLS:
         add("agg.fn.%s.%s.ungrouped" % (fn, c), "agg", "agg", "select %s(%s) from cf" % (fn, c))
 AGGS = [
     ("count_star", "count(*)"),
-    ("min_text", "min(vt)"), ("max_text", "max(vt)"),
+    ("min_text", 'min(vt collate "C")'), ("max_text", 'max(vt collate "C")'),   # A6b: the device orders strings bytewise: the C collation only
     ("min_date", "min(vd)"), ("max_date", "max(vd)"),
     ("min_timestamp", "min(vts)"), ("max_timestamp", "max(vts)"),
     ("bool_and", "bool_and(vb)"), ("bool_or", "bool_or(vb)"), ("every", "every(vb)"),
@@ -258,7 +258,7 @@ AGGS = [
     ("sum_numeric_expr", "sum(vn * 2)"), ("max_numeric_expr", "max(vn + 1)"),
     ("min_uuid", "min(gu::text)"), ("sum_int2_to_int8", "sum(v2::int8)"),
     ("avg_int", "avg(v4)"), ("count_distinct_date", "count(distinct vd)"),
-    ("min_char", "min(gw)"), ("max_varchar", "max(gv)"),
+    ("min_char", 'min(gw collate "C")'), ("max_varchar", 'max(gv collate "C")'), ("max_char", 'max(kw collate "C")'), ("min_varchar", 'min(kv collate "C")'),
 ]
 for n, e in AGGS:
     add("agg.fn.%s" % n, "agg", "agg", "select g4, %s from cf group by 1" % e)
