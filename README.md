@@ -54,3 +54,34 @@ lag behind it) and [troubleshooting](doc/troubleshooting.md) (service state, pro
 `.claude/hw-acceleration.md` is the plan, the measured findings and the milestone
 status. The documentation site linked above describes the CUDA product and has
 not been updated for this branch.
+
+Credits and licensing
+---------------------
+PG-Strom is distributed under the PostgreSQL License (see [`LICENSE`](LICENSE)):
+Copyright (c) 2012-2024 KaiGai Kohei and (c) 2017-2024 HeteroDB, Inc. The `vulkan-gpu`
+branch is a derivative of their work (the CUDA product on `master`, <https://github.com/heterodb/pg-strom>):
+the planner integration, the expression code generator (`codegen.c`), the Arrow_Fdw
+foreign data wrapper, the `XpuCommand` protocol and many of the SQL definitions come from
+it. The Vulkan service, the Slang kernels and the other changes on this branch are
+released under the same license.
+
+Third-party software the branch builds on or tests against. None of it is copied into
+the repository unless stated; each project keeps its own license.
+
+| Project | Used for | License |
+|---|---|---|
+| [PostgreSQL](https://www.postgresql.org/) | the database and its extension API | PostgreSQL License |
+| [Apache Arrow / Parquet](https://arrow.apache.org/) (`libarrow`, `libparquet`) | Arrow_Fdw, Parquet scans, `arrow-tools` | Apache-2.0 |
+| [Slang](https://shader-slang.org/) (`slangc`) | the GPU kernels are written in Slang and compiled to SPIR-V | Apache-2.0 with LLVM exceptions |
+| [Vulkan](https://www.vulkan.org/) headers and loader (Khronos) | GPU access | Apache-2.0 |
+| [MoltenVK](https://github.com/KhronosGroup/MoltenVK) | Vulkan on Apple Silicon (Metal) | Apache-2.0 |
+| [Mesa lavapipe](https://www.mesa3d.org/) | CPU Vulkan device used in CI | MIT |
+| [PostGIS](https://postgis.net/) | the extension whose `geometry` type and functions the GPU path accelerates; it is called at planning time to check results (not linked) | GPL-2.0-or-later |
+| J. R. Shewchuk, *Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric Predicates* (1997) | the error bound of the orientation filter for point-in-polygon | public domain algorithm |
+| IEEE 754-2008; T. J. Dekker (1971) and D. Knuth, *TAOCP* vol. 2 (error-free transformations) | the software binary64 (`f64_soft.inc`) and the double-float prefilter (`df64.inc`) | published algorithms |
+
+**PostGIS note.** The GPU `ST_Area` (`kernels_vm/area_ring.inc`) reproduces the algorithm of
+PostGIS 3.7's `ptarray_signed_area` (`liblwgeom/ptarray.c`) so that results are bit for bit
+the same, and other geometry kernels follow PostGIS's documented behaviour. PostGIS is
+licensed GPL-2.0-or-later, so that file may be a derivative work; its license status
+should be settled before the branch is redistributed in binary form (tracked in the plan).
