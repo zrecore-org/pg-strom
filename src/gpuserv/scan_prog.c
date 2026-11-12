@@ -1818,6 +1818,23 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 					if (d->typmod >= (int32_t) (38 << 16))
 						prog->agg_scale[nagg] = (int) (((uint32_t)(d->typmod - 4)) & 0x7ffU);
 					break;
+				/*
+				 * A6b: min / max of a string (classes 14 and 15 for text, 16 and 17 for bpchar, whose comparison ignores the trailing
+				 * blanks): the extreme is the string register of the winning row, without GROUP BY (agg.slang)
+				 */
+				case KAGG_ACTION__PMIN_TEXT:
+				case KAGG_ACTION__PMAX_TEXT:
+				{
+					uint32_t	tc = (d->arg0_slot_id >= 0 && d->arg0_slot_id < (int) b.nslots) ? vs[d->arg0_slot_id].vs_type_code : 0;
+
+					if (tc != TypeOpCode__text && tc != TypeOpCode__bpchar)
+					{
+						fail(&b, "min / max of an argument that is not a string");
+						goto error;
+					}
+					cls = (tc == TypeOpCode__bpchar ? 16 : 14) + (d->action == KAGG_ACTION__PMAX_TEXT ? 1 : 0);
+					break;
+				}
 				/* A10: float8 (sum, avg, min, max): classes 6 - 8, without GROUP BY (checked below) */
 				case KAGG_ACTION__PSUM_FP:
 				case KAGG_ACTION__PAVG_FP:		cls = 6; break;
@@ -1886,6 +1903,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			agg_tab[4 * nagg + 2] = regs_of[1] < 0 ? 0xffffffffU : (uint32_t) regs_of[1];
 			agg_tab[4 * nagg + 3] = (prog->agg_scale[nagg] >= 0) ? (uint32_t) prog->agg_scale[nagg] + 1 : 0;
 			prog->agg_ent_action[nagg] = (uint16_t) d->action;
+			prog->agg_bp[nagg] = (cls == 16 || cls == 17) ? 1 : 0;
 			nagg++;
 			if (cls == 11 || cls == 13)
 				for (int c = 0; c < 2; c++)
@@ -1911,7 +1929,13 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 			goto error;
 		}
 		for (int k = 0; k < nagg; k++)
-			if ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10)
+			if (agg_tab[4 * k] >= 14 && nkeys > 0)
+			{
+				fail(&b, "min / max of a string with GROUP BY is not implemented by the Vulkan service yet");
+				goto error;
+			}
+		for (int k = 0; k < nagg; k++)
+			if ((agg_tab[4 * k] >= 6 && agg_tab[4 * k] < 14 && nkeys > 0) || (agg_tab[4 * k] >= 10 && agg_tab[4 * k] < 14))
 				b.feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
 		prog->agg_mode = 1;
 		prog->nagg = nagg;

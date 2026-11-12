@@ -31,15 +31,15 @@ agg.fn.min.vnu* | numeric aggregates without a device path: min/max(numeric), su
 agg.fn.max.vnu* | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 srcfull.gpucache.fn.sum.vnu | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
 aggjoin.type.sum_numeric | numeric aggregates without a device path: min/max(numeric), sum/avg of a numeric without a declared scale | gap:A6
-agg.fn.min_text* | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
-agg.fn.max_text* | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
-agg.fn.max_varchar | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
-agg.fn.min_char | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
-agg.fn.max_char | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
-agg.fn.min_varchar | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
+agg.fn.min_text | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
+agg.fn.max_text | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
+agg.fn.max_varchar | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
+agg.fn.min_char | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
+agg.fn.max_char | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
+agg.fn.min_varchar | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
 agg.fn.min_uuid | min/max of a computed string (gu::text): the device extreme must be a column value, and PostgreSQL has no min(uuid) | by-design
-srcfull.*.fn.min_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
-aggjoin.type.min_max_text | min/max of text/varchar/bpchar: not device aggregates | gap:A6b
+srcfull.*.fn.min_text | min/max of text/varchar/bpchar with GROUP BY: the GROUP BY kernels have no string extreme yet (ungrouped runs on the GPU) | gap:A6b
+aggjoin.type.min_max_text | min/max of text/varchar/bpchar over a join: the join aggregation kernels are at the Metal size limit | gap:A6b
 agg.fn.bit_and | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
 agg.fn.bit_or | bit_and / bit_or / bit_xor: not device aggregates | gap:A6
 agg.fn.bit_xor | bit_and / bit_or / bit_xor: not device aggregates | gap:A6

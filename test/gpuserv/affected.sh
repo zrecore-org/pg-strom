@@ -36,6 +36,7 @@ for f in $files; do
 		test/gpuserv/gpusort_*) add gpusort_dev.sh ;;
 		test/gpuserv/postgis3d_*|test/gpuserv/postgis/*) add postgis3d_dev.sh; add postgis_dev.sh ;;
 		test/gpuserv/postgis_*) add postgis_dev.sh ;;
+		test/gpuserv/minmaxtext_*) add minmaxtext_dev.sh ;;
 		test/gpuserv/float8_*) add float8_dev.sh ;;
 		test/gpuserv/intvar_*) add intvar_dev.sh ;;
 		test/gpuserv/spec_*) add spec_dev.sh ;;

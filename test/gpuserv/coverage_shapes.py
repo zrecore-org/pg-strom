@@ -354,6 +354,7 @@ for s, t in (("arrow", "af"), ("parquet", "pf"), ("gpucache", "gcf")):
             continue          # pg2arrow cannot write a numeric without a declared precision either
         for fn in ("sum", "max"):
             add(p + "fn.%s.%s" % (fn, c), "agg", "agg", "select g4, %s(%s) from %s group by 1" % (fn, c, t))
+    add(p + "fn.min_text.ungrouped", "agg", "agg", 'select min(vt collate "C"), max(kw collate "C"), min(kv collate "C") from %s' % t)    # A6b
     add(p + "fn.ungrouped_mix", "agg", "agg", "select count(*), sum(v4), min(v8), max(vf8), avg(vf4) from %s" % t)
     for n, e in AGGS:
         if n in ("min_text", "bool_and", "count_distinct_int", "string_agg_unordered", "count_filter"):

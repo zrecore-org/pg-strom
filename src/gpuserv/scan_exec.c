@@ -1469,8 +1469,61 @@ vagg_merge_rec(uint32_t action, agg_acc *acc, const uint32_t *rec)
  * Add the per-workgroup records of an aggregation kernel without GROUP BY (agg.slang, jagg.slang) to
  * the session's aggregates: 6 words per aggregate and workgroup, from word 4 of the output.
  */
-static void
-agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total)
+/* min / max of a string (A6b): bytes compared as the C collation does (memcmp, then the length); bpchar without the trailing blanks */
+static int
+text_extreme_cmp(const unsigned char *a, uint32_t la, const unsigned char *b, uint32_t lb, int bp)
+{
+	int			c;
+
+	if (bp)
+	{
+		while (la > 0 && a[la - 1] == ' ')
+			la--;
+		while (lb > 0 && b[lb - 1] == ' ')
+			lb--;
+	}
+	c = memcmp(a, b, la < lb ? la : lb);
+	if (c != 0)
+		return c < 0 ? -1 : 1;
+	return la < lb ? -1 : la > lb ? 1 : 0;
+}
+
+/* the workgroup's extreme (a string register of the kernel) against the session's: keeps the winner's bytes. -1: failed */
+static int
+agg_text_merge(const scan_prog *prog, agg_state *st, uint32_t k, uint32_t act, int64_t reg, const unsigned char *const *srcs)
+{
+	uint32_t	src = (uint32_t)(((uint64_t) reg >> 60) & 3u);
+	uint32_t	off = (uint32_t)((uint64_t) reg & 0xffffffffu);
+	uint32_t	len = (uint32_t)(((uint64_t) reg >> 32) & 0x0fffffffu);
+	const unsigned char *p;
+	unsigned char *nb;
+	uint32_t	hdr;
+
+	if (!srcs || !srcs[src])
+		return -1;
+	p = srcs[src] + off;
+	if (st->n[k])
+	{
+		int		c = text_extreme_cmp(p, len, st->sval[k] + 4, st->slen[k] - 4, prog->agg_bp[k]);
+
+		if (act == KAGG_ACTION__PMIN_TEXT ? c >= 0 : c <= 0)
+			return 0;
+	}
+	nb = realloc(st->sval[k], (size_t) len + 4);
+	if (!nb)
+		return -1;
+	hdr = (len + 4) << 2;			/* a 4-byte varlena header (little endian) */
+	memcpy(nb, &hdr, 4);
+	memcpy(nb + 4, p, len);
+	st->sval[k] = nb;
+	st->slen[k] = len + 4;
+	st->n[k] = 1;
+	return 0;
+}
+
+static int
+agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
+					 const unsigned char *const *srcs)
 {
 	uint32_t	nagg = prog->nagg;
 
@@ -1486,6 +1539,12 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 
 			if (act == 0xffff)
 				continue;							/* a continuation of a covar / corr / regr_* state */
+			if (act == KAGG_ACTION__PMIN_TEXT || act == KAGG_ACTION__PMAX_TEXT)
+			{
+				if (rec[0] && agg_text_merge(prog, st, k, act, a, srcs) != 0)
+					return -1;
+				continue;
+			}
 			if (VAGG_ACT(act))
 			{
 				agg_acc		tmp[3];
@@ -1547,6 +1606,7 @@ agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, 
 			}
 		}
 	}
+	return 0;
 }
 
 int
@@ -1717,8 +1777,16 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 			}
 		}
 	}
-	/* add the per-page records to the session's aggregates */
-	agg_merge_workgroups(prog, st, out, ngroups_total);
+	/* add the per-page records to the session's aggregates (the string registers of min / max point into the pages) */
+	{
+		const unsigned char *srcs[3] = {ps.baseF, ps.baseL, NULL};
+
+		if (agg_merge_workgroups(prog, st, out, ngroups_total, srcs) != 0)
+		{
+			snprintf(err, errlen, "cannot merge the aggregates of the task (out of memory, or a string the service cannot read)");
+			goto done;
+		}
+	}
 	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
 	if (eng->trace)
 		fprintf(stderr, "pgstrom-gpuserv: agg task: %u pages, pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms, merge %.1f ms\n",
@@ -2553,6 +2621,11 @@ void
 agg_state_free(agg_state *st)
 {
 	gtab_destroy(st);
+	for (int k = 0; k < SCAN_AGG_MAX; k++)
+	{
+		free(st->sval[k]);
+		st->sval[k] = NULL;
+	}
 	free(st->rck.buf);
 	st->rck.buf = NULL;
 	st->rck.len = st->rck.cap = st->rck.nitems = 0;
@@ -3569,7 +3642,13 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 	resp_sz = MAXALIGN(offsetof(XpuCommand, u.results.stats[0]));
 	if (st->sdict && prog && prog->has_str_key)
 		tupsz += (size_t) SCAN_GROUP_KEYS * (st->sdict->maxlen + 8);	/* the string keys of a row */
+	for (int k = 0; k < SCAN_AGG_MAX; k++)
+		if (st->sval[k])
+			tupsz += (size_t) st->slen[k] + 8;				/* min / max of a string (A6b) */
 	cap = resp_sz + head_sz + MAXALIGN(sizeof(uint64_t) * nrows) + (size_t) nrows * 96 + 4096;
+	for (int k = 0; k < SCAN_AGG_MAX; k++)
+		if (st->sval[k])
+			cap += (size_t) nrows * (st->slen[k] + 8);
 	if (st->sdict && prog && prog->has_str_key)
 		cap += (size_t) nrows * (st->sdict->len / (st->sdict->nents ? st->sdict->nents : 1) + 8);
 	resp = calloc(1, cap);
@@ -3634,6 +3713,22 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 					memcpy(cols[j].data, &v, 8);		/* little endian: the low bytes */
 					cols[j].len = cm->attlen;
 				}
+			}
+			else if (action == KAGG_ACTION__PMIN_TEXT || action == KAGG_ACTION__PMAX_TEXT)
+			{
+				/* min / max of a string (A6b), without GROUP BY: the state is the value as a varlena in a bytea; an empty bytea is "no value" */
+				static const unsigned char none[1] = {0};
+				int			a = (prog && prog->words) ? prog->agg_of_col[j] : -1;
+
+				memset(&cols[j], 0, sizeof(cols[j]));
+				if (grouped || a < 0)
+				{
+					snprintf(err, errlen, "min / max of a string needs an aggregation without GROUP BY");
+					free(resp); free(tup);
+					return NULL;
+				}
+				cols[j].ext = st->n[a] ? st->sval[a] : none;
+				cols[j].len = st->n[a] ? st->slen[a] : 0;
 			}
 			else
 			{
@@ -5001,7 +5096,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	if (prog->oj_words > 0)
 		join_merge_ojmap(prog, ji, out, oj_base);
 	if (!grouped)
-		agg_merge_workgroups(prog, st, out, ngroups_total);
+		agg_merge_workgroups(prog, st, out, ngroups_total, NULL);
 	else
 	{
 		const uint32_t *w = prog->words;
@@ -5067,10 +5162,11 @@ scan_agg_state_prepare(agg_state *st, int nagg)
 	}
 }
 
-void
-scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total)
+int
+scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
+						  const unsigned char *const *srcs)
 {
-	agg_merge_workgroups(prog, st, out, ngroups_total);
+	return agg_merge_workgroups(prog, st, out, ngroups_total, srcs);
 }
 
 void

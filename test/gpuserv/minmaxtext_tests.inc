@@ -53,24 +53,46 @@ rmm() { # label, query-with-%T; results equal to the CPU's; the plan has a GpuPr
 		echo "  ok    $label (${g#*|} rows, GpuPreAgg=$plan)"
 	else echo "  FAIL  $label (GpuPreAgg=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
+# rmm: the shape is a device aggregate (MM_EXPECT_GPU=1 asserts the GpuPreAgg). rmc: it stays on the CPU today (min / max of a string with
+# GROUP BY: the GROUP BY kernels have no string extreme yet, A6b), so the plan must have no GpuPreAgg and the results are the CPU's.
+rmc() { # label, query-with-%T, table
+	label=$1; tbl=${3:-tmo}; qry=$(printf '%s' "$2" | sed "s/%T/$tbl/g")
+	pl=$($PSQL -d scantest -c "$GPU $CMM explain $qry" | grep -c "$GPLAN")
+	g=$(q "$GPU $CMM" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$pl" -eq 0 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows, stays on the CPU)"
+	else echo "  FAIL  $label (GpuPreAgg=$pl)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
+rmr() { # label, query-with-%T, table: results equal to the CPU's, whatever the plan (a table of one row is not worth a GPU plan)
+	label=$1; tbl=${3:-tmo}; qry=$(printf '%s' "$2" | sed "s/%T/$tbl/g")
+	g=$(q "$GPU" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows)"
+	else echo "  FAIL  $label"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+}
 CMM="set pg_strom.gpupreagg_max_groups=1000000; set pg_strom.gpupreagg_max_groups_heap=2000000;"
 for src in tmo tmoa tmop tmog; do
 	rmm "$src: ungrouped min / max of t, v" 'select min(t collate "C"), max(t collate "C"), min(v collate "C"), max(v collate "C") from %T' $src
 	rmm "$src: ungrouped min / max of a char(10)" 'select min(w collate "C"), max(w collate "C"), count(*) from %T' $src
-	rmm "$src: GROUP BY an integer" 'select g, min(t collate "C"), max(t collate "C"), min(v collate "C"), max(w collate "C"), count(*), sum(n) from %T group by g' $src
-	rmm "$src: GROUP BY two integers" 'select g, g2, max(t collate "C"), min(w collate "C") from %T group by g, g2' $src
-	rmm "$src: many groups" 'select gm, min(t collate "C"), max(v collate "C"), count(*) from %T group by gm' $src "$CMM"
-	rmm "$src: WHERE and FILTER" 'select g, min(t collate "C") filter (where n > 20), max(v collate "C") from %T where n < 40 group by g' $src
-	rmm "$src: the qual removes every row" 'select min(t collate "C"), max(w collate "C"), count(*) from %T where n > 1000' $src
-	rmm "$src: GROUP BY with an empty group" 'select g, min(t collate "C"), max(t collate "C") from %T where g in (10, 11) group by g' $src
+	rmm "$src: ungrouped with other aggregates" 'select min(t collate "C"), max(w collate "C"), count(*), sum(n), min(n), max(pay), count(t) from %T' $src
+	rmm "$src: WHERE and FILTER" 'select min(t collate "C") filter (where n > 20), max(v collate "C"), max(t collate "C") filter (where n < 3) from %T where n < 40' $src
+	rmm "$src: a selective qual" 'select min(t collate "C"), max(v collate "C"), min(w collate "C") from %T where n = 7 and g = 3' $src
+	rmm "$src: the qual removes every row" 'select min(t collate "C"), max(w collate "C"), max(v collate "C"), count(*) from %T where n * 100 > 100000' $src
+	rmm "$src: only NULL and empty strings" 'select min(t collate "C"), max(t collate "C"), count(t) from %T where g = 10' $src
+	rmm "$src: only NULLs" 'select min(t collate "C"), max(w collate "C"), min(v collate "C") from %T where g = 11' $src
+	rmm "$src: multi-byte values" 'select min(v collate "C"), max(v collate "C") from %T where g = 0 or g = 6' $src
+	rmc "$src: GROUP BY an integer" 'select g, min(t collate "C"), max(t collate "C"), min(v collate "C"), max(w collate "C"), count(*), sum(n) from %T group by g' $src
+	rmc "$src: GROUP BY two integers" 'select g, g2, max(t collate "C"), min(w collate "C") from %T group by g, g2' $src
+	rmc "$src: many groups" 'select gm, min(t collate "C"), max(v collate "C"), count(*) from %T group by gm' $src
+	rmc "$src: GROUP BY with an empty group" 'select g, min(t collate "C"), max(t collate "C") from %T where g in (10, 11) group by g' $src
 done
 # heap only: bpchar without a length, compressed and out-of-line values, the one-row and empty tables
-rmm "heap: bpchar without a length (::text drops the blanks the ties differ in)" 'select g, min(wn collate "C")::text, max(wn collate "C")::text, count(wn) from %T group by g' tmo
-rmm "heap: compressed and out-of-line values" 'select g2, min(big collate "C"), max(ext collate "C") from %T group by g2' tmo
-rmm "heap: ungrouped compressed values" 'select min(big collate "C"), max(big collate "C"), max(ext collate "C") from %T' tmo
-rmm "heap: one row" 'select min(t collate "C"), max(v collate "C"), min(w collate "C") from %T' tm1
-rmm "heap: no rows" 'select min(t collate "C"), max(v collate "C"), max(w collate "C") from %T' tm0
-rmm "heap: no rows, GROUP BY" 'select g, min(t collate "C") from %T group by g' tm0
+rmm "heap: bpchar without a length (::text drops the blanks the ties differ in)" 'select min(wn collate "C")::text, max(wn collate "C")::text, count(wn) from %T' tmo
+rmm "heap: compressed and out-of-line values" 'select min(big collate "C"), max(big collate "C"), min(ext collate "C"), max(ext collate "C") from %T' tmo
+rmm "heap: compressed value among short ones" 'select min(big collate "C"), max(t collate "C") from %T where n < 4' tmo
+rmr "heap: one row" 'select min(t collate "C"), max(v collate "C"), min(w collate "C") from %T' tm1
+rmr "heap: no rows" 'select min(t collate "C"), max(v collate "C"), max(w collate "C") from %T' tm0
+rmc "heap: no rows, GROUP BY" 'select g, min(t collate "C") from %T group by g' tm0
+rmc "heap: compressed and out-of-line values, GROUP BY" 'select g2, min(big collate "C"), max(ext collate "C") from %T group by g2' tmo
+rmc "heap: bpchar without a length, GROUP BY" 'select g, min(wn collate "C")::text, max(wn collate "C")::text, count(wn) from %T group by g' tmo
 
 # The collation gate: without COLLATE "C" a database whose default collation is not C must keep min / max of a string on the CPU
 # (the ordering is locale based), and an expression is not a column value.
