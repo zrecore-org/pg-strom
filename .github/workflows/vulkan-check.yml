@@ -295,7 +295,9 @@ jobs:
         run: make -C test/port check
 
       - name: Probe the Vulkan devices (informational)
-        # The result decides nothing: a hosted macOS VM may have no usable Metal device.
+        # Skipped on a GitHub-hosted runner: its VM has no usable Metal device and MoltenVK aborts in vkCreateInstance
+        # (exit code 134, SIGABRT), which only put an error annotation on the run. A self-hosted runner still probes.
+        if: runner.environment != 'github-hosted'
         continue-on-error: true
         run: |
           PKGLIB="$("$(brew --prefix postgresql@17)/bin/pg_config" --pkglibdir)"
