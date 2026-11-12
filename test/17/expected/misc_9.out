@@ -36,18 +36,16 @@ CREATE TABLE t1(LIKE t0);
 ALTER TABLE t0 DROP c1;
 EXPLAIN(costs off, verbose)
 SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
-                QUERY PLAN                
-------------------------------------------
- Nested Loop Left Join
+                    QUERY PLAN                     
+---------------------------------------------------
+ Custom Scan (GpuJoin) on regtest_miscs.t0
    Output: t1.c0, t1.c1, t0.c0
-   Join Filter: (t1.c0 = t1.c1)
+   GPU Projection: t1.c0, t1.c1, t0.c0
+   GPU Right Outer Join Quals [1]: (t1.c0 = t1.c1)
+   GPU Nest Loop [1]: all inner rows
    ->  Seq Scan on regtest_miscs.t1
          Output: t1.c0, t1.c1
-   ->  Materialize
-         Output: t0.c0
-         ->  Seq Scan on regtest_miscs.t0
-               Output: t0.c0
-(9 rows)
+(7 rows)
 
 SELECT * FROM t1 LEFT OUTER JOIN t0 ON (t1.c0 = t1.c1);
  c0 | c1 | c0 
@@ -497,27 +495,25 @@ INSERT INTO t0(c0) VALUES(1);
 INSERT INTO t1(c0) VALUES(1);
 EXPLAIN(costs off, verbose)
 SELECT * FROM t0 RIGHT OUTER JOIN (SELECT * FROM t1, t0 ORDER BY t0.c0 DESC, t1.c0 DESC) AS sub0 ON FALSE;
-                                  QUERY PLAN                                  
-------------------------------------------------------------------------------
+                       QUERY PLAN                       
+--------------------------------------------------------
  Nested Loop Left Join
    Output: c0, t1.c0, t0.c0
    Join Filter: false
-   ->  Incremental Sort
+   ->  Sort
          Output: t1.c0, t0.c0
          Sort Key: t0.c0 DESC, t1.c0 DESC
-         Presorted Key: t0.c0
-         ->  Nested Loop
+         ->  Custom Scan (GpuJoin) on regtest_miscs.t1
                Output: t1.c0, t0.c0
-               ->  Index Only Scan Backward using t0_pkey on regtest_miscs.t0
+               GPU Projection: t1.c0, t0.c0
+               GPU Nest Loop [1]: all inner rows
+               ->  Bitmap Heap Scan on regtest_miscs.t0
                      Output: t0.c0
-               ->  Materialize
-                     Output: t1.c0
-                     ->  Seq Scan on regtest_miscs.t1
-                           Output: t1.c0
+                     ->  Bitmap Index Scan on t0_pkey
    ->  Result
          Output: c0
          One-Time Filter: false
-(18 rows)
+(16 rows)
 
 SELECT * FROM t0 RIGHT OUTER JOIN (SELECT * FROM t1, t0 ORDER BY t0.c0 DESC, t1.c0 DESC) AS sub0 ON FALSE;
  c0 | c0 | c0 
