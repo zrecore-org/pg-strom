@@ -1,5 +1,50 @@
 # PG-Strom on Vulkan: Apple Silicon first, CUDA removed (branch `vulkan-gpu`)
 
+## Table of contents
+
+- L5: Context and decisions
+- L24: Corrections to earlier conclusions
+- L32: Target architecture
+- L74: Milestones
+- L97: A0 status
+- L135: A1 status
+- L170: A2 status
+- L240: A3 status
+- L329: A4 nest-loop joins
+- L333: A4 status
+- L371: A5 status
+- L420: A6 status
+- L522: A9 status
+- L542: A9 part 3
+- L562: A7 status
+- L576: A8 status
+- L588: A7 part 2 status
+- L607: A6/A9 robustness status
+- L619: A10 status
+- L727: A11 status
+- L755: A12 status
+- L790: A13 status
+- L845: A11 part 4: 3D
+- L851: Effort
+- L855: Validation matrix
+- L868: Desktop tier: pros and cons
+- L879: Risks
+- L888: Assumptions to confirm
+- L897: Verification
+- L905: Critical files
+- L909: Kernel source language: Slang
+- L922: Kernel ABI and build
+- L932: Appendix: spike results
+- L1151: Test speed
+- L1169: Smaller items
+- L1186: Exact distances and lengths
+- L1202: Distances, lengths and DWithin, exact
+- L1227: A14 status
+- L1291: A11/A13 remaining work
+- L1318: A15 status
+- L1359: A16 status
+
+
 > The branch was created as `apple-silicon` and renamed `vulkan-gpu` after A2 (it is the Vulkan port, validated on Apple Silicon only). Older text below keeps the old name where it describes history.
 
 ## Context and decisions
