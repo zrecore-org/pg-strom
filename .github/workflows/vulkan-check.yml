@@ -527,6 +527,12 @@ jobs:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
           GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
           ALLOW_CPU: "off"
+          # As locked_test.sh does for every local test run: a task waits for a kernel that the driver is still compiling (the
+          # service otherwise refuses it after pg_strom.gpu_kernel_wait and the node continues on the CPU, which the
+          # "No GPU task fell back" step below reports) and the background prewarm stays off. A kernel change makes the saved
+          # pipeline cache cold for that kernel.
+          PGSTROM_GPUSERV_KERNEL_WAIT_MS: "-1"
+          PGSTROM_GPUSERV_PREWARM: "off"
         run: |
           sh test/gpuserv/float8_dev.sh
           sh test/gpuserv/postgis_dev.sh
