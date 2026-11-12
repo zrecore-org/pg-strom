@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// This file reproduces the algorithm of PostGIS 3.7's ptarray_signed_area (liblwgeom/ptarray.c, https://postgis.net/,
+// Copyright (C) the PostGIS contributors) and is therefore distributed under the GNU General Public License, version 2 or
+// (at your option) any later version (LICENSES/GPL-2.0.txt). It is the only file of this branch under that license; a binary
+// that includes it (pgstrom-gpuserv, its SPIR-V kernels) is a combined work: see README.md, "Credits and licensing".
+//
 // area_ring.inc: PostGIS 3.7's ptarray_signed_area (liblwgeom/ptarray.c) in the software binary64 of f64_soft.inc, the common subset of
 // C and Slang: cpu_vm.c and scan_common.slang include this one text, so the CPU twin and the kernel cannot drift apart.
 //

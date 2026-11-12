@@ -80,8 +80,13 @@ the repository unless stated; each project keeps its own license.
 | J. R. Shewchuk, *Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric Predicates* (1997) | the error bound of the orientation filter for point-in-polygon | public domain algorithm |
 | IEEE 754-2008; T. J. Dekker (1971) and D. Knuth, *TAOCP* vol. 2 (error-free transformations) | the software binary64 (`f64_soft.inc`) and the double-float prefilter (`df64.inc`) | published algorithms |
 
-**PostGIS note.** The GPU `ST_Area` (`kernels_vm/area_ring.inc`) reproduces the algorithm of
-PostGIS 3.7's `ptarray_signed_area` (`liblwgeom/ptarray.c`) so that results are bit for bit
-the same, and other geometry kernels follow PostGIS's documented behaviour. PostGIS is
-licensed GPL-2.0-or-later, so that file may be a derivative work; its license status
-should be settled before the branch is redistributed in binary form (tracked in the plan).
+**PostGIS note (decided 2026-11-11: accept GPL for that file).** The GPU `ST_Area`
+(`src/gpuserv/kernels_vm/area_ring.inc`) reproduces the algorithm of PostGIS 3.7's
+`ptarray_signed_area` (`liblwgeom/ptarray.c`) so that results are bit for bit the same. PostGIS
+is GPL-2.0-or-later, so that one file carries `SPDX-License-Identifier: GPL-2.0-or-later` and
+the license text is in [`LICENSES/GPL-2.0.txt`](LICENSES/GPL-2.0.txt). Everything else stays under the PostgreSQL
+License. `cpu_vm.c` and the Slang kernels include that file, so a **binary** of
+`pgstrom-gpuserv` (and its compiled kernels) is a combined work that must be distributed
+under the GPL terms (source offer included); the source tree as a whole remains
+PostgreSQL-licensed file by file. Other geometry kernels follow PostGIS's documented
+behaviour without copying its code.
