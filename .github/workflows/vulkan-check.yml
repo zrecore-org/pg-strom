@@ -29,8 +29,20 @@ name: Vulkan Check
 on:
   push:
     branches: [vulkan-gpu]
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - 'doc/**'
+      - 'man/**'
+      - 'docs/**'
   pull_request:
     branches: [vulkan-gpu]
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - 'doc/**'
+      - 'man/**'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       run_apple_gpu_tests:
