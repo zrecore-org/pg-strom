@@ -2179,7 +2179,15 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 			if (out[rflag_base + i] == 2 && arrow_rck_row(&at, &st->rck, first + i, err, errlen) != 0)
 				goto done;
 		if (!grouped)
-			scan_agg_merge_workgroups(prog, st, out, ngroups);
+		{
+			const unsigned char *srcs[3] = {(const unsigned char *) at.bg.map, NULL, NULL};	/* the string registers of min / max point into the data buffer */
+
+			if (scan_agg_merge_workgroups(prog, st, out, ngroups, srcs) != 0)
+			{
+				snprintf(err, errlen, "cannot merge the aggregates of the task (out of memory, or a string the service cannot read)");
+				goto done;
+			}
+		}
 		else
 		{
 			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED) != 0 ||
@@ -2846,7 +2854,7 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		if (prog->oj_words > 0)
 			scan_join_merge_ojmap(prog, ji, out, oj_base);
 		if (!grouped)
-			scan_agg_merge_workgroups(prog, st, out, ngroups);
+			scan_agg_merge_workgroups(prog, st, out, ngroups, NULL);
 		else
 		{
 			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN) != 0 ||

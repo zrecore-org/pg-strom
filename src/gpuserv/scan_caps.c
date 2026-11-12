@@ -1645,6 +1645,9 @@ scan_vm_agg_action_supported(int action)
 		case KAGG_ACTION__COVAR:
 		/* A10: variance / stddev of int2, int4, int8: the exact int128 / 192-bit sums (class 13, kernels_vm/scan_common.slang) */
 		case KAGG_ACTION__STDDEV_INT:
+		/* A6b: min / max of text, varchar and bpchar without GROUP BY (agg.slang): one string register per workgroup */
+		case KAGG_ACTION__PMIN_TEXT:
+		case KAGG_ACTION__PMAX_TEXT:
 			return true;
 		default:
 			break;

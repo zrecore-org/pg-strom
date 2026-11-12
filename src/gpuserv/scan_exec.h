@@ -139,6 +139,8 @@ typedef struct agg_state
 	__int128	sum[SCAN_AGG_MAX];		/* sums, exact */
 	int64_t		val[SCAN_AGG_MAX];		/* current min/max (float8: the bits of the min, max or sum) */
 	uint8_t		fovf[SCAN_AGG_MAX];		/* a float8 sum overflowed (PostgreSQL raises an error for it) */
+	unsigned char *sval[SCAN_AGG_MAX];	/* min / max of a string (A6b): the current extreme as a varlena with a 4-byte header, malloc'ed */
+	uint32_t	slen[SCAN_AGG_MAX];		/* its size, header included */
 	uint64_t	nitems_raw, nitems_in;	/* statistics */
 	uint32_t	npages_vfs_read;
 } agg_state;
@@ -212,7 +214,9 @@ XpuCommand *scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd,
 
 /* exports of scan_exec.c for the aggregation and join tasks over Arrow record batches (arrow_exec.c) */
 void	scan_agg_state_prepare(agg_state *st, int nagg);
-void	scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total);
+/* srcs: the host address of the page sources 0..2 the string registers of the kernel point into (min / max of a string; NULL where there is none) */
+int		scan_agg_merge_workgroups(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
+								  const unsigned char *const *srcs);
 void	scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *ov_rec);
 /* the keys of the groups the session has so far (what a specialized GROUP BY kernel is made for) */
 void	scan_group_keystats(const agg_state *st, int nkeys, spec_keystats *ks);

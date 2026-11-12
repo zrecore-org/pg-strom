@@ -14,6 +14,9 @@
 //                         values, B = sum of the high 32 bits (sign-extended): the sum is
 //                         B * 2^32 + A, exact in 128 bits
 //   min, max: n = 1 if any value, A = the value
+//   min, max of a string (classes 14 text min, 15 text max, 16 bpchar min, 17 bpchar max; A6b): n = 1 if any value, A = the string
+//                         register { offset | length << 32 | source << 60 } of the winning row (the service resolves the bytes
+//                         from the pages, which it still holds when it merges the records)
 // After the records, at word kparam.total_lps, one word per line pointer (ptab[2 * page + 1] is the number
 // of line pointers before the page): 2 if the row needs a string the kernel cannot read (compressed or
 // stored out of line), which the service hands to the backend; 0 otherwise.
@@ -43,7 +46,25 @@ static const uint AC_FMAX       = 8;
 static const uint AC_VAR        = 10;           // variance / stddev (n, Sx, Sxx), regr head (11) + continuation (12): see vs_acc()
 static const uint AC_REG        = 11;
 static const uint AC_VCONT      = 12;
+static const uint AC_SMIN       = 14;           // min / max of text (14, 15) and bpchar (16, 17): the accumulator is a string register
 static const uint NONE_REG      = 0xffffffffu;
+
+// bytewise order of two string registers (the C collation: memcmp, then the length); bpchar ignores the trailing blanks
+int str_reg_cmp(int64_t x, int64_t y, bool bp)
+{
+    uint sa = uint((uint64_t(x) >> 60) & 3u), sb = uint((uint64_t(y) >> 60) & 3u);
+    uint oa = uint(uint64_t(x) & 0xffffffffu), ob = uint(uint64_t(y) & 0xffffffffu);
+    uint la = uint((uint64_t(x) >> 32) & 0x0fffffffu), lb = uint((uint64_t(y) >> 32) & 0x0fffffffu);
+    if (bp)
+    {
+        la = str_truelen(sa, oa, la);
+        lb = str_truelen(sb, ob, lb);
+    }
+    int c = str_memcmp(sa, oa, sb, ob, min(la, lb));
+    if (c == 0 && la != lb)
+        c = (la < lb) ? -1 : 1;
+    return c;
+}
 
 groupshared uint    sh_h[SCAN_WG];
 groupshared uint    sh_n[AGG_MAX * SCAN_WG];
@@ -146,6 +167,24 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 
                 if (rf != NONE_REG && (regs[rf].isnull != 0 || regs[rf].v == 0))
                     continue;                           // FILTER (WHERE ...) is not true
+                if (cls >= AC_SMIN)
+                {
+                    if (regs[ra].isnull == 0)
+                    {
+                        int64_t sv = regs[ra].v;
+                        bool    smin = (cls == AC_SMIN || cls == AC_SMIN + 2u);
+                        if (an[k] == 0)
+                            aa[k] = sv;
+                        else
+                        {
+                            int sc = str_reg_cmp(sv, aa[k], cls >= AC_SMIN + 2u);
+                            if (smin ? (sc < 0) : (sc > 0))
+                                aa[k] = sv;
+                        }
+                        an[k] = 1;
+                    }
+                    continue;
+                }
 #ifndef VM_NO_F8
                 if (cls >= AC_VAR)
                 {
@@ -232,6 +271,23 @@ void agg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint x = k * SCAN_WG + lid.x;
                 uint y = x + stride;
 
+                if (cls >= AC_SMIN)
+                {
+                    if (sh_n[y] != 0)
+                    {
+                        bool smin = (cls == AC_SMIN || cls == AC_SMIN + 2u);
+                        if (sh_n[x] == 0)
+                            sh_a[x] = sh_a[y];
+                        else
+                        {
+                            int sc = str_reg_cmp(sh_a[y], sh_a[x], cls >= AC_SMIN + 2u);
+                            if (smin ? (sc < 0) : (sc > 0))
+                                sh_a[x] = sh_a[y];
+                        }
+                        sh_n[x] = 1;
+                    }
+                    continue;
+                }
 #ifndef VM_NO_F8
                 if (cls >= AC_VAR)
                 {

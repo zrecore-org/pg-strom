@@ -6796,6 +6796,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));
 				break;
+			case KAGG_ACTION__PMIN_TEXT:
+				appendStringInfo(buf, "pmin::text[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
 			case KAGG_ACTION__PMAX_INT32:
 				appendStringInfo(buf, "pmax::int32[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
@@ -6810,6 +6816,12 @@ __xpucode_aggfuncs_cstring(StringInfo buf,
 				break;
 			case KAGG_ACTION__PMAX_FP64:
 				appendStringInfo(buf, "pmax::fp64[slot=%d, expr='%s'",
+								 desc->arg0_slot_id,
+								 __get_expression_cstring(css, dcontext,
+														  desc->arg0_slot_id));
+				break;
+			case KAGG_ACTION__PMAX_TEXT:
+				appendStringInfo(buf, "pmax::text[slot=%d, expr='%s'",
 								 desc->arg0_slot_id,
 								 __get_expression_cstring(css, dcontext,
 														  desc->arg0_slot_id));

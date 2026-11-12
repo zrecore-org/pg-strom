@@ -24,6 +24,13 @@ PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_numeric);
 PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_numx);
+PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_text);
+PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_text);
+PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_text);
+PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_bpchar);
+PG_FUNCTION_INFO_V1(pgstrom_fmax_trans_bpchar);
+PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_text);
+PG_FUNCTION_INFO_V1(pgstrom_fminmax_final_bpchar);
 PG_FUNCTION_INFO_V1(pgstrom_partial_minmax_fp64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_int64);
 PG_FUNCTION_INFO_V1(pgstrom_fmin_trans_fp64);
@@ -297,7 +304,7 @@ pgstrom_partial_minmax_numeric(PG_FUNCTION_ARGS)
 	bytea	   *r;
 	Size		len;
 
-	if (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1)))
+	if (PG_ARGISNULL(0) || (PG_NARGS() > 1 && (PG_ARGISNULL(1) || !PG_GETARG_BOOL(1))))
 		PG_RETURN_NULL();
 	num = (struct varlena *) PG_GETARG_DATUM(0);
 	num = pg_detoast_datum_packed(num);
@@ -309,7 +316,7 @@ pgstrom_partial_minmax_numeric(PG_FUNCTION_ARGS)
 }
 
 static Datum
-__minmax_trans_numeric(PG_FUNCTION_ARGS, bool is_min)
+__minmax_trans_varlena(PG_FUNCTION_ARGS, bool is_min, PGFunction cmpfn, Oid collid)
 {
 	MemoryContext aggcxt;
 	bytea	   *state, *arg;
@@ -343,9 +350,9 @@ __minmax_trans_numeric(PG_FUNCTION_ARGS, bool is_min)
 		PG_RETURN_BYTEA_P(state);
 	}
 	{
-		int32		cmp = DatumGetInt32(DirectFunctionCall2(numeric_cmp,
-															PointerGetDatum(VARDATA_ANY(arg)),
-															PointerGetDatum(VARDATA_ANY(state))));
+		int32		cmp = DatumGetInt32(DirectFunctionCall2Coll(cmpfn, collid,
+																PointerGetDatum(VARDATA_ANY(arg)),
+																PointerGetDatum(VARDATA_ANY(state))));
 
 		if (is_min ? (cmp < 0) : (cmp > 0))
 		{
@@ -361,13 +368,79 @@ __minmax_trans_numeric(PG_FUNCTION_ARGS, bool is_min)
 PUBLIC_FUNCTION(Datum)
 pgstrom_fmin_trans_numeric(PG_FUNCTION_ARGS)
 {
-	return __minmax_trans_numeric(fcinfo, true);
+	return __minmax_trans_varlena(fcinfo, true, numeric_cmp, InvalidOid);
 }
 
 PUBLIC_FUNCTION(Datum)
 pgstrom_fmax_trans_numeric(PG_FUNCTION_ARGS)
 {
-	return __minmax_trans_numeric(fcinfo, false);
+	return __minmax_trans_varlena(fcinfo, false, numeric_cmp, InvalidOid);
+}
+
+/*
+ * min / max of text, varchar and bpchar (A6b): the same carrier as the numeric one (the varlena, header included, in a bytea; an
+ * empty bytea says "no value"; '' is a varlena with a header, so it is a value). The planner offers these aggregates only
+ * under the C collation, which is the one the merge compares with: bttextcmp is memcmp then length, bpcharcmp ignores trailing blanks.
+ */
+PUBLIC_FUNCTION(Datum)
+pgstrom_partial_minmax_text(PG_FUNCTION_ARGS)
+{
+	return pgstrom_partial_minmax_numeric(fcinfo);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fmin_trans_text(PG_FUNCTION_ARGS)
+{
+	return __minmax_trans_varlena(fcinfo, true, bttextcmp, C_COLLATION_OID);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fmax_trans_text(PG_FUNCTION_ARGS)
+{
+	return __minmax_trans_varlena(fcinfo, false, bttextcmp, C_COLLATION_OID);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fmin_trans_bpchar(PG_FUNCTION_ARGS)
+{
+	return __minmax_trans_varlena(fcinfo, true, bpcharcmp, C_COLLATION_OID);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fmax_trans_bpchar(PG_FUNCTION_ARGS)
+{
+	return __minmax_trans_varlena(fcinfo, false, bpcharcmp, C_COLLATION_OID);
+}
+
+/* the value of the state as a fresh 4-byte-header varlena (text and bpchar have the same layout) */
+static Datum
+__fminmax_final_text(PG_FUNCTION_ARGS)
+{
+	bytea	   *state = PG_GETARG_BYTEA_PP(0);
+	struct varlena *v;
+	struct varlena *r;
+	Size		len;
+
+	if (VARSIZE_ANY_EXHDR(state) == 0)
+		PG_RETURN_NULL();
+	v = (struct varlena *) VARDATA_ANY(state);
+	len = VARATT_IS_1B(v) ? VARSIZE_1B(v) - VARHDRSZ_SHORT : VARSIZE_4B(v) - VARHDRSZ;
+	r = (struct varlena *) palloc(VARHDRSZ + len);
+	SET_VARSIZE(r, VARHDRSZ + len);
+	memcpy(VARDATA(r), VARATT_IS_1B(v) ? VARDATA_1B(v) : VARDATA_4B(v), len);
+	PG_RETURN_POINTER(r);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fminmax_final_text(PG_FUNCTION_ARGS)
+{
+	return __fminmax_final_text(fcinfo);
+}
+
+PUBLIC_FUNCTION(Datum)
+pgstrom_fminmax_final_bpchar(PG_FUNCTION_ARGS)
+{
+	return __fminmax_final_text(fcinfo);
 }
 
 PUBLIC_FUNCTION(Datum)

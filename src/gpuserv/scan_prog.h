@@ -67,6 +67,7 @@ typedef struct scan_prog
 	int8_t			key_of_col[SCAN_AGG_MAX];	/* output column -> key index, or -1 */
 	/* numeric aggregates / keys: the scale the plan derived (every row must have it), or -1 */
 	int16_t			agg_scale[SCAN_AGG_MAX];
+	uint8_t			agg_bp[SCAN_AGG_MAX];		/* min / max of a bpchar (A6b): the comparison ignores the trailing blanks */
 	int16_t			key_scale[SCAN_GROUP_KEYS];
 	/* a string GROUP BY key (A6): 1 text / varchar, 2 bpchar, 0 otherwise; the kernel gets the same as the bitmask of header word 21 */
 	int8_t			key_str[SCAN_GROUP_KEYS];

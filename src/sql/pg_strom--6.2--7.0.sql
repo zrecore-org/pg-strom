@@ -186,6 +186,111 @@ CREATE AGGREGATE pgstrom.max_numx(bytea)
 );
 
 ---
+--- min / max of text (varchar through it) and bpchar under the C collation: the partial state is the value in a bytea, an empty bytea
+--- is "no value" (A6b)
+---
+CREATE FUNCTION pgstrom.pmin(text)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(text,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_trans_text(bytea,bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fmin_trans_text'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_text(bytea)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(text)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(text,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_trans_text(bytea,bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fmax_trans_text'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_text(bytea)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fminmax_final_text(bytea)
+  RETURNS text
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE AGGREGATE pgstrom.min_text(bytea)
+(
+  sfunc = pgstrom.fmin_trans_text,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_text,
+  parallel = safe
+);
+CREATE AGGREGATE pgstrom.max_text(bytea)
+(
+  sfunc = pgstrom.fmax_trans_text,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_text,
+  parallel = safe
+);
+CREATE FUNCTION pgstrom.pmin(bpchar)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmin(bpchar,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_trans_bpchar(bytea,bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fmin_trans_bpchar'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmin_bpchar(bytea)
+  RETURNS bpchar
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_bpchar'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(bpchar)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.pmax(bpchar,bool)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_partial_minmax_text'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_trans_bpchar(bytea,bytea)
+  RETURNS bytea
+  AS 'MODULE_PATHNAME','pgstrom_fmax_trans_bpchar'
+  LANGUAGE C CALLED ON NULL INPUT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fmax_bpchar(bytea)
+  RETURNS bpchar
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_bpchar'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE FUNCTION pgstrom.fminmax_final_bpchar(bytea)
+  RETURNS bpchar
+  AS 'MODULE_PATHNAME','pgstrom_fminmax_final_bpchar'
+  LANGUAGE C STRICT PARALLEL SAFE;
+CREATE AGGREGATE pgstrom.min_bpchar(bytea)
+(
+  sfunc = pgstrom.fmin_trans_bpchar,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_bpchar,
+  parallel = safe
+);
+CREATE AGGREGATE pgstrom.max_bpchar(bytea)
+(
+  sfunc = pgstrom.fmax_trans_bpchar,
+  stype = bytea,
+  finalfunc = pgstrom.fminmax_final_bpchar,
+  parallel = safe
+);
+
+---
 --- variance / stddev of int2, int4, int8: the partial state is PostgreSQL's integer accumulator state, exactly (A10)
 ---
 CREATE FUNCTION pgstrom.pvarint(int2)

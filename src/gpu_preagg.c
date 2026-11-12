@@ -209,6 +209,29 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 true,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
+	/*
+	 * A6b: min / max of text, varchar (through min(text)) and bpchar. Only under the C collation (the planner checks the input collation of
+	 * the aggregate), a plain column. The partial state is the value itself (its varlena, header included) in a bytea, an empty
+	 * bytea says "no value" (pgstrom.pmin(text), pgstrom.min_text(bytea)). The device extreme is the string register of the winning row.
+	 */
+	{"min(text)",
+	 "s:min_text(bytea)",
+	 "s:pmin(text)",
+	 "s:fmin_text(bytea)",
+	 KAGG_ACTION__PMIN_TEXT,
+	 KAGG_FINAL__FMINMAX_TEXT,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
+	},
+	{"min(bpchar)",
+	 "s:min_bpchar(bytea)",
+	 "s:pmin(bpchar)",
+	 "s:fmin_bpchar(bytea)",
+	 KAGG_ACTION__PMIN_TEXT,
+	 KAGG_FINAL__FMINMAX_TEXT,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
+	},
 	{"min(money)",
 	 "s:min_cash(bytea)",
 	 "s:pmin(money)",
@@ -357,6 +380,24 @@ static aggfunc_catalog_t	aggfunc_catalog_array[] = {
 	 KAGG_ACTION__PMAX_INT64,
 	 KAGG_FINAL__FMINMAX_NUMX,
 	 true,
+	 KSORT_KEY_KIND__PMINMAX_FP64
+	},
+	{"max(text)",
+	 "s:max_text(bytea)",
+	 "s:pmax(text)",
+	 "s:fmax_text(bytea)",
+	 KAGG_ACTION__PMAX_TEXT,
+	 KAGG_FINAL__FMINMAX_TEXT,
+	 false,
+	 KSORT_KEY_KIND__PMINMAX_FP64
+	},
+	{"max(bpchar)",
+	 "s:max_bpchar(bytea)",
+	 "s:pmax(bpchar)",
+	 "s:fmax_bpchar(bytea)",
+	 KAGG_ACTION__PMAX_TEXT,
+	 KAGG_FINAL__FMINMAX_TEXT,
+	 false,
 	 KSORT_KEY_KIND__PMINMAX_FP64
 	},
 	{"max(money)",
@@ -1277,6 +1318,14 @@ __aggfunc_resolve_partial_func(aggfunc_catalog_entry *entry,
 			partfn_bufsz = sizeof(kagg_state__pminmax_fp64_packed);
 			break;
 
+		case KAGG_ACTION__PMIN_TEXT:
+		case KAGG_ACTION__PMAX_TEXT:
+			/* variable length: the state is the value itself (A6b) */
+			func_nargs = 1;
+			type_oid = BYTEAOID;
+			partfn_bufsz = sizeof(int64_t);
+			break;
+
 		case KAGG_ACTION__PAVG_INT:
 		case KAGG_ACTION__PSUM_INT:
 			func_nargs = 1;
@@ -1693,6 +1742,42 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 	}
 	/* sanity checks */
 	Assert(aggref->aggkind == AGGKIND_NORMAL && !aggref->aggvariadic);
+
+	/*
+	 * A6b: min / max of a string. The device compares bytes: only the C collation orders strings that way, and the extreme
+	 * is the string register of a column of the scanned relation (no join, no computed value).
+	 */
+	if (aggfn_cat->partial_func_action == KAGG_ACTION__PMIN_TEXT ||
+		aggfn_cat->partial_func_action == KAGG_ACTION__PMAX_TEXT)
+	{
+		Node   *arg;
+
+		if (list_length(aggref->args) != 1 || con->inner_target_list != NIL ||
+			!OidIsValid(aggref->inputcollid) ||
+			!get_collation_isdeterministic(aggref->inputcollid) ||
+			!__collate_is_c(aggref->inputcollid))
+		{
+			elog(DEBUG2, "min/max of a string needs the C collation and a scan without a join: %s",
+				 nodeToString(aggref));
+			return NULL;
+		}
+		arg = (Node *) ((TargetEntry *) linitial(aggref->args))->expr;
+		while (arg != NULL)
+		{
+			if (IsA(arg, RelabelType))
+				arg = (Node *) ((RelabelType *) arg)->arg;
+			else if (IsA(arg, CollateExpr))
+				arg = (Node *) ((CollateExpr *) arg)->arg;
+			else
+				break;
+		}
+		if (arg == NULL || !IsA(arg, Var) || ((Var *) arg)->varlevelsup != 0)
+		{
+			elog(DEBUG2, "min/max of a string needs a plain column: %s",
+				 nodeToString(aggref));
+			return NULL;
+		}
+	}
 
 	/*
 	 * Build partial-aggregate function
@@ -2863,6 +2948,25 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 			elog(DEBUG2, "GpuPreAgg: too many columns for the Vulkan service (%d output columns, %d kernel variables)",
 				 list_length(con.target_partial->exprs), nslots);
 			return;
+		}
+	}
+	/*
+	 * A6b: the extreme of a string is one string register per workgroup of the aggregation kernel without GROUP BY (agg.slang);
+	 * the GROUP BY kernels (shared-memory tables, the session-wide table) do not hold one yet: their groups stay on the CPU
+	 */
+	if (parse->groupClause)
+	{
+		ListCell   *lct;
+
+		foreach (lct, con.pp_info->groupby_actions)
+		{
+			int		act = lfirst_int(lct);
+
+			if (act == KAGG_ACTION__PMIN_TEXT || act == KAGG_ACTION__PMAX_TEXT)
+			{
+				elog(DEBUG2, "GpuPreAgg: min/max of a string is not offered with GROUP BY yet");
+				return;
+			}
 		}
 	}
 	/*

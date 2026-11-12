@@ -231,7 +231,7 @@ for c in NUMCOLS:
         add("agg.fn.%s.%s.ungrouped" % (fn, c), "agg", "agg", "select %s(%s) from cf" % (fn, c))
 AGGS = [
     ("count_star", "count(*)"),
-    ("min_text", "min(vt)"), ("max_text", "max(vt)"),
+    ("min_text", 'min(vt collate "C")'), ("max_text", 'max(vt collate "C")'),   # A6b: the device orders strings bytewise: the C collation only
     ("min_date", "min(vd)"), ("max_date", "max(vd)"),
     ("min_timestamp", "min(vts)"), ("max_timestamp", "max(vts)"),
     ("bool_and", "bool_and(vb)"), ("bool_or", "bool_or(vb)"), ("every", "every(vb)"),
@@ -258,7 +258,7 @@ AGGS = [
     ("sum_numeric_expr", "sum(vn * 2)"), ("max_numeric_expr", "max(vn + 1)"),
     ("min_uuid", "min(gu::text)"), ("sum_int2_to_int8", "sum(v2::int8)"),
     ("avg_int", "avg(v4)"), ("count_distinct_date", "count(distinct vd)"),
-    ("min_char", "min(gw)"), ("max_varchar", "max(gv)"),
+    ("min_char", 'min(gw collate "C")'), ("max_varchar", 'max(gv collate "C")'), ("max_char", 'max(kw collate "C")'), ("min_varchar", 'min(kv collate "C")'),
 ]
 for n, e in AGGS:
     add("agg.fn.%s" % n, "agg", "agg", "select g4, %s from cf group by 1" % e)
@@ -354,6 +354,7 @@ for s, t in (("arrow", "af"), ("parquet", "pf"), ("gpucache", "gcf")):
             continue          # pg2arrow cannot write a numeric without a declared precision either
         for fn in ("sum", "max"):
             add(p + "fn.%s.%s" % (fn, c), "agg", "agg", "select g4, %s(%s) from %s group by 1" % (fn, c, t))
+    add(p + "fn.min_text.ungrouped", "agg", "agg", 'select min(vt collate "C"), max(kw collate "C"), min(kv collate "C") from %s' % t)    # A6b
     add(p + "fn.ungrouped_mix", "agg", "agg", "select count(*), sum(v4), min(v8), max(vf8), avg(vf4) from %s" % t)
     for n, e in AGGS:
         if n in ("min_text", "bool_and", "count_distinct_int", "string_agg_unordered", "count_filter"):
