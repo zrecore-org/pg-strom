@@ -410,9 +410,6 @@ jobs:
     needs: gpu-changes
     runs-on: ${{ vars.GPU_RUNNER_LABEL }}
     timeout-minutes: 150
-    # TEMPORARY: the NVIDIA T4 run found 9 wrong results in float8_dev (branch nvidia-fix investigates). The job still runs on
-    # every push and shows its failure, but it does not turn the whole run red until that is fixed. Remove this line then.
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
