@@ -53,14 +53,9 @@ rmm() { # label, query-with-%T; results equal to the CPU's; the plan has a GpuPr
 		echo "  ok    $label (${g#*|} rows, GpuPreAgg=$plan)"
 	else echo "  FAIL  $label (GpuPreAgg=$plan)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
 }
-# rmm: the shape is a device aggregate (MM_EXPECT_GPU=1 asserts the GpuPreAgg). rmc: it stays on the CPU today (min / max of a string with
-# GROUP BY: the GROUP BY kernels have no string extreme yet, A6b), so the plan must have no GpuPreAgg and the results are the CPU's.
-rmc() { # label, query-with-%T, table
-	label=$1; tbl=${3:-tmo}; qry=$(printf '%s' "$2" | sed "s/%T/$tbl/g")
-	pl=$($PSQL -d scantest -c "$GPU $CMM explain $qry" | grep -c "$GPLAN")
-	g=$(q "$GPU $CMM" "$qry"); c=$(q "$CPU" "$qry")
-	if [ "$pl" -eq 0 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $label (${g#*|} rows, stays on the CPU)"
-	else echo "  FAIL  $label (GpuPreAgg=$pl)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+# rmm: the shape is a device aggregate (MM_EXPECT_GPU=1 asserts the GpuPreAgg). rmc: the same for a GROUP BY shape (A6b).
+rmc() { # label, query-with-%T, table: a GROUP BY shape: the plan has a GpuPreAgg (A6b) and the results equal the CPU's, with a limit on the groups that allows 3000
+	rmm "$1" "$2" "${3:-tmo}" "$CMM"
 }
 rmr() { # label, query-with-%T, table: results equal to the CPU's, whatever the plan (a table of one row is not worth a GPU plan)
 	label=$1; tbl=${3:-tmo}; qry=$(printf '%s' "$2" | sed "s/%T/$tbl/g")
@@ -82,7 +77,7 @@ for src in tmo tmoa tmop tmog; do
 	rmc "$src: GROUP BY an integer" 'select g, min(t collate "C"), max(t collate "C"), min(v collate "C"), max(w collate "C"), count(*), sum(n) from %T group by g' $src
 	rmc "$src: GROUP BY two integers" 'select g, g2, max(t collate "C"), min(w collate "C") from %T group by g, g2' $src
 	rmc "$src: many groups" 'select gm, min(t collate "C"), max(v collate "C"), count(*) from %T group by gm' $src
-	rmc "$src: GROUP BY with an empty group" 'select g, min(t collate "C"), max(t collate "C") from %T where g in (10, 11) group by g' $src
+	rmr "$src: GROUP BY with an empty group (a two-group result: not worth a GPU plan)" 'select g, min(t collate "C"), max(t collate "C") from %T where g in (10, 11) group by g' $src
 done
 # heap only: bpchar without a length, compressed and out-of-line values, the one-row and empty tables
 rmm "heap: bpchar without a length (::text drops the blanks the ties differ in)" 'select min(wn collate "C")::text, max(wn collate "C")::text, count(wn) from %T' tmo
@@ -90,9 +85,18 @@ rmm "heap: compressed and out-of-line values" 'select min(big collate "C"), max(
 rmm "heap: compressed value among short ones" 'select min(big collate "C"), max(t collate "C") from %T where n < 4' tmo
 rmr "heap: one row" 'select min(t collate "C"), max(v collate "C"), min(w collate "C") from %T' tm1
 rmr "heap: no rows" 'select min(t collate "C"), max(v collate "C"), max(w collate "C") from %T' tm0
-rmc "heap: no rows, GROUP BY" 'select g, min(t collate "C") from %T group by g' tm0
+rmr "heap: no rows, GROUP BY" 'select g, min(t collate "C") from %T group by g' tm0
 rmc "heap: compressed and out-of-line values, GROUP BY" 'select g2, min(big collate "C"), max(ext collate "C") from %T group by g2' tmo
 rmc "heap: bpchar without a length, GROUP BY" 'select g, min(wn collate "C")::text, max(wn collate "C")::text, count(wn) from %T group by g' tmo
+
+# a string key with a string extreme (the session-wide table), more aggregates, a group that has only NULLs
+for src in tmo tmoa tmop tmog; do
+	rmc "$src: text key, text min / max" 'select w, min(t collate "C"), max(v collate "C"), count(*) from %T group by w' $src
+	rmc "$src: varchar key, bpchar min, text max" 'select v, min(w collate "C"), max(t collate "C") from %T where n < 30 group by v' $src
+	rmc "$src: integer key, FILTER and NULL groups" 'select g2, min(t collate "C") filter (where n > 25), max(w collate "C") filter (where g < 11), sum(n) from %T group by g2' $src
+	rmc "$src: two keys and a selective qual" 'select g, g2, max(v collate "C"), min(t collate "C") from %T where n = 7 or n = 8 group by g, g2' $src
+done
+rmc "heap: a text key and a text extreme of the same column" 'select t, min(t collate "C"), max(t collate "C"), count(*) from %T group by t' tmo
 
 # The collation gate: without COLLATE "C" a database whose default collation is not C must keep min / max of a string on the CPU
 # (the ordering is locale based), and an expression is not a column value.

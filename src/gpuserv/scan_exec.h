@@ -175,6 +175,9 @@ int		scan_gtab_task_flush(const scan_prog *prog, agg_state *st, const unsigned c
 int		scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
 								 const unsigned char *const *srcs);
 int		scan_gtab_forced(const agg_state *st, const scan_prog *prog);
+int		scan_gtab_per_task(const scan_prog *prog);
+int		scan_gtab_text_collect(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t side_base, uint32_t rw,
+							   const unsigned char *const *srcs);
 int		scan_gtab_switch_allowed(void);
 int		scan_prog_has_float_agg(const scan_prog *prog);	/* a float8 aggregate (class 6 - 9): the session-wide table (gtab) has no float accumulators */
 int		scan_group_flush(const scan_prog *prog, agg_state *st, char *err, size_t errlen);
@@ -221,9 +224,10 @@ void	scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32
 /* the keys of the groups the session has so far (what a specialized GROUP BY kernel is made for) */
 void	scan_group_keystats(const agg_state *st, int nkeys, spec_keystats *ks);
 int		scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-								uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk);
+								uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk,
+								const unsigned char *const *srcs);
 int		scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
-								  uint32_t ov_rec, int nk);
+								  uint32_t ov_rec, int nk, const unsigned char *const *srcs);
 void	scan_join_merge_ojmap(const scan_prog *prog, const join_inner *ji, const uint32_t *out, size_t base);
 
 /* Arrow record batches as the outer relation (arrow_exec.c): aggregation, GROUP BY, join, join aggregation */

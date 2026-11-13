@@ -1857,11 +1857,19 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 	double		t0 = arrow_now_ms(), t1 = 0, tg = 0;
 	const uint32_t ov_rec = 1 + 2 * SCAN_GROUP_KEYS + 3 * 12;
 	const unsigned char *srcs[4] = { NULL, NULL, NULL, NULL };
+	uint32_t	rw = 0;				/* text min / max (A6b): words per row of the side area behind the flags (gtab.slang mode 4) */
 
 	err[0] = '\0';
 	if (arrow_task_parse(task, &at, err, errlen) != 0)
 		return -1;
 	nrows = at.nrows;
+	if (prog->has_str_agg)
+	{
+		for (uint32_t a = 0; a < prog->nagg; a++)
+			if (prog->words[prog->words[11] + 4 * a] >= 14)
+				rw += 2;
+		rw += 1;
+	}
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
 	gpipe = scan_gtab_vm_pipe(eng, 1, variant);
 	memset(&sh, 0, sizeof(sh));
@@ -1887,6 +1895,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		uint32_t   *flags;
 		const uint32_t *out;
 		gpu_vk_buffer *bufs[6];
+		size_t		side_words;
 		double		tp = arrow_now_ms();
 
 		if (n > ARROW_GTAB_PASS_ROWS)
@@ -1895,7 +1904,8 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		ngroups = (pages + ppw - 1) / ppw;
 		arrow_task_pass(&at, first, n);
 		/* the flags: one word per row of the pass (at page * ARROW_VP + row), after the 4 header words */
-		if (gpu_vk_buffer_create(vk, &bout, ((size_t) 4 + (size_t) pages * ARROW_VP) * 4, 0) != 0)
+		side_words = rw ? (size_t) pages * ARROW_VP * rw : 0;
+		if (gpu_vk_buffer_create(vk, &bout, ((size_t) 4 + (size_t) pages * ARROW_VP + side_words) * 4, 0) != 0)
 		{
 			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 			goto done;
@@ -1904,6 +1914,12 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		out = (const uint32_t *) bout.map;
 		flags = (uint32_t *) bout.map + 4;
 		memset(bout.map, 0, 16);
+		if (rw)
+		{
+			memset((uint32_t *) bout.map + 4 + (size_t) pages * ARROW_VP, 0, side_words * 4);
+			((uint32_t *) at.bprog.map)[22] = 4 + pages * ARROW_VP;
+			((uint32_t *) at.bprog.map)[23] = rw;
+		}
 		bufs[0] = &at.bg;
 		bufs[1] = &bout;
 		bufs[2] = &at.bprog;
@@ -1911,14 +1927,19 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		bufs[4] = &at.bdummy;
 		bufs[5] = scan_gtab_buffer(st);
 		hits0 = hdr[1] = 0;
-		for (uint32_t mode = 0; mode < 4; mode++)
+		for (uint32_t step = 0; step < 5; step++)
 		{
+			static const uint32_t order[5] = {0, 1, 2, 4, 3};		/* mode 4 (text extremes) before the buffer of mode 3 replaces the side area */
+			uint32_t	mode = order[step];
+
 			if ((mode == 1 || mode == 2) && nmiss == 0)
+				continue;
+			if (mode == 4 && !rw)
 				continue;
 			if (mode == 3)
 			{
 				/* rows for the CPU: a bigger buffer (the flags are kept) with room for their records */
-				uint32_t	ovf_base = 4 + pages * ARROW_VP;
+				uint32_t	ovf_base = 4 + pages * ARROW_VP + (uint32_t) side_words;
 				gpu_vk_buffer nb;
 
 				for (uint32_t i = 0; i < n; i++)
@@ -1949,7 +1970,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 				pc[1] = base | (mode << 28);
 				pc[2] = ppw;
 				pc[3] = 4;							/* flags_base */
-				pc[4] = 4 + pages * ARROW_VP;		/* mode 3: the overflow list */
+				pc[4] = 4 + pages * ARROW_VP + (uint32_t) side_words;		/* mode 3: the overflow list */
 				if (spec_dispatch(eng, prog, SPEC_GTAB | SPEC_ARROW, &sh, gpipe, sp, bufs, pc, groups) != 0)
 				{
 					snprintf(err, errlen, "GPU dispatch failed: %s", vk->err);
@@ -1964,6 +1985,11 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 			if (mode == 0)
 				for (uint32_t i = 0; i < n; i++)
 					nmiss += (flags[i] == 4);
+			if (mode == 4 && scan_gtab_text_collect(prog, st, out, 4 + pages * ARROW_VP, rw, srcs) != 0)
+			{
+				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
+				goto done;
+			}
 		}
 		tg += arrow_now_ms() - tp;
 		st->nitems_in += hdr[1] - hits0;
@@ -1973,7 +1999,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 				goto done;
 		if (ncpu > 0)
 		{
-			uint32_t	ovf_base = 4 + pages * ARROW_VP;
+			uint32_t	ovf_base = 4 + pages * ARROW_VP + (uint32_t) side_words;
 
 			if (out[ovf_base] != ncpu ||
 				scan_gtab_merge_overflow(prog, st, out + ovf_base + 1, ncpu, srcs) != 0)
@@ -1987,7 +2013,7 @@ arrow_group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_p
 		gpu_vk_buffer_destroy(vk, &bout);
 		have_out = 0;
 	}
-	if (prog->has_str_key && scan_gtab_task_flush(prog, st, srcs, err, errlen) != 0)
+	if (scan_gtab_per_task(prog) && scan_gtab_task_flush(prog, st, srcs, err, errlen) != 0)
 		goto done;
 	st->npages_vfs_read += (uint32_t)((at.kds_src->length > (uint64_t) at.ad.as.head
 									   ? at.kds_src->length - at.ad.as.head : 0) / BLCKSZ);
@@ -2190,8 +2216,10 @@ scan_exec_arrow_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_p
 		}
 		else
 		{
-			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED) != 0 ||
-				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_SHARED) != 0)
+			const unsigned char *gsrcs[3] = {(const unsigned char *) at.bg.map, NULL, NULL};	/* text min / max: string registers of the data buffer */
+
+			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED, gsrcs) != 0 ||
+				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_SHARED, gsrcs) != 0)
 			{
 				snprintf(err, errlen, "out of memory");
 				goto done;
@@ -2857,8 +2885,8 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 			scan_agg_merge_workgroups(prog, st, out, ngroups, NULL);
 		else
 		{
-			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN) != 0 ||
-				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_JOIN) != 0)
+			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, NULL) != 0 ||
+				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_JOIN, NULL) != 0)
 			{
 				snprintf(err, errlen, "out of memory");
 				goto done;

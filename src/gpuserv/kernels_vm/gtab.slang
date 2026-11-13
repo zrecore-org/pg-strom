@@ -58,10 +58,30 @@ static const uint AC_COUNT_COND = 2;
 static const uint AC_SUM        = 3;
 static const uint AC_MIN        = 4;
 static const uint AC_MAX        = 5;
+static const uint AC_SMIN       = 14;           // min / max of text (14, 15) and bpchar (16, 17), A6b
 static const uint NONE_REG      = 0xffffffffu;
 static const uint NO_SLOT       = 0xffffffffu;
 
 static uint g_kstr;                                 // header word 21: the string keys (see above)
+static uint g_side;                                 // header word 22: first word of the per-row side area of the text min / max (outb)
+static uint g_rw;                                   // header word 23: words per row of the side area: 1 + 2 * (text aggregates)
+
+// bytewise order of two string registers (the C collation: memcmp, then the length); bpchar ignores the trailing blanks (as agg.slang)
+int str_reg_cmp(int64_t x, int64_t y, bool bp)
+{
+    uint sa = uint((uint64_t(x) >> 60) & 3u), sb = uint((uint64_t(y) >> 60) & 3u);
+    uint oa = uint(uint64_t(x) & 0xffffffffu), ob = uint(uint64_t(y) & 0xffffffffu);
+    uint la = uint((uint64_t(x) >> 32) & 0x0fffffffu), lb = uint((uint64_t(y) >> 32) & 0x0fffffffu);
+    if (bp)
+    {
+        la = str_truelen(sa, oa, la);
+        lb = str_truelen(sb, ob, lb);
+    }
+    int c = str_memcmp(sa, oa, sb, ob, min(la, lb));
+    if (c == 0 && la != lb)
+        c = (la < lb) ? -1 : 1;
+    return c;
+}
 
 groupshared uint    sh_hits;
 groupshared uint    st_kn[SCAN_WG];                 // null mask | 0x80000000 if the row qualifies
@@ -202,13 +222,79 @@ void gt_insert(uint tag, uint kn, uint tid, uint mask, uint stride)
     }
 }
 
-void gt_accumulate(uint base, uint tid, uint naggs, uint aggoff)
+// the string register of a side-area entry (bit 30 of the high word marks a value)
+int64_t gt_side_reg(uint w)
 {
-    uint off = base + GT_KEYW;
+    return int64_t(uint64_t(outb[w]) | (uint64_t(outb[w + 1] & 0xbfffffffu) << 32));
+}
+
+// min / max of a string (A6b), after the dispatches that added the rows: a row that has a text value found its slot in mode 0 or 2
+// and left { slot, registers } in the side area (outb, written by an earlier dispatch, so visible). Here the row competes for the slot's
+// word, which holds the winning row + 1: a compare-and-swap loop that only ever installs a better row (lock free: a failed swap means
+// another row improved the word), comparing the bytes of the registers, which point into the task's pages (read only).
+void gt_text_row(uint row, uint naggs, uint aggoff)
+{
+    uint sb = g_side + row * g_rw;
+    uint slot = outb[sb];
+    if (slot == 0)
+        return;
+    uint off = slot + GT_KEYW;
+    uint t = 0;
     for (uint k = 0; k < naggs; k++)
     {
         uint cls = prog[aggoff + 4 * k];
-        if (st_ok[tid * GA_NA + k] != 0)
+        if (cls >= AC_SMIN)
+        {
+            if ((outb[sb + 2 + 2 * t] & 0x40000000u) != 0)
+            {
+                int64_t my = gt_side_reg(sb + 1 + 2 * t);
+                bool bp = (cls >= AC_SMIN + 2u);
+                bool smin = (((cls - AC_SMIN) & 1u) == 0);
+                uint cur = gtab[off];
+                for (uint it = 0; it < 65536u; it++)
+                {
+                    if (cur != 0)
+                    {
+                        int c = str_reg_cmp(my, gt_side_reg(g_side + (cur - 1) * g_rw + 1 + 2 * t), bp);
+                        if (smin ? (c >= 0) : (c <= 0))
+                            break;
+                    }
+                    uint prev;
+                    InterlockedCompareExchange(gtab[off], cur, row + 1, prev);
+                    if (prev == cur)
+                        break;
+                    cur = prev;
+                    if (it == 65535u)
+                        report_error(0, row, 0x7ffffffbu);
+                }
+            }
+            t++;
+        }
+        off += acc_width(cls);
+    }
+}
+
+void gt_accumulate(uint base, uint tid, uint naggs, uint aggoff, uint row)
+{
+    uint off = base + GT_KEYW;
+    uint t = 0;
+    for (uint k = 0; k < naggs; k++)
+    {
+        uint cls = prog[aggoff + 4 * k];
+        if (cls >= AC_SMIN)
+        {
+            // min / max of a string: only the row's side entry here, the slot is updated by mode 4
+            if (st_ok[tid * GA_NA + k] != 0)
+            {
+                uint64_t rg = uint64_t(st_val[tid * GA_NA + k]);
+                uint sb = g_side + row * g_rw;
+                outb[sb] = base;
+                outb[sb + 1 + 2 * t] = uint(rg & 0xffffffffu);
+                outb[sb + 2 + 2 * t] = uint(rg >> 32) | 0x40000000u;
+            }
+            t++;
+        }
+        else if (st_ok[tid * GA_NA + k] != 0)
         {
             int64_t v = st_val[tid * GA_NA + k];
             uint prev;
@@ -271,6 +357,8 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint keyoff  = prog[13];
     uint flags_base = kparam.total_lps;
     g_kstr       = prog[21];
+    g_side       = prog[22];
+    g_rw         = prog[23];
     uint mask    = gtab[2];
     uint stride  = gtab[3];
     uint a_cls[GA_NA];
@@ -302,6 +390,11 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 #else
             uint fidx = flags_base + lp_base + lp;
 #endif
+            if (mode == 4)
+            {
+                gt_text_row(fidx - flags_base, naggs, aggoff);
+                continue;
+            }
             if (mode != 0 && outb[fidx] != (mode == 3 ? 1u : 4u))
                 continue;                           // only the rows that found no slot (mode 3: the ones the CPU takes)
 
@@ -422,7 +515,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 outb[fidx] = (mode == 0) ? 4u : 1u;
                 continue;
             }
-            gt_accumulate(base, tid, naggs, aggoff);
+            gt_accumulate(base, tid, naggs, aggoff, fidx - flags_base);
             outb[fidx] = 0u;
         }
     }

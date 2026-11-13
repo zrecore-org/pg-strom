@@ -72,6 +72,7 @@ typedef struct scan_prog
 	/* a string GROUP BY key (A6): 1 text / varchar, 2 bpchar, 0 otherwise; the kernel gets the same as the bitmask of header word 21 */
 	int8_t			key_str[SCAN_GROUP_KEYS];
 	int				has_str_key;
+	int				has_str_agg;	/* GROUP BY with min / max of a string (A6b): classes 14 - 17 */
 	/* A6 specialization (specialize.h): the compiled kernel of this program, if any */
 	void		   *spec;				/* a spec_entry owned by the manager (we hold a reference) */
 	void		   *spec_next;			/* GROUP BY: a bigger kernel being compiled (spec_pipe) */

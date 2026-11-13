@@ -1997,12 +1997,15 @@ acc_add_value(agg_acc *acc, uint32_t cls, int64_t v, int64_t y)
 	}
 }
 
+static int acc_text_reg(agg_state *st, const scan_prog *prog, uint32_t a, agg_acc *acc, int64_t reg, const unsigned char *const *srcs);
+
 /*
  * One row staged by a GROUP BY kernel that found no slot (OV_REC: { ok, value lo, value hi } per accumulator, starting at av) into the
  * accumulators of its group. A covar / corr / regr_* row needs both of its arguments (the head holds X, the next entry Y).
  */
-static void
-acc_add_ov(agg_acc *accs, uint32_t nagg, const uint32_t *w, uint32_t aggoff, const uint32_t *av)
+static int
+acc_add_ov(agg_state *st, const scan_prog *prog, agg_acc *accs, uint32_t nagg, const uint32_t *w, uint32_t aggoff, const uint32_t *av,
+		   const unsigned char *const *srcs)
 {
 	for (uint32_t a = 0; a < nagg; a++)
 	{
@@ -2012,6 +2015,12 @@ acc_add_ov(agg_acc *accs, uint32_t nagg, const uint32_t *w, uint32_t aggoff, con
 		if (cls == 12 || !av[3 * a])
 			continue;
 		v = (int64_t)((uint64_t) av[3 * a + 1] | ((uint64_t) av[3 * a + 2] << 32));
+		if (cls >= 14)
+		{
+			if (acc_text_reg(st, prog, a, &accs[a], v, srcs) != 0)
+				return -1;			/* (the value is a string register of the task's pages) */
+			continue;
+		}
 		if (cls == 11)
 		{
 			if (a + 1 >= nagg || !av[3 * (a + 1)])
@@ -2020,6 +2029,7 @@ acc_add_ov(agg_acc *accs, uint32_t nagg, const uint32_t *w, uint32_t aggoff, con
 		}
 		acc_add_value(&accs[a], cls, v, y);
 	}
+	return 0;
 }
 
 /* the value of one output column of a partial aggregate row */
@@ -2472,6 +2482,61 @@ sd_get(const agg_state *st, int64_t id, uint32_t *p_len)
 }
 
 /*
+ * min / max of a string with GROUP BY (A6b): a group's extreme is the id of its bytes in the session's dictionary (acc->val; acc->n = 1:
+ * there is a value), so the group entries stay fixed-size and the extreme outlives the task's pages. The candidates are compared by
+ * bytes as the C collation does (bpchar without the trailing blanks); only a winner is interned.
+ */
+static int
+acc_text_wins(const agg_state *st, const scan_prog *prog, uint32_t a, const agg_acc *acc, const unsigned char *p, uint32_t len)
+{
+	uint32_t	cl;
+	const unsigned char *cp;
+	int			c;
+
+	if (!acc->n)
+		return 1;
+	cp = sd_get(st, acc->val, &cl);
+	c = text_extreme_cmp(p, len, cp, cl, prog->agg_bp[a]);
+	return prog->agg_ent_action[a] == KAGG_ACTION__PMIN_TEXT ? c < 0 : c > 0;
+}
+
+/* a string register of the kernel (or of the CPU VM: source 0 = the tuple) against the group's extreme. -1: out of memory or unreadable */
+static int
+acc_text_reg(agg_state *st, const scan_prog *prog, uint32_t a, agg_acc *acc, int64_t reg, const unsigned char *const *srcs)
+{
+	uint32_t	src = (uint32_t)(((uint64_t) reg >> 60) & 3u);
+	uint32_t	len = (uint32_t)(((uint64_t) reg >> 32) & 0x0fffffffu);
+	const unsigned char *p;
+	int64_t		id;
+
+	if (!srcs || !srcs[src])
+		return -1;
+	p = srcs[src] + (uint32_t)((uint64_t) reg & 0xffffffffu);
+	if (!acc_text_wins(st, prog, a, acc, p, len))
+		return 0;
+	id = sd_intern(st, p, len, prog->agg_bp[a]);
+	if (id < 0)
+		return -1;
+	acc->val = id;
+	acc->n = 1;
+	return 0;
+}
+
+/* another extreme of the same dictionary (a device table's winner of the task) against the group's */
+static void
+acc_text_id(const agg_state *st, const scan_prog *prog, uint32_t a, agg_acc *acc, int64_t id)
+{
+	uint32_t	len;
+	const unsigned char *p = sd_get(st, id, &len);
+
+	if (acc_text_wins(st, prog, a, acc, p, len))
+	{
+		acc->val = id;
+		acc->n = 1;
+	}
+}
+
+/*
  * The string keys of a group key as the kernel or the CPU VM staged them (string registers { offset | length << 32 | source << 60 })
  * into dictionary ids. base[s] is the buffer source s names. 0 on success, -1 on out of memory.
  */
@@ -2683,7 +2748,7 @@ ensure_group_pipeline(scan_engine *eng, int variant, int avariant, char *err, si
  */
 static int
 group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-				   uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk)
+				   uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk, const unsigned char *const *srcs)
 {
 	uint32_t	nagg = prog->nagg;
 	uint32_t	agg_col[SCAN_AGG_MAX];
@@ -2716,8 +2781,18 @@ group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, ui
 			if (!e)
 				return -1;
 			for (uint32_t a = 0; a < nagg; a++)
-				acc_merge_group_record(&e->acc[a], prog->agg_ent_action[a],
-									   rec + 2 + 2 * nk + 6 * a);
+			{
+				const uint32_t *ar = rec + 2 + 2 * nk + 6 * a;
+
+				if (prog->agg_ent_action[a] == KAGG_ACTION__PMIN_TEXT || prog->agg_ent_action[a] == KAGG_ACTION__PMAX_TEXT)
+				{
+					/* A6b: the workgroup's extreme is a string register { ar[2], ar[3] } of the task's pages */
+					if (ar[0] && acc_text_reg(st, prog, a, &e->acc[a], (int64_t)((uint64_t) ar[2] | ((uint64_t) ar[3] << 32)), srcs) != 0)
+						return -1;
+					continue;
+				}
+				acc_merge_group_record(&e->acc[a], prog->agg_ent_action[a], ar);
+			}
 		}
 	}
 	return 0;
@@ -2747,6 +2822,7 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 		for (uint32_t lp = 0; lp < nlp; lp++)
 		{
 			vm_reg		regs[SCAN_MAX_REGS];
+			const unsigned char *sb[4] = { NULL, NULL, NULL, NULL };
 			uint32_t	lpd, e = 0, knull = 0;
 			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
@@ -2804,11 +2880,10 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 				else
 					key[k] = r->v;
 			}
+			sb[0] = page + (lpd & 0x7fff);		/* the CPU VM's string registers are offsets from the tuple header (source 0) */
+			sb[3] = (const unsigned char *) (w + w[20]);
 			if (prog->has_str_key)
 			{
-				/* the CPU VM's string registers are offsets from the tuple header (source 0) */
-				const unsigned char *sb[4] = { page + (lpd & 0x7fff), NULL, NULL, (const unsigned char *) (w + w[20]) };
-
 				if (group_str_keys(st, prog, key, knull, sb) != 0)
 				{
 					snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
@@ -2833,6 +2908,15 @@ group_cpu_rows(const scan_prog *prog, agg_state *st, const kern_data_store *kds_
 					continue;
 				if (cls != 1 && regs[ra].isnull)
 					continue;
+				if (cls >= 14)
+				{
+					if (acc_text_reg(st, prog, a, &g->acc[a], regs[ra].v, sb) != 0)
+					{
+						snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
+						return -1;
+					}
+					continue;
+				}
 				if (cls == 11)
 				{
 					uint32_t	ry = w[aggoff + 4 * (a + 1) + 1];
@@ -2876,6 +2960,7 @@ typedef struct gtab_state
 	uint32_t	stride;				/* words per slot */
 	uint32_t	maxcap;
 	uint32_t	last_used;			/* slots the last task of a string-key table claimed (read before the flush cleared them) */
+	uint32_t   *tslot;				/* text min / max (A6b): per slot and text aggregate the dictionary id + 1 of the task's winner (0: none) */
 } gtab_state;
 
 static uint32_t
@@ -2904,9 +2989,16 @@ int
 scan_prog_has_float_agg(const scan_prog *prog)
 {
 	for (uint32_t a = 0; a < prog->nagg; a++)
-		if (prog->words[prog->words[11] + 4 * a] >= 6)
+		if (prog->words[prog->words[11] + 4 * a] >= 6 && prog->words[prog->words[11] + 4 * a] < 14)
 			return 1;
 	return 0;
+}
+
+/* the table's pointers into the task's pages (string keys) or its text extremes (side area of the task) do not outlive the task: flush after each */
+int
+scan_gtab_per_task(const scan_prog *prog)
+{
+	return prog->has_str_key || prog->has_str_agg;
 }
 
 int
@@ -2938,6 +3030,7 @@ gtab_destroy(agg_state *st)
 	{
 		if (st->gt->cap)
 			gpu_vk_buffer_destroy(st->gt->vk, &st->gt->buf);
+		free(st->gt->tslot);
 		free(st->gt);
 		st->gt = NULL;
 	}
@@ -3010,6 +3103,9 @@ acc_merge_gtab(agg_acc *acc, uint32_t action, const uint32_t *w)
 			acc->sum += pos - neg + xl + (xh << 32) - ((__int128) w[5] << 63);
 			break;
 		}
+		case KAGG_ACTION__PMIN_TEXT:
+		case KAGG_ACTION__PMAX_TEXT:
+			break;						/* A6b: gtab_flush merges the winners the host collected (gtab_text_collect) */
 		case KAGG_ACTION__PMIN_INT32:
 		case KAGG_ACTION__PMIN_INT64:
 		{
@@ -3042,10 +3138,13 @@ gtab_flush(const scan_prog *prog, agg_state *st, int clear, const unsigned char 
 	uint32_t	nagg = prog->nagg;
 	uint32_t	agg_col[SCAN_AGG_MAX], agg_off[SCAN_AGG_MAX];
 	uint32_t   *base = gt ? (uint32_t *) gt->buf.map : NULL;
-	uint32_t	off = GT_KEYW;
+	uint32_t	off = GT_KEYW, nt = 0;
 
 	if (!gt || !gt->cap)
 		return 0;
+	for (uint32_t a = 0; a < nagg; a++)
+		if (prog->words[prog->words[11] + 4 * a] >= 14)
+			nt++;
 	for (uint32_t a = 0; a < nagg; a++)
 	{
 		uint32_t	col;
@@ -3078,13 +3177,87 @@ gtab_flush(const scan_prog *prog, agg_state *st, int clear, const unsigned char 
 			snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 			return -1;
 		}
-		for (uint32_t a = 0; a < nagg; a++)
+		for (uint32_t a = 0, t = 0; a < nagg; a++)
+		{
 			acc_merge_gtab(&e->acc[a], prog->agg_action[agg_col[a]], w + agg_off[a]);
+			if (prog->words[prog->words[11] + 4 * a] >= 14)
+			{
+				uint32_t   *ts = gt->tslot ? &gt->tslot[(size_t) s * nt + t] : NULL;
+
+				if (ts && *ts)
+				{
+					acc_text_id(st, prog, a, &e->acc[a], (int64_t) *ts - 1);
+					if (clear)
+						*ts = 0;
+				}
+				t++;
+			}
+		}
 	}
 	if (clear)
 	{
 		memset(base + GT_HDR, 0, (size_t) gt->cap * gt->stride * 4);
 		base[0] = 0;
+	}
+	return 0;
+}
+
+/*
+ * Text min / max (A6b), after the dispatch of mode 4: the slot's word names the winning row of the task; its side entry (outb, from
+ * side_base, rw words per row) holds the string register, resolved here to the bytes in the task's pages and kept as a dictionary id per
+ * slot and text aggregate (gt->tslot, merged into the group by gtab_flush). The word is cleared: the next pass starts afresh.
+ */
+int
+scan_gtab_text_collect(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t side_base, uint32_t rw,
+					   const unsigned char *const *srcs)
+{
+	gtab_state *gt = st->gt;
+	uint32_t	nagg = prog->nagg, nt = 0, agg_off[SCAN_AGG_MAX], off = GT_KEYW;
+	uint32_t   *base = (uint32_t *) gt->buf.map;
+
+	for (uint32_t a = 0; a < nagg; a++)
+	{
+		uint32_t	cls = prog->words[prog->words[11] + 4 * a];
+
+		agg_off[a] = off;
+		off += gt_width(cls);
+		if (cls >= 14)
+			nt++;
+	}
+	if (!gt->tslot)
+	{
+		gt->tslot = calloc((size_t) gt->cap * (nt ? nt : 1), sizeof(uint32_t));
+		if (!gt->tslot)
+			return -1;
+	}
+	for (uint32_t s = 0; s < gt->cap; s++)
+	{
+		uint32_t   *w = base + GT_HDR + (size_t) s * gt->stride;
+
+		if (!w[0])
+			continue;
+		for (uint32_t a = 0, t = 0; a < nagg; a++)
+		{
+			agg_acc		tmp;
+			uint32_t   *ts, row;
+			const uint32_t *r;
+
+			if (prog->words[prog->words[11] + 4 * a] < 14)
+				continue;
+			ts = &gt->tslot[(size_t) s * nt + t];
+			t++;
+			if (!w[agg_off[a]])
+				continue;
+			row = w[agg_off[a]] - 1;
+			r = out + side_base + (size_t) row * rw + 1 + 2 * (t - 1);
+			memset(&tmp, 0, sizeof(tmp));
+			tmp.n = *ts ? 1 : 0;
+			tmp.val = (int64_t) *ts - 1;
+			if (acc_text_reg(st, prog, a, &tmp, (int64_t)((uint64_t) r[0] | ((uint64_t)(r[1] & 0xbfffffffu) << 32)), srcs) != 0)
+				return -1;
+			*ts = tmp.n ? (uint32_t)(tmp.val + 1) : 0;
+			w[agg_off[a]] = 0;
+		}
 	}
 	return 0;
 }
@@ -3196,7 +3369,7 @@ int
 scan_gtab_task_done(gpu_vk_ctx *vk, const scan_prog *prog, agg_state *st, char *err, size_t errlen)
 {
 	uint32_t   *hdr = (uint32_t *) st->gt->buf.map;
-	uint32_t	used = prog->has_str_key ? st->gt->last_used : hdr[0];
+	uint32_t	used = scan_gtab_per_task(prog) ? st->gt->last_used : hdr[0];
 
 	if (st->gt->cap < st->gt->maxcap && (uint64_t) used * 2 > st->gt->cap)
 	{
@@ -3234,7 +3407,8 @@ scan_gtab_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *r
 		g = group_lookup(&st->groups, nagg, key, rec[0]);
 		if (!g)
 			return -1;
-		acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS);
+		if (acc_add_ov(st, prog, g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS, srcs) != 0)
+			return -1;
 	}
 	return 0;
 }
@@ -3259,7 +3433,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	const uint32_t *out;
 	double		t0 = now_ms(), t1, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
-	uint32_t	hits0;
+	uint32_t	hits0, ntext = 0, rw = 0;
 	gpu_vk_pipeline *gpipe, *sp;
 	spec_shape	sh;
 
@@ -3307,7 +3481,15 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	}
 	st->nitems_raw += total_lps;
 	ngroups_total = (npages + group_ppw(AGG_PAGES_PER_WG) - 1) / group_ppw(AGG_PAGES_PER_WG);
-	out_words = 4 + (size_t) total_lps;
+	/* text min / max (A6b): after the flags a side area of rw words per row (the slot and the string registers, gtab.slang mode 4) */
+	if (prog->has_str_agg)
+	{
+		for (uint32_t a = 0; a < prog->nagg; a++)
+			if (prog->words[prog->words[11] + 4 * a] >= 14)
+				ntext++;
+		rw = 1 + 2 * ntext;
+	}
+	out_words = 4 + (size_t) total_lps + (size_t) total_lps * (rw ? rw : 0);
 	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
@@ -3316,6 +3498,8 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	have_out = 1;
 	out = (const uint32_t *) bout.map;
 	memset(bout.map, 0, 16);
+	if (rw)
+		memset((uint32_t *) bout.map + 4 + total_lps, 0, sizeof(uint32_t) * (size_t) total_lps * rw);
 	if (gpu_vk_buffer_create(vk, &bprog, prog->nwords * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the program buffer: %s", vk->err);
@@ -3323,17 +3507,26 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 	}
 	have_prog = 1;
 	memcpy(bprog.map, prog->words, prog->nwords * 4);
+	if (rw)
+	{
+		((uint32_t *) bprog.map)[22] = 4 + total_lps;		/* the side area (header words 22, 23 are free) */
+		((uint32_t *) bprog.map)[23] = rw;
+	}
 	hdr = (uint32_t *) st->gt->buf.map;
 	hits0 = hdr[1] = 0;
 	{
 		gpu_vk_buffer *bufs[6] = {&ps.bufF, &bout, &bprog, &btab, &ps.bufL, &st->gt->buf};
 		const uint32_t *flags = out + 4;
 
-		for (uint32_t mode = 0; mode < 3; mode++)
+		for (uint32_t mode = 0; mode < 4; mode++)
 		{
-			if (mode == 1 && nmiss == 0)
+			uint32_t	m = (mode == 3) ? 4 : mode;		/* mode 4: the text extremes, after the rows have their slots */
+
+			if (m == 1 && nmiss == 0)
 				continue;
-			if (mode == 2 && nmiss == 0)
+			if (m == 2 && nmiss == 0)
+				continue;
+			if (m == 4 && !rw)
 				continue;
 			for (uint32_t base = 0; base < ngroups_total; base += SCAN_WG_MAX)
 			{
@@ -3343,7 +3536,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 				if (groups > SCAN_WG_MAX)
 					groups = SCAN_WG_MAX;
 				pc[0] = npages;
-				pc[1] = base | (mode << 28);
+				pc[1] = base | (m << 28);
 				pc[2] = group_ppw(AGG_PAGES_PER_WG);
 				pc[3] = 4;
 				if (spec_dispatch(eng, prog, SPEC_GTAB, &sh, gpipe, sp, bufs, pc, groups) != 0)
@@ -3365,12 +3558,22 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 			}
 		}
 	}
+	if (rw)
+	{
+		const unsigned char *tsrcs[4] = { ps.baseF, ps.baseL, NULL, NULL };
+
+		if (scan_gtab_text_collect(prog, st, out, 4 + total_lps, rw, tsrcs) != 0)
+		{
+			snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
+			goto done;
+		}
+	}
 	st->nitems_in += hdr[1] - hits0;
 	t3 = now_ms();
 	/* the rows that found no slot: on the CPU */
 	if (group_cpu_rows(prog, st, kds_src, &ps, lp_base, npages, total_lps, out + 4, &n_overflow, err, errlen) != 0)
 		goto done;
-	if (prog->has_str_key)
+	if (scan_gtab_per_task(prog))
 	{
 		const unsigned char *srcs[4] = { ps.baseF, ps.baseL, NULL, NULL };
 
@@ -3571,7 +3774,8 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 		}
 	}
 	/* merge the workgroups' tables */
-	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED) != 0)
+	if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_SHARED,
+						   (const unsigned char *const[4]) { ps.baseF, ps.baseL, NULL, NULL }) != 0)
 	{
 		snprintf(err, errlen, "out of memory");
 		goto done;
@@ -3625,7 +3829,7 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 	col_value	cols[SCAN_AGG_MAX];
 	size_t		tupsz = sizeof(kern_tupitem) + 64 + SCAN_AGG_MAX * 48;
 	unsigned char *tup;
-	size_t		head_sz, resp_sz, cap, usage = 0, chunk_len;
+	size_t		head_sz, resp_sz, cap, usage = 0, chunk_len, tup_scratch = 0;
 	XpuCommand *resp;
 	kern_data_store *kds;
 	uint64_t   *rowindex;
@@ -3651,8 +3855,20 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 			cap += (size_t) nrows * (st->slen[k] + 8);
 	if (st->sdict && prog && prog->has_str_key)
 		cap += (size_t) nrows * (st->sdict->len / (st->sdict->nents ? st->sdict->nents : 1) + 8);
+	if (grouped && st->sdict && prog && prog->has_str_agg)
+	{
+		/* min / max of a string with GROUP BY (A6b): the extremes are in the dictionary; a varlena per column is formed in scratch space after the tuple */
+		size_t		ntx = 0;
+
+		for (uint32_t a = 0; a < prog->nagg; a++)
+			if (prog->words[prog->words[11] + 4 * a] >= 14)
+				ntx++;
+		tup_scratch = (size_t) st->sdict->maxlen + 16;
+		tupsz += ntx * ((size_t) st->sdict->maxlen + 16);
+		cap += (size_t) nrows * (st->sdict->len / (st->sdict->nents ? st->sdict->nents : 1) + 8) * 2;
+	}
 	resp = calloc(1, cap);
-	tup = malloc(tupsz);
+	tup = malloc(tupsz + tup_scratch * SCAN_AGG_MAX);
 	if (!resp || !tup)
 	{
 		free(resp);
@@ -3721,14 +3937,35 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				int			a = (prog && prog->words) ? prog->agg_of_col[j] : -1;
 
 				memset(&cols[j], 0, sizeof(cols[j]));
-				if (grouped || a < 0)
+				if (a < 0 || (grouped && !tup_scratch))
 				{
-					snprintf(err, errlen, "min / max of a string needs an aggregation without GROUP BY");
+					snprintf(err, errlen, "min / max of a string: no accumulator for the column");
 					free(resp); free(tup);
 					return NULL;
 				}
-				cols[j].ext = st->n[a] ? st->sval[a] : none;
-				cols[j].len = st->n[a] ? st->slen[a] : 0;
+				if (!grouped)
+				{
+					cols[j].ext = st->n[a] ? st->sval[a] : none;
+					cols[j].len = st->n[a] ? st->slen[a] : 0;
+				}
+				else if (!g->acc[a].n)
+				{
+					cols[j].ext = none;			/* no value: an empty bytea */
+					cols[j].len = 0;
+				}
+				else
+				{
+					/* the state is the value as a 4-byte-header varlena in a bytea */
+					uint32_t	vl;
+					const unsigned char *vp = sd_get(st, g->acc[a].val, &vl);
+					unsigned char *scr = tup + tupsz + tup_scratch * j;
+					uint32_t	hdr = (vl + 4) << 2;
+
+					memcpy(scr, &hdr, 4);
+					memcpy(scr + 4, vp, vl);
+					cols[j].ext = scr;
+					cols[j].len = vl + 4;
+				}
 			}
 			else
 			{
@@ -5102,7 +5339,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		const uint32_t *w = prog->words;
 		uint32_t	aggoff = w[11];
 
-		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN) != 0)
+		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, NULL) != 0)
 		{
 			snprintf(err, errlen, "out of memory");
 			goto done;
@@ -5122,7 +5359,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 				goto done;
 			}
-			acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_JOIN);
+			(void) acc_add_ov(st, prog, g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_JOIN, NULL);
 		}
 	}
 	t3 = now_ms();
@@ -5204,15 +5441,15 @@ scan_group_variant(int avariant, uint32_t *cap, uint32_t *rec_words, uint32_t *o
 
 int
 scan_group_merge_blocks(const scan_prog *prog, agg_state *st, const uint32_t *out, uint32_t ngroups_total,
-						uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk)
+						uint32_t cap, uint32_t rec_words, uint32_t blk_words, int nk, const unsigned char *const *srcs)
 {
-	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, nk);
+	return group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, nk, srcs);
 }
 
 /* the rows that found no slot in their workgroup's table: { null mask, keys, (ok, value) * aggregates } each */
 int
 scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *recs, uint32_t count,
-						  uint32_t ov_rec, int nk)
+						  uint32_t ov_rec, int nk, const unsigned char *const *srcs)
 {
 	const uint32_t *w = prog->words;
 	uint32_t	aggoff = w[11];
@@ -5229,7 +5466,8 @@ scan_group_merge_overflow(const scan_prog *prog, agg_state *st, const uint32_t *
 		g = group_lookup(&st->groups, nagg, key, rec[0]);
 		if (!g)
 			return -1;
-		acc_add_ov(g->acc, nagg, w, aggoff, rec + 1 + 2 * nk);
+		if (acc_add_ov(st, prog, g->acc, nagg, w, aggoff, rec + 1 + 2 * nk, srcs) != 0)
+			return -1;
 	}
 	return 0;
 }

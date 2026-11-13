@@ -1930,10 +1930,7 @@ scan_prog_build(const kern_session_info *session, const kern_data_store *kds_src
 		}
 		for (int k = 0; k < nagg; k++)
 			if (agg_tab[4 * k] >= 14 && nkeys > 0)
-			{
-				fail(&b, "min / max of a string with GROUP BY is not implemented by the Vulkan service yet");
-				goto error;
-			}
+				prog->has_str_agg = 1;			/* A6b: the GROUP BY kernels hold the extreme as a string register (gagg.slang) or a row (gtab.slang) */
 		for (int k = 0; k < nagg; k++)
 			if ((agg_tab[4 * k] >= 6 && agg_tab[4 * k] < 14 && nkeys > 0) || (agg_tab[4 * k] >= 10 && agg_tab[4 * k] < 14))
 				b.feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */

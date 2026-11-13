@@ -58,5 +58,22 @@ if [ -n "$ADHOC" ]; then
 	[ -n "$SKIP_TESTS" ] && exit 0
 fi
 . "${0%/*}/minmaxtext_tests.inc"
+
+# forced overflow (A6b): without the switch to the session-wide table (PGSTROM_GPUSERV_GTAB=0) the 3000 groups of gm do not fit the workgroups'
+# tables of gagg.slang, so most rows overflow to the CPU (group_cpu_rows, and the overflow lists of the Arrow kernels): the extremes of those rows
+# are resolved on the host and must merge with the kernels' by bytes
+echo "min / max of strings: overflow rows (PGSTROM_GPUSERV_GTAB=0)"
+stop
+PGSTROM_GPUSERV_GTAB=0 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "restart failed"; exit 1; }
+n=0; while [ $n -lt 120 ]; do
+	[ "$($PSQL -d postgres -c 'select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
+	n=$((n+1)); sleep 1
+done
+check "service is ready again" "$([ $n -lt 120 ]; echo $?)"
+for src in tmo tmoa tmop tmog; do
+	rmc "$src: overflow rows, many groups" 'select gm, min(t collate "C"), max(v collate "C"), min(w collate "C"), count(*), sum(n) from %T group by gm' $src
+	rmr "$src: overflow rows, NULL and empty extremes" 'select gm, max(t collate "C"), min(v collate "C") filter (where n > 3) from %T where g >= 10 group by gm' $src
+done
+rmc "heap: overflow rows, text key" 'select w, min(t collate "C"), max(v collate "C") from %T group by w' tmo
 echo
 if [ $fail -eq 0 ]; then echo "MINMAXTEXT DEV: ALL PASSED"; else echo "MINMAXTEXT DEV: $fail FAILED"; exit 1; fi

@@ -2951,25 +2951,6 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 		}
 	}
 	/*
-	 * A6b: the extreme of a string is one string register per workgroup of the aggregation kernel without GROUP BY (agg.slang);
-	 * the GROUP BY kernels (shared-memory tables, the session-wide table) do not hold one yet: their groups stay on the CPU
-	 */
-	if (parse->groupClause)
-	{
-		ListCell   *lct;
-
-		foreach (lct, con.pp_info->groupby_actions)
-		{
-			int		act = lfirst_int(lct);
-
-			if (act == KAGG_ACTION__PMIN_TEXT || act == KAGG_ACTION__PMAX_TEXT)
-			{
-				elog(DEBUG2, "GpuPreAgg: min/max of a string is not offered with GROUP BY yet");
-				return;
-			}
-		}
-	}
-	/*
 	 * float aggregates with GROUP BY (A10) run in the shared-memory kernels (the slot owners add the rows in order): at most
 	 * SCAN_GROUP_KEYS_SHARED keys, and the groups must fit the workgroups' tables; the session-wide table of gtab.slang
 	 * (many groups, three or four keys) has no float accumulators

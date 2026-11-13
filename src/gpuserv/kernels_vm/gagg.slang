@@ -54,9 +54,27 @@ static const uint AC_FSUM       = 6;            // 6 float8 sum / avg, 7 min, 8 
 static const uint AC_VAR        = 10;           // variance / stddev (n, Sx, Sxx), regr head (11) + continuation (12): see vs_acc()
 static const uint AC_REG        = 11;
 static const uint AC_VCONT      = 12;
+static const uint AC_SMIN       = 14;           // min / max of text (14, 15) and bpchar (16, 17), A6b: the accumulator is a string register
 static const uint NONE_REG      = 0xffffffffu;
 static const uint COMMITTED     = 0x8000u;
 static const uint NO_SLOT       = 0xffffffffu;
+
+// bytewise order of two string registers (the C collation: memcmp, then the length); bpchar ignores the trailing blanks (as agg.slang)
+int str_reg_cmp(int64_t x, int64_t y, bool bp)
+{
+    uint sa = uint((uint64_t(x) >> 60) & 3u), sb = uint((uint64_t(y) >> 60) & 3u);
+    uint oa = uint(uint64_t(x) & 0xffffffffu), ob = uint(uint64_t(y) & 0xffffffffu);
+    uint la = uint((uint64_t(x) >> 32) & 0x0fffffffu), lb = uint((uint64_t(y) >> 32) & 0x0fffffffu);
+    if (bp)
+    {
+        la = str_truelen(sa, oa, la);
+        lb = str_truelen(sb, ob, lb);
+    }
+    int c = str_memcmp(sa, oa, sb, ob, min(la, lb));
+    if (c == 0 && la != lb)
+        c = (la < lb) ? -1 : 1;
+    return c;
+}
 
 groupshared uint    sh_owner[GA_C];
 groupshared uint    sh_knull[GA_C];
@@ -116,10 +134,15 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint a_cls[GA_NA];
     for (uint k = 0; k < GA_NA; k++)
         a_cls[k] = (k < naggs) ? prog[aggoff + 4 * k] : 0;
-    bool has_f = false;                             // some aggregate is a float8 sum, min or max (class >= AC_FSUM)
+    bool has_f = false;                             // some aggregate is a float8 sum, min or max (class AC_FSUM .. 13)
+    bool has_s = false;                             // some aggregate is a min / max of a string (class >= AC_SMIN)
     for (uint k = 0; k < GA_NA; k++)
-        if (a_cls[k] >= AC_FSUM)
+    {
+        if (a_cls[k] >= AC_FSUM && a_cls[k] < AC_SMIN)
             has_f = true;
+        if (a_cls[k] >= AC_SMIN)
+            has_s = true;
+    }
 
     // empty table
     for (uint s = tid; s < GA_C; s += SCAN_WG)
@@ -367,7 +390,7 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                             continue;
                         for (uint k = 0; k < GA_NA; k++)
                         {
-                            if (a_cls[k] < AC_FSUM || st_ok[j * GA_NA + k] == 0)
+                            if (a_cls[k] < AC_FSUM || a_cls[k] >= AC_SMIN || st_ok[j * GA_NA + k] == 0)
                                 continue;
                             uint a = s * GA_NA + k;
                             if (a_cls[k] >= AC_VAR)
@@ -417,6 +440,40 @@ void gagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 }
             }
 #endif
+            // min / max of a string (A6b): the slot's owner folds the staged rows of the round in thread order; the accumulator is
+            // the 64-bit string register of the winning row (sh_l0, sh_l1), compared by bytes in the task's pages (read only)
+            if (has_s)
+            {
+                for (uint s = tid; s < GA_C; s += SCAN_WG)
+                {
+                    for (uint j = 0; j < SCAN_WG; j++)
+                    {
+                        if (st_slot[j] != s)
+                            continue;
+                        for (uint k = 0; k < GA_NA; k++)
+                        {
+                            uint cls = a_cls[k];
+                            if (cls < AC_SMIN || st_ok[j * GA_NA + k] == 0)
+                                continue;
+                            uint a = s * GA_NA + k;
+                            int64_t reg = st_val[j * GA_NA + k];
+                            bool take = (sh_an[a] == 0);
+                            if (!take)
+                            {
+                                int64_t cur = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
+                                int c = str_reg_cmp(reg, cur, cls >= AC_SMIN + 2u);
+                                take = (((cls - AC_SMIN) & 1u) == 0) ? (c < 0) : (c > 0);
+                            }
+                            if (take)
+                            {
+                                sh_an[a] = 1;
+                                sh_l0[a] = uint(uint64_t(reg) & 0xffffffffu);
+                                sh_l1[a] = uint(uint64_t(reg) >> 32);
+                            }
+                        }
+                    }
+                }
+            }
             for (uint s = tid; s < GA_C; s += SCAN_WG)
             {
                 uint o = sh_owner[s];
