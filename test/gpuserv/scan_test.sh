@@ -21,7 +21,7 @@ fail=0
 # exactly one shard, whatever the weights say. SHARD=1/1 (the default) runs everything.
 SHARD=${SHARD:-1/1}
 shard_i=${SHARD%/*}; shard_n=${SHARD#*/}
-SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fallback:150 fuzz:40 gist:30 gpusort:20 recheck:650"
+SHARD_UNITS="gpucache:530 postgis:360 s2:310 s1:303 arrow:60 a1:100 a2:15 a3:25 p1:40 types:210 s3:195 float8:110 jsonb:100 numeric:90 joinagg:80 spec:60 fallback:150 fuzz:40 gist:30 gpusort:20 recheck:650 minmaxtext:60"
 SHARD_MINE=$(echo $SHARD_UNITS | tr ' ' '\n' | sort -t: -k2 -nr | awk -F: -v n="$shard_n" -v me="$shard_i" \
 	'{ b = 1; for (k = 2; k <= n; k++) if (load[k] < load[b]) b = k; load[b] += $2; if (b == me) printf "%s ", $1 }')
 mine() { # does this shard run the unit? (a unit that is not in the list runs on shard 1)
@@ -61,10 +61,12 @@ pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 max_worker_processes = 24
 CONF
 sh "${0%/*}/pgconf_test.sh" >> "$ROOT/data/postgresql.conf"
-# A6: every dispatch also runs the specialized kernel next to the VM's and compares them (spec_verify.c); a cache
-# directory of its own keeps the test from using (or filling) the user's; the log shows what the specializer did
+# A6: every dispatch also runs the specialized kernel next to the VM's and compares them (spec_verify.c); the log shows what
+# the specializer did. The compiled kernels (SPIR-V, keyed by a hash of the generated source, so safe to share) live in the
+# persistent cache the pipeline cache uses, not in $ROOT: a scan no longer runs slangc again for every kernel of an earlier run
+# (a cold scan is hours; PGSTROM_GPUSERV_CACHE_DIR=$ROOT/speccache restores the isolated cache)
 export PGSTROM_GPUSERV_SPECIALIZE=${PGSTROM_GPUSERV_SPECIALIZE:-check}
-export PGSTROM_GPUSERV_CACHE_DIR=${PGSTROM_GPUSERV_CACHE_DIR:-$ROOT/speccache}
+export PGSTROM_GPUSERV_CACHE_DIR=${PGSTROM_GPUSERV_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pgstrom}
 export PGSTROM_GPUSERV_PIPELINE_CACHE_DIR=${PGSTROM_GPUSERV_PIPELINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pgstrom}   # the persisted pipeline cache is shared with prewarm_kernels.sh, not per test
 export PGSTROM_GPUSERV_SPEC_LOG=1
 export PGSTROM_GPUSERV_SORT=gpu		# GPU-Sort tests: the service sorts on the device whatever the row count
@@ -433,6 +435,9 @@ unit_source gpusort "${0%/*}/gpusort_tests.inc"
 unit_source gpucache "${0%/*}/gpucache_tests.inc"
 unit_source spec "${0%/*}/spec_tests.inc"
 unit_source fallback "${0%/*}/fallback_tests.inc"
+# min / max of text, varchar, bpchar (A6b): its own tables (a smaller size: the strings are long)
+MMROWS=${MMROWS:-60000}; MM_EXPECT_GPU=${MM_EXPECT_GPU:-1}
+mine minmaxtext && { . "${0%/*}/minmaxtext_setup.inc"; unit_source minmaxtext "${0%/*}/minmaxtext_tests.inc"; }
 
 echo "errors"
 if mine_tbl s1; then
