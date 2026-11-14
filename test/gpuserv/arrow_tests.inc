@@ -44,8 +44,19 @@ __achk() { # table label query settings pattern(s of the plan: all must be prese
 		for pat in "$@"; do echo "$pl" | grep -q "$pat" || ok=0; done
 	fi
 	g=$(q "$GPU $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	# ACHK_REPEAT=<n> ACHK_REPEAT_RE=<label regex>: run the GPU side n more times (a hunt for a result that varies)
+	if [ -n "$ACHK_REPEAT" ] && echo "$tbl: $label" | grep -Eq "$ACHK_REPEAT_RE"; then
+		for rep in $(seq "$ACHK_REPEAT"); do
+			g2=$(q "$GPU $set_extra" "$qry"); [ "$g2" = "$c" ] || { echo "  repeat $rep: gpu $g2 cpu $c"; g=$g2; }
+		done
+	fi
 	if [ "$ok" = 1 ] && [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR; then echo "  ok    $tbl: $label (${g#*|} rows)"
-	else echo "  FAIL  $tbl: $label (plan patterns: $*; matched=$ok)"; echo "        gpu: $g"; echo "        cpu: $c"; fail=$((fail+1)); fi
+	else echo "  FAIL  $tbl: $label (plan patterns: $*; matched=$ok)"; echo "        gpu: $g"; echo "        cpu: $c"
+		# a small result is shown as rows (the hashes alone say nothing); the plan is shown when the query failed
+		echo "$pl" | sed 's/^/        plan: /'
+		echo "        gpu rows: $($PSQL -d scantest -At -c "$GPU $set_extra $qry" 2>&1 | head -5 | tr '\n' ' ')"
+		echo "        cpu rows: $($PSQL -d scantest -At -c "$CPU $qry" 2>&1 | head -5 | tr '\n' ' ')"
+		fail=$((fail+1)); fi
 }
 aagg() { # table label query [settings]: GpuPreAgg directly over the Arrow table (no GpuScan below an Aggregate)
 	__achk "$1" "$2" "$3" "$AGGSET ${4:-}" "Custom Scan (GpuPreAgg)"

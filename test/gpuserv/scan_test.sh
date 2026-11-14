@@ -89,11 +89,12 @@ sql "create table s_base as select i,
 	(i % 3 = 0) as e,
 	case when i % 11 = 0 then null else repeat(chr(97 + i % 26), (i % 200)::int) end as f
 	from generate_series(1, $NROWS) i"
-sql "create table s1 as select * from s_base"; sql "vacuum analyze s1"          # all pages all-visible (read from the file)
+sql "create table s1 as select * from s_base"; sql "set default_statistics_target=1000; vacuum analyze s1"          # all pages all-visible (read from the file); a target of 1000 samples
+# every row of the default size, so the planner estimates do not vary from run to run
 sql "create table s2 as select * from s_base"; sql "update s2 set b = b + 1 where i % 5 = 0"
-sql "delete from s2 where i % 13 = 0"; sql "analyze s2"                         # dead tuples, nothing vacuumed
+sql "delete from s2 where i % 13 = 0"; sql "set default_statistics_target=1000; analyze s2"                         # dead tuples, nothing vacuumed
 sql "create table s3 as select * from s_base"; sql "vacuum s3"
-sql "update s3 set c = c + 7 where i % 17 = 0"; sql "analyze s3"                # mix of vacuumed and fresh pages
+sql "update s3 set c = c + 7 where i % 17 = 0"; sql "set default_statistics_target=1000; analyze s3"                # mix of vacuumed and fresh pages
 
 GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 CPU="set max_parallel_workers_per_gather=0; set pg_strom.enabled=off;"
