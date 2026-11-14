@@ -1005,7 +1005,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 		((uint32_t *) btab.map)[2 * i + 1] = lp_base[i];
 	}
 	out_words = 4 + (size_t) total_lps * (1 + 3 * (size_t) ncomp);
-	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+	if (gpu_vk_buffer_create_rd(vk, &bout, out_words * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 		goto error;
@@ -1712,7 +1712,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	/* after the per-workgroup records: one word per line pointer, 2 = the backend evaluates the row */
 	flags_base = 4 + (uint32_t)((size_t) ngroups_total * nagg * 6);
 	out_words = (size_t) flags_base + total_lps;
-	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+	if (gpu_vk_buffer_create_rd(vk, &bout, out_words * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 		goto done;
@@ -3490,7 +3490,7 @@ group_task_gtab(scan_engine *eng, const kern_session_info *session, scan_prog *p
 		rw = 1 + 2 * ntext;
 	}
 	out_words = 4 + (size_t) total_lps + (size_t) total_lps * (rw ? rw : 0);
-	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+	if (gpu_vk_buffer_create_rd(vk, &bout, out_words * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 		goto done;
@@ -3709,7 +3709,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	st->nitems_raw += total_lps;
 	ngroups_total = (npages + group_ppw(AGG_PAGES_PER_WG) - 1) / group_ppw(AGG_PAGES_PER_WG);
 	out_words = 4 + (size_t) ngroups_total * blk_words + total_lps;
-	if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+	if (gpu_vk_buffer_create_rd(vk, &bout, out_words * 4, 0) != 0)
 	{
 		snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 		goto done;
@@ -4603,7 +4603,7 @@ scan_exec_join_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *
 		uint32_t	pc[5];
 
 		out_words = 4 + (size_t) prog->oj_words + (size_t) cap * rec_words;
-		if (gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+		if (gpu_vk_buffer_create_rd(vk, &bout, out_words * 4, 0) != 0)
 		{
 			snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 			goto error;
@@ -5164,7 +5164,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			const uint32_t *sout;
 			uint32_t	spc[5], snrec;
 
-			if (gpu_vk_buffer_create(vk, &sbout, sout_words * 4, 0) != 0)
+			if (gpu_vk_buffer_create_rd(vk, &sbout, sout_words * 4, 0) != 0)
 			{
 				snprintf(err, errlen, "cannot allocate the output buffer: %s", vk->err);
 				goto done;
@@ -5266,7 +5266,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		flag_base = (uint32_t) out_words;
 		out_words += flag_words;
 		if (out_words > 0xffffffffULL / 8 ||
-			gpu_vk_buffer_create(vk, &bout, out_words * 4, 0) != 0)
+			gpu_vk_buffer_create_rd(vk, &bout, out_words * 4, 0) != 0)
 		{
 			snprintf(err, errlen, "cannot allocate the output buffer (%zu words): %s", out_words, vk->err);
 			goto done;

@@ -27,6 +27,12 @@ gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bd
 	return b->map ? 0 : -1;
 }
 
+int
+gpu_vk_buffer_create_rd(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda)
+{
+	return gpu_vk_buffer_create(ctx, b, size, want_bda);
+}
+
 void
 gpu_vk_buffer_destroy(gpu_vk_ctx *ctx, gpu_vk_buffer *b)
 {

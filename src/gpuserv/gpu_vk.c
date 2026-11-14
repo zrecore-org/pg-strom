@@ -368,7 +368,7 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 		/* an explicit limit applies to the first dispatch too */
 		ctx->first_timeout_ms = (e && atoi(e) > 0) ? ctx->timeout_ms : GPU_VK_FIRST_DISPATCH_TIMEOUT_MS;
 	}
-	ctx->unified_memtype = ctx->hostvis_memtype = -1;
+	ctx->unified_memtype = ctx->hostvis_memtype = ctx->cached_memtype = -1;
 	ft = &ctx->feat;
 
 	rc = create_instance(&in, ctx->err, sizeof(ctx->err));
@@ -493,6 +493,18 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 			ctx->hostvis_memtype = (int) i;
 		if ((fl & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && ctx->unified_memtype < 0)
 			ctx->unified_memtype = (int) i;
+		if ((fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) && !(fl & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && ctx->cached_memtype < 0)
+			ctx->cached_memtype = (int) i;
+	}
+	/*
+	 * Only a discrete GPU needs it: its device-local host-visible type is a window of VRAM that the host reads uncached
+	 * (5 MB/s on the T4 against 11 GB/s from a cached system-memory type). PGSTROM_GPUSERV_RD_MEM=0 turns it off.
+	 */
+	{
+		const char *e = getenv("PGSTROM_GPUSERV_RD_MEM");
+
+		if (ctx->info.device_type != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU || (e && atoi(e) == 0 && *e == '0'))
+			ctx->cached_memtype = -1;
 	}
 	for (i = 0; i < ctx->mem.memoryHeapCount; i++)
 		if ((ctx->mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) &&
@@ -983,8 +995,10 @@ gpu_vk_describe(const gpu_vk_ctx *ctx, char *buf, size_t buflen)
 /* ------------------------------------------------------------------------ */
 /* pick a memory type from 'bits': prefer unified, then host-visible+coherent */
 static int
-pick_memtype(const gpu_vk_ctx *ctx, uint32_t bits)
+pick_memtype(const gpu_vk_ctx *ctx, uint32_t bits, int rd)
 {
+	if (rd && ctx->cached_memtype >= 0 && (bits & (1u << ctx->cached_memtype)))
+		return ctx->cached_memtype;
 	if (ctx->unified_memtype >= 0 && (bits & (1u << ctx->unified_memtype)))
 		return ctx->unified_memtype;
 	if (ctx->hostvis_memtype >= 0 && (bits & (1u << ctx->hostvis_memtype)))
@@ -1067,7 +1081,8 @@ gpu_vk_probe_host_memory(gpu_vk_ctx *ctx, FILE *fp)
 				(fl & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " DEVICE_LOCAL" : "",
 				(fl & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " COHERENT" : "",
 				(fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " CACHED" : "",
-				(int) i == pick_memtype(ctx, req.memoryTypeBits) ? " <- chosen by pick_memtype" : "",
+				(int) i == pick_memtype(ctx, req.memoryTypeBits, 0) ? " <- chosen by pick_memtype" :
+				(int) i == ctx->cached_memtype ? " <- used for the buffers the host reads (gpu_vk_buffer_create_rd)" : "",
 				ctx->mem.memoryTypes[i].heapIndex,
 				(unsigned long long) (ctx->mem.memoryHeaps[ctx->mem.memoryTypes[i].heapIndex].size >> 20),
 				wr > 0 ? (double) (size >> 20) / wr : 0.0, rd > 0 ? (double) (size >> 20) / rd : 0.0,
@@ -1078,8 +1093,8 @@ gpu_vk_probe_host_memory(gpu_vk_ctx *ctx, FILE *fp)
 	}
 }
 
-int
-gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda)
+static int
+buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda, int rd)
 {
 	VkBufferCreateInfo bci;
 	VkMemoryRequirements req;
@@ -1115,7 +1130,7 @@ gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bd
 		return -1;
 	}
 	vkGetBufferMemoryRequirements(ctx->dev, b->buf, &req);
-	mt = pick_memtype(ctx, req.memoryTypeBits);
+	mt = pick_memtype(ctx, req.memoryTypeBits, rd);
 	if (mt < 0)
 	{
 		CTX_ERR(ctx, "no host-visible coherent memory type for buffer");
@@ -1190,6 +1205,18 @@ gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bd
 }
 
 int
+gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda)
+{
+	return buffer_create(ctx, b, size, want_bda, 0);
+}
+
+int
+gpu_vk_buffer_create_rd(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda)
+{
+	return buffer_create(ctx, b, size, want_bda, 1);
+}
+
+int
 gpu_vk_buffer_import_host(gpu_vk_ctx *ctx, gpu_vk_buffer *b, void *ptr, size_t size)
 {
 	VkMemoryHostPointerPropertiesEXT hpp;
@@ -1251,7 +1278,7 @@ gpu_vk_buffer_import_host(gpu_vk_ctx *ctx, gpu_vk_buffer *b, void *ptr, size_t s
 		gpu_vk_buffer_destroy(ctx, b);
 		return -1;
 	}
-	mt = pick_memtype(ctx, bits);
+	mt = pick_memtype(ctx, bits, 0);
 	if (mt < 0)
 	{
 		for (uint32_t i = 0; i < ctx->mem.memoryTypeCount; i++)

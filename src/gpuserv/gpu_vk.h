@@ -98,6 +98,7 @@ typedef struct gpu_vk_ctx
 	uint64_t			max_buffer_size;		/* 0 if not reported */
 	int					unified_memtype;		/* DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT, or -1 */
 	int					hostvis_memtype;		/* HOST_VISIBLE|HOST_COHERENT, or -1 */
+	int					cached_memtype;			/* discrete GPU: system-memory HOST_VISIBLE|HOST_COHERENT|HOST_CACHED (the host reads it at memory speed), or -1 */
 	uint64_t			device_memory;			/* largest DEVICE_LOCAL heap */
 
 	int					lost;					/* timeout or VK_ERROR_DEVICE_LOST seen */
@@ -157,6 +158,9 @@ void gpu_vk_describe(const gpu_vk_ctx *ctx, char *buf, size_t buflen);
 
 /* Host-visible+coherent buffer (storage + transfer usage). */
 int  gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda);
+/* The same for a buffer the host reads back (results): on a discrete GPU it is allocated in cached system memory, because the host reads the
+ * device-local window (a 256 MB BAR on the T4) at about 5 MB/s, against 11 GB/s from the cached type (--probe-memory); elsewhere identical. */
+int  gpu_vk_buffer_create_rd(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda);
 /* Import existing host memory; ptr and size must be multiples of host_import_alignment. */
 int  gpu_vk_buffer_import_host(gpu_vk_ctx *ctx, gpu_vk_buffer *b, void *ptr, size_t size);
 void gpu_vk_buffer_destroy(gpu_vk_ctx *ctx, gpu_vk_buffer *b);
