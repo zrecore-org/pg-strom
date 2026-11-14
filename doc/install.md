@@ -243,6 +243,12 @@ branch yet: its expected output asserts CUDA-era plan shapes.
 
 ## Packaging
 
+PG-Strom is under the PostgreSQL License, but `pgstrom-gpuserv` contains `area_ring.inc`
+(GPL-2.0-or-later, see the README), so a package that ships the service is a combined work under the GPL
+terms. The RPM (`License: PostgreSQL and GPLv2+`) and the Debian package therefore also carry the GPL text
+(`LICENSES/GPL-2.0.txt`) and a written source offer (`files/SOURCE-OFFER.txt`), and the Debian package a
+DEP-5 `copyright` file (`files/pg-strom.copyright`).
+
 `make rpm` (RPM, per PostgreSQL major version) and `make deb` use the templates in `files/`. After the
 Vulkan port they: require `vulkan-loader` (RPM) / `libvulkan1` (DEB) and the Arrow and Parquet
 runtime libraries, build with `WITH_GPUSERV=1` (a build machine without `slangc` fails), install

@@ -19,6 +19,7 @@
 #   LABEL_RE='group'        run only the queries whose label matches the extended regular expression
 #   ONLY='<sql>'            benchmark just that query
 #   NOCPU=1                 skip the PostgreSQL measurement
+#   CPU_WORKERS=<n>         parallel workers of the PostgreSQL side (default 8, the "cpu8" column; set it to the core count of the machine)
 #   ROWS=<n>                table size (default 16800000; changes need FRESH=1)
 PGBIN=${PGBIN:-/opt/homebrew/opt/postgresql@17/bin}
 GPUSERV_BIN=${GPUSERV_BIN:?set GPUSERV_BIN to the pgstrom-gpuserv binary}
@@ -75,7 +76,7 @@ start_cluster() { # specialize-mode[:NAME=value,NAME=value ...]
 }
 
 GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000;"
-CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
+CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=${CPU_WORKERS:-8}; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 bench() { # label query
 	label=$1; qry=$2
 	[ -n "$LABEL_RE" ] && ! echo "$label" | grep -Eq "$LABEL_RE" && return

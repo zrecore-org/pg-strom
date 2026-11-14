@@ -57,6 +57,10 @@ on:
         description: "Block the Ubuntu mirrors in the Linux jobs: the cached apt packages must be enough (a test of the cache)"
         type: boolean
         default: false
+      bench_gpu:
+        description: "Run perf_bench.sh on the NVIDIA T4 after the tests (informational; adds the benchmark minutes to the billed job)"
+        type: boolean
+        default: false
       try_xlarge_runner:
         description: "Probe for a Metal device on the GitHub-hosted macos-latest-xlarge runner (billed per minute)"
         type: boolean
@@ -256,8 +260,12 @@ jobs:
           if-no-files-found: ignore
 
   macos-build:
-    name: macOS (Intel runner), build only (no GPU test), PostgreSQL 17
-    runs-on: macos-15-intel   # hosted macOS arm64 runners are not acquired for this repository (capacity); the host code builds the same
+    name: macOS Apple Silicon, build only (no GPU test), PostgreSQL 17
+    # Apple Silicon is the supported Mac platform (macOS 26 is the last release for Intel Macs). The job moved to
+    # macos-15-intel on 2026-11-06 because macos-26 was never acquired; the standard macos-15 (arm64) label is tried
+    # now. If it stays queued, cancel the run and go back to macos-15-intel (the macos-x86_64 Slang asset, sha256
+    # b4f01f615dc625f60c593d7d0a4bbd38e05dfa2a34bfd3973017c309d866feaa).
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - name: Checkout
@@ -271,8 +279,8 @@ jobs:
           D="$HOME/tools/slang-${SLANG_VERSION}"
           mkdir -p "$D"
           curl -fsSL -o /tmp/slang.tar.gz \
-            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-x86_64.tar.gz"
-          echo "b4f01f615dc625f60c593d7d0a4bbd38e05dfa2a34bfd3973017c309d866feaa  /tmp/slang.tar.gz" | shasum -a 256 -c -
+            "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-macos-aarch64.tar.gz"
+          echo "07fa8833fdbb343c3674c84fdd885910f495f3daaaa0c732b32980151e8b58c4  /tmp/slang.tar.gz" | shasum -a 256 -c -
           tar -xzf /tmp/slang.tar.gz -C "$D"
           SLANGC=$(find "$D" -type f -name slangc | head -n 1)
           test -x "$SLANGC"
@@ -561,6 +569,20 @@ jobs:
             fi
           done
           exit $bad
+
+      - name: Benchmark on the T4 (manual runs only, informational)
+        if: github.event_name == 'workflow_dispatch' && inputs.bench_gpu
+        continue-on-error: true
+        timeout-minutes: 40
+        env:
+          PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin
+          GPUSERV_BIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/lib/pgstrom-gpuserv
+          ALLOW_CPU: "off"
+        run: |
+          # the PostgreSQL side gets one worker per core of this runner (4 on a T4 runner): the "cpu8" column is then cpuN
+          CPU_WORKERS=$(nproc) ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench.out"
+          echo "## T4 benchmark ($(nproc) CPU cores)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E ' gpu +[0-9]' "$RUNNER_TEMP/bench.out" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Save the pipeline cache (NVIDIA)
         if: ${{ always() }}

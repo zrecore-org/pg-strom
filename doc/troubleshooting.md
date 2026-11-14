@@ -176,6 +176,7 @@ Set these in the environment of the postmaster (they are inherited by the servic
 |---|---|
 | `PGSTROM_GPUSERV_TRACE=1` | The service logs each session's xpucode (the translated program) and, per task, its timings, e.g. `scan task: 7936 pages (7936 from file) pages-in 3.1 ms (mapped), setup 0.4 ms, gpu 2.2 ms, results 1.7 ms (150 rows)` and `agg task: ...`. |
 | `PGSTROM_GPUSERV_NO_MAP=1` | Read pages with `pread` instead of mapping the file into Vulkan; separates mapping problems from kernel problems. |
+| `PGSTROM_GPUSERV_RD_MEM=0` | Go back to allocating the read-back buffers in device-local memory on a discrete GPU. If large results come back slowly there, run `pgstrom-gpuserv --probe-memory`: a memory type that reads at MB/s instead of GB/s is the cause. |
 | `PGSTROM_GPUSERV_TIMEOUT_MS=<n>` | Dispatch time limit; raise it on slow CPU Vulkan devices. |
 
 Also: `pg_strom.debug_level = 1` or `2` (more module messages), `client_min_messages = debug1` (prints

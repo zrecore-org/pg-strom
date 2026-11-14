@@ -24,8 +24,15 @@ account. `zrecore-org/pg-strom` is now under an organization (moved from a perso
 4. Larger runners are billed per minute while a job runs; check GitHub's "Actions runner pricing" page for the GPU rate. The job
    has a 120-minute limit.
 
-Open questions only a first run answers: whether the GPU image's NVIDIA driver ships the Vulkan ICD (the job prints `nvidia-smi`,
-`vulkaninfo --summary` and the ICD files first), and how long the full set takes on a T4.
+What the first runs answered: the GPU image's NVIDIA driver ships the Vulkan ICD (the job prints `nvidia-smi`,
+`vulkaninfo --summary` and the ICD files first); a cold run takes about 110 minutes, and a run with the saved NVIDIA pipeline
+cache about 21-29 minutes. The runner pool has one machine, and it is shared with another repository: jobs queue first in, first
+out, so push only when no T4 job is queued or running there. The job also logs the host memory bandwidth of each memory type
+(`pgstrom-gpuserv --probe-memory`).
+
+A manual run with the `bench_gpu` input ticked adds an informational step that runs `test/gpuserv/perf_bench.sh` on the T4
+(`CPU_WORKERS` is the runner's core count, so the PostgreSQL column is cpuN, not cpu8) and writes the timings to the run summary.
+It adds the benchmark minutes to the billed job, so tick it only when a measurement is wanted.
 
 ## Self-hosted alternatives
 

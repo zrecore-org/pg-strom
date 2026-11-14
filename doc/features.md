@@ -142,7 +142,12 @@ side (`EXPLAIN ANALYZE` execution time):
 | Aggregate / GROUP BY over a join (1,000-row dimension) | 28 ms / 91 ms vs 136 ms / 318 ms | |
 | Selective Arrow scan (2.2 GB file) | 59-65 ms vs 196-367 ms | an unselective one loses to 8 workers |
 
-Nothing is known about speed on other GPUs. The acceptance criterion in the plan is relative to
+Every number above is from the M1 Pro. Other GPUs have been exercised for correctness but not
+benchmarked: the NVIDIA T4 runs the whole test suite in CI (all results match the CPU's), but no speed
+table exists for it yet. One T4 finding already affects speed: a program read back through the T4's
+device-local host-visible window ran at about 5 MB/s, against 11.8 GB/s from cached system memory, so
+result buffers on a discrete GPU now use the cached memory (`PGSTROM_GPUSERV_RD_MEM=0` turns that off).
+Do not carry the M1 ratios over to another GPU. The acceptance criterion in the plan is relative to
 PostgreSQL's parallel scan on the same machine, not to CUDA.
 
 ## What is not implemented (and where it is tracked)
