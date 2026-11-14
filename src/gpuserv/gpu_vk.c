@@ -1001,6 +1001,83 @@ pick_memtype(const gpu_vk_ctx *ctx, uint32_t bits)
 	return -1;
 }
 
+/*
+ * --probe-memory: which memory type is the host fast to write and to read? The buffers of the service are allocated by
+ * pick_memtype(), which prefers the device-local host-visible type; on a discrete GPU that is a window of VRAM (a 256 MB
+ * PCIe BAR on the T4), which the host reads uncached, while a HOST_CACHED system-memory type reads at memory speed. The
+ * ../mongo POC 11 found the host readback from an uncached type to be the slowest step of a T4 run. This measures it
+ * (one line per host-visible type); nothing in the service depends on it yet.
+ */
+void
+gpu_vk_probe_host_memory(gpu_vk_ctx *ctx, FILE *fp)
+{
+	const size_t size = 64u << 20;
+
+	for (uint32_t i = 0; i < ctx->mem.memoryTypeCount; i++)
+	{
+		VkMemoryPropertyFlags fl = ctx->mem.memoryTypes[i].propertyFlags;
+		VkBufferCreateInfo bci;
+		VkMemoryRequirements req;
+		VkMemoryAllocateInfo mai;
+		VkBuffer	buf = VK_NULL_HANDLE;
+		VkDeviceMemory mem = VK_NULL_HANDLE;
+		volatile uint64_t *p = NULL;
+		void	   *map = NULL;
+		struct timespec t0, t1, t2;
+		uint64_t	sum = 0;
+		double		wr, rd;
+
+		if (!(fl & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+			continue;
+		memset(&bci, 0, sizeof(bci));
+		bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bci.size = size;
+		bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateBuffer(ctx->dev, &bci, NULL, &buf) != VK_SUCCESS)
+			continue;
+		vkGetBufferMemoryRequirements(ctx->dev, buf, &req);
+		memset(&mai, 0, sizeof(mai));
+		mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		mai.allocationSize = req.size;
+		mai.memoryTypeIndex = i;
+		if (!(req.memoryTypeBits & (1u << i)) ||
+			vkAllocateMemory(ctx->dev, &mai, NULL, &mem) != VK_SUCCESS ||
+			vkMapMemory(ctx->dev, mem, 0, VK_WHOLE_SIZE, 0, &map) != VK_SUCCESS)
+		{
+			fprintf(fp, "memory type %u flags 0x%x heap %u: cannot allocate and map %zu MB\n", i, (unsigned) fl,
+					ctx->mem.memoryTypes[i].heapIndex, size >> 20);
+			if (mem != VK_NULL_HANDLE)
+				vkFreeMemory(ctx->dev, mem, NULL);
+			vkDestroyBuffer(ctx->dev, buf, NULL);
+			continue;
+		}
+		p = (volatile uint64_t *) map;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		for (size_t k = 0; k < size / 8; k++)
+			p[k] = (uint64_t) k;
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		for (size_t k = 0; k < size / 8; k++)
+			sum += p[k];
+		clock_gettime(CLOCK_MONOTONIC, &t2);
+		wr = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+		rd = (t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec) / 1e9;
+		fprintf(fp, "memory type %u flags 0x%x%s%s%s%s heap %u (%llu MB): host write %.0f MB/s, host read %.0f MB/s (check %llu)\n",
+				i, (unsigned) fl,
+				(fl & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? " DEVICE_LOCAL" : "",
+				(fl & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? " COHERENT" : "",
+				(fl & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " CACHED" : "",
+				(int) i == pick_memtype(ctx, req.memoryTypeBits) ? " <- chosen by pick_memtype" : "",
+				ctx->mem.memoryTypes[i].heapIndex,
+				(unsigned long long) (ctx->mem.memoryHeaps[ctx->mem.memoryTypes[i].heapIndex].size >> 20),
+				wr > 0 ? (double) (size >> 20) / wr : 0.0, rd > 0 ? (double) (size >> 20) / rd : 0.0,
+				(unsigned long long) sum);
+		vkUnmapMemory(ctx->dev, mem);
+		vkFreeMemory(ctx->dev, mem, NULL);
+		vkDestroyBuffer(ctx->dev, buf, NULL);
+	}
+}
+
 int
 gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int want_bda)
 {

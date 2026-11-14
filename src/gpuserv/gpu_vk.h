@@ -8,6 +8,7 @@
 #ifndef GPU_VK_H
 #define GPU_VK_H
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <vulkan/vulkan.h>
@@ -159,6 +160,8 @@ int  gpu_vk_buffer_create(gpu_vk_ctx *ctx, gpu_vk_buffer *b, size_t size, int wa
 /* Import existing host memory; ptr and size must be multiples of host_import_alignment. */
 int  gpu_vk_buffer_import_host(gpu_vk_ctx *ctx, gpu_vk_buffer *b, void *ptr, size_t size);
 void gpu_vk_buffer_destroy(gpu_vk_ctx *ctx, gpu_vk_buffer *b);
+/* --probe-memory: for every host-visible memory type, the host write and read bandwidth of a 64 MB buffer (one line each, to fp) */
+void gpu_vk_probe_host_memory(gpu_vk_ctx *ctx, FILE *fp);
 
 /*
  * Compute pipeline from SPIR-V (entry point 'main'), nbind storage buffers at set 0

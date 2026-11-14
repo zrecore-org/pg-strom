@@ -514,6 +514,14 @@ jobs:
           PG_CONFIG=/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
           make -C src PG_CONFIG=$PG_CONFIG WITH_GPUSERV=1 -j"$(nproc)" install
 
+      # Informational: which host-visible memory type is fast for the host to read and write (the service's pick_memtype() prefers the
+      # device-local one, a 256 MB BAR window on the T4, which the host reads uncached); the numbers decide whether readback buffers
+      # should come from a HOST_CACHED type on discrete GPUs.
+      - name: Host memory bandwidth per memory type (informational)
+        continue-on-error: true
+        timeout-minutes: 5
+        run: /usr/lib/postgresql/${PG_MAJOR}/lib/pgstrom-gpuserv --probe-memory
+
       - name: Service lifecycle test (the GPU, not lavapipe)
         env:
           PGBIN: /usr/lib/postgresql/${{ env.PG_MAJOR }}/bin

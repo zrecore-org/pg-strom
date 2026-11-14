@@ -396,6 +396,24 @@ do_prewarm(long device, uint32_t nbind, uint32_t pcsize, char **files, int nfile
 	return rc;
 }
 
+/* --probe-memory: the host bandwidth of every host-visible memory type of the device (informational) */
+static int
+do_probe_memory(long device)
+{
+	gpu_vk_ctx *ctx = calloc(1, sizeof(*ctx));
+
+	setenv("PGSTROM_GPUSERV_PIPELINE_CACHE", "off", 1);
+	if (!ctx || gpu_vk_open(ctx, (int) device) != 0)
+	{
+		log_msg("probe-memory: cannot open device %ld: %s", device, ctx ? ctx->err : "out of memory");
+		return 1;
+	}
+	gpu_vk_probe_host_memory(ctx, stdout);
+	gpu_vk_close(ctx);
+	free(ctx);
+	return 0;
+}
+
 /* --prewarm-all / --prewarm-list: compile (or list) the kernel set in this process; the installer's hook */
 static int
 do_prewarm_all(long device, int mode, int list_only)
@@ -456,6 +474,14 @@ main(int argc, char **argv)
 			 * machine and the postmaster killed the probe: "GPU probe did not finish within 60000 ms").
 			 */
 			setenv("PGSTROM_GPUSERV_PIPELINE_CACHE", "off", 1);
+		}
+		else if (!strcmp(argv[i], "--probe-memory"))
+		{
+			long		dev = 0;
+
+			if (i + 2 < argc && !strcmp(argv[i + 1], "--device"))
+				dev = strtol(argv[i + 2], NULL, 10);
+			return do_probe_memory(dev);
 		}
 		else if (!strcmp(argv[i], "--serve"))
 			serve = 1;
