@@ -53,11 +53,11 @@ sql "create table s_base as select i,
 	(i % 3 = 0) as e,
 	case when i % 11 = 0 then null else repeat(chr(97 + i % 26), (i % 200)::int) end as f
 	from generate_series(1, $NROWS) i"
-sql "create table s1 as select * from s_base"; sql "vacuum analyze s1"
+sql "create table s1 as select * from s_base"; sql "set default_statistics_target=1000; vacuum analyze s1"
 sql "create table s2 as select * from s_base"; sql "update s2 set b = b + 1 where i % 5 = 0"
-sql "delete from s2 where i % 13 = 0"; sql "analyze s2"
+sql "delete from s2 where i % 13 = 0"; sql "set default_statistics_target=1000; analyze s2"
 sql "create table s3 as select * from s_base"; sql "vacuum s3"
-sql "update s3 set c = c + 7 where i % 17 = 0"; sql "analyze s3"
+sql "update s3 set c = c + 7 where i % 17 = 0"; sql "set default_statistics_target=1000; analyze s3"
 sql "create table sd as select (i - 10001)::int4 as k, (i % 17)::int4 as grp,
 	case when i % 9 = 0 then null else (i::int8 * 3 - 5) end as pay, repeat(chr(65 + i % 26), (i % 30)::int) as txt, i::int8 as k8
 	from generate_series(1, 20000) i"
