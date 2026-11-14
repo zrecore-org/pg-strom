@@ -65,9 +65,12 @@ repositories that share it (this one and `../mongo`) run one GPU job each at a t
 4. In the member account, request the quotas **All G and VT Spot Instance Requests** = 8 and **Running On-Demand G and VT
    instances** = 8 (Service Quotas, Amazon EC2, per Region). On a new account both requests become support cases; wait for approval.
 5. Install the RunsOn stack in the member account and register its GitHub App on the organization (selected repositories only).
-6. Change the `linux-gpu` job's `runs-on` to a RunsOn label for a g4dn.xlarge spot instance (the label syntax for GPU instances
-   and whether the image ships the NVIDIA Vulkan driver are not confirmed: check RunsOn's job-label reference, and run
-   `vulkaninfo` in the first job). Keep the hosted T4 (`GPU_RUNNER_LABEL`) as a manual fallback.
+6. The workflow is already prepared: a manual run with the `gpu_runner_aws` input ticked runs the `linux-gpu` job on a RunsOn label
+   (`runs-on=<run id>/family=g4dn.xlarge/image=ubuntu24-gpu-x64/spot=true`, label keys from RunsOn's [labels](https://runs-on.com/docs/runners/labels/)
+   and [GPU runners](https://runs-on.com/runners/gpu/) pages); every other run keeps the hosted T4 (`GPU_RUNNER_LABEL`). The job's
+   "NVIDIA Vulkan driver" step checks the driver and the Vulkan ICD (and tries `libnvidia-gl-<driver major>` if the ICD is missing).
+   Not confirmed until the first AWS run: that the RunsOn GPU image ships the NVIDIA Vulkan ICD, and that `family=g4dn.xlarge` is
+   accepted exactly like that. The hosted T4 stays the default and the fallback.
 7. Run the `bench_gpu` dispatch and compare with the hosted T4: driver and `vulkaninfo`, the join-kernel defect (A17), cost per run.
 
 **Cost control.** A monthly cost budget ("CI Budget", $30, alerts at 80% actual and 100% forecast) lives in the management account.
