@@ -40,6 +40,44 @@ Any Linux machine with an NVIDIA GPU and its Vulkan driver (or an AMD/Intel GPU 
 your choice and be used the same way (`GPU_RUNNER_LABEL`). For Apple silicon use a Mac mini or a bare-metal cloud Mac: Metal works
 there because it is not a virtual machine.
 
+## AWS spot runners (RunsOn), shared by several repositories
+
+The hosted T4 runner costs about $0.052 per minute (a CI run of 17-20 minutes is about $0.90-1.00). A g4dn.xlarge (one T4, 4 vCPU)
+on AWS spot is roughly 10 times cheaper (about $0.21-0.27 per hour in the US East regions, about 20% more in us-west-1; third-party
+price tables, check the EC2 spot price history for the live figure). The plan is [RunsOn](https://runs-on.com/guides/install): a
+CloudFormation stack in your own AWS account plus a GitHub App on the organization; a workflow picks a runner with a `runs-on` label.
+GitHub also charges $0.002 per minute for self-hosted runners (from March 2026).
+
+**Account layout (decided 2026-11-14).** One AWS Organization: the management account holds billing only (MFA on the root user, no
+workloads); a member account `zrecore-ci` holds the CI runners, and later a separate account for deployed GPU applications. People
+sign in through IAM Identity Center (organization instance, single Region, us-east-1; permission sets assigned per account), not
+with root or IAM access keys. "Centralize root access" is enabled, so member accounts have no root credentials of their own. The
+repositories that share it (this one and `../mongo`) run one GPU job each at a time, so the quota is 8 vCPUs of spot and 8 of on-demand.
+
+**Setup steps, in order**
+1. Create the AWS account on the Paid plan (the Free plan does not allow GPU instances as far as third-party sources say); Basic
+   support is enough. Turn on MFA for the root user.
+2. Create the organization, enable "Centralize root access" (leave the delegated administrator empty), create the member account.
+   Billing and budgets for a member account are managed from the management account (a member account cannot open Budgets until
+   IAM access to billing is switched on, which only its root user can do).
+3. Enable IAM Identity Center (organization instance), create a user, a permission set (`AdministratorAccess` for the person) and
+   assign it to the member account. Sign in at the AWS access portal.
+4. In the member account, request the quotas **All G and VT Spot Instance Requests** = 8 and **Running On-Demand G and VT
+   instances** = 8 (Service Quotas, Amazon EC2, per Region). On a new account both requests become support cases; wait for approval.
+5. Install the RunsOn stack in the member account and register its GitHub App on the organization (selected repositories only).
+6. Change the `linux-gpu` job's `runs-on` to a RunsOn label for a g4dn.xlarge spot instance (the label syntax for GPU instances
+   and whether the image ships the NVIDIA Vulkan driver are not confirmed: check RunsOn's job-label reference, and run
+   `vulkaninfo` in the first job). Keep the hosted T4 (`GPU_RUNNER_LABEL`) as a manual fallback.
+7. Run the `bench_gpu` dispatch and compare with the hosted T4: driver and `vulkaninfo`, the join-kernel defect (A17), cost per run.
+
+**Cost control.** A monthly cost budget ("CI Budget", $30, alerts at 80% actual and 100% forecast) lives in the management account.
+Enable Cost Explorer there for per-account views. Spot instances can be reclaimed during a job; RunsOn can fall back to on-demand,
+which costs more. Check the Cost Explorer after the first runs.
+
+**Security.** Runner instances execute workflow code inside the account: require approval for workflows from outside contributors,
+give the instances the smallest IAM role, and install the GitHub App on selected repositories only. The CLI for agents uses an
+Identity Center permission set with minimal rights (quotas, read-only EC2, budgets), never root or long-lived keys.
+
 ## Without a GPU machine
 
 - **Vulkan validation layer** (`sh test/gpuserv/vk_validation.sh <dev script>`, for example `gist_dev.sh`, `arrow_dev.sh`,
