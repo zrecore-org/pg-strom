@@ -589,16 +589,16 @@ jobs:
           # A17: the join GROUP BY kernel was rejected (VK_ERROR_UNKNOWN) while the background prewarm was compiling; the same
           # kernel compiles on its own. The join queries again with the prewarm off (the tests run with it off): do they stay on the GPU?
           echo "## join queries with PGSTROM_GPUSERV_PREWARM=off" | tee -a "$GITHUB_STEP_SUMMARY"
-          PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_noprewarm.out"
+          PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_noprewarm.out"
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_noprewarm.log" || true
           # run 5 showed that the prewarm is not the cause (the join kernels failed with it off too, in the first task of a fresh
           # service). Two more tries of the join queries: without the pipeline cache, and with an empty cache directory.
           echo "## join queries with the pipeline cache off" | tee -a "$GITHUB_STEP_SUMMARY"
-          PGSTROM_GPUSERV_PIPELINE_CACHE=off PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_nocache.out"
+          PGSTROM_GPUSERV_PIPELINE_CACHE=off PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_nocache.out"
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_nocache.log" || true
           echo "## join queries with an empty cache directory" | tee -a "$GITHUB_STEP_SUMMARY"
           mkdir -p "$RUNNER_TEMP/emptycache"
-          XDG_CACHE_HOME="$RUNNER_TEMP/emptycache" PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_emptycache.out"
+          XDG_CACHE_HOME="$RUNNER_TEMP/emptycache" PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_emptycache.out"
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_emptycache.log" || true
 
       - name: Compile the suspect kernels one by one on the T4 (manual bench runs only, informational)

@@ -4932,7 +4932,8 @@ ensure_joinagg_pipeline(scan_engine *eng, int grouped, int variant, int avariant
 
 		if (gpu_vk_pipeline_create(vk, pipe, spv, len, 6, 20) != 0)
 		{
-			snprintf(err, errlen, "cannot create the join aggregation pipeline: %s", vk->err);
+			snprintf(err, errlen, "cannot create the join aggregation pipeline (%s, register variant %d, aggregate variant %d, %u bytes of SPIR-V): %s",
+					 grouped ? "grouped" : "ungrouped", (int) variant, (int) avariant, len, vk->err);
 			return -1;
 		}
 		*ready = 1;
