@@ -587,13 +587,25 @@ jobs:
           # the service log has the per-task trace lines (pages, bytes, kernel time): keep it for reading the numbers
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service.log" || true
 
+      - name: Compile every kernel on the T4 (manual bench runs only, informational)
+        if: github.event_name == 'workflow_dispatch' && inputs.bench_gpu
+        continue-on-error: true
+        timeout-minutes: 45
+        run: |
+          # names every kernel whose pipeline the NVIDIA driver rejects (the CPU fallback hides them from the tests)
+          /usr/lib/postgresql/${PG_MAJOR}/lib/pgstrom-gpuserv --prewarm-all --prewarm-set all 2>&1 | tee "$RUNNER_TEMP/prewarm_all.log" | grep -E "prewarm: .*(failed|rejected|VK_ERROR)|kernels of the set|compiled" | tail -60
+          grep -c "VK_ERROR" "$RUNNER_TEMP/prewarm_all.log" || true
+          cp "$RUNNER_TEMP/prewarm_all.log" "$RUNNER_TEMP/bench_prewarm_all.log" || true
+
       - name: Upload the benchmark service log
         if: github.event_name == 'workflow_dispatch' && inputs.bench_gpu
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pgstrom-bench-gpu
-          path: ${{ runner.temp }}/bench_service.log
+          path: |
+            ${{ runner.temp }}/bench_service.log
+            ${{ runner.temp }}/bench_prewarm_all.log
           if-no-files-found: ignore
 
       - name: Save the pipeline cache (NVIDIA)

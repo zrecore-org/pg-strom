@@ -146,21 +146,24 @@ Every number above is from the M1 Pro. The NVIDIA T4 runs the whole test suite i
 benchmark run exists for it (`test/gpuserv/perf_bench.sh` on the hosted T4 runner, 16.8M rows, best of three, one run on a shared
 runner, so treat differences of 10% as noise; the PostgreSQL column used one worker per core of the runner, not 8):
 
-| Query (16.8M rows) | T4 GPU, end to end | PostgreSQL, parallel workers | Kernel time on the T4 |
+| Query (16.8M rows) | T4 GPU, end to end | PostgreSQL, 4 parallel workers | Kernel time on the T4 |
 |---|---|---|---|
-| Aggregation without GROUP BY, no qual | 1,389 ms | 434 ms | 10 ms per task, 48 tasks |
-| Aggregation, arithmetic quals | 1,404 ms | 355 ms | 12 ms per task |
-| Scan with an arithmetic projection | 1,265 ms | 296 ms | 5 ms per task |
-| GROUP BY 7 / 100 / 1,000 keys | 1,346 / 2,488 / 1,558 ms | 779 / 849 / 811 ms | 34 / 46 / 38 ms per task |
-| Aggregate over a join | 1,533 ms | 329 ms | 53 ms per task |
-| GROUP BY 20 over a join | 7,280 ms | 877 ms | no task lines (under investigation) |
+| Aggregation without GROUP BY, no qual | 1,387 ms | 431 ms | 10 ms per task, 48 tasks |
+| Aggregation, arithmetic quals | 1,404 ms | 354 ms | 12 ms per task |
+| Scan with an arithmetic projection | 1,266 ms | 298 ms | 5 ms per task |
+| GROUP BY 7 / 100 / 1,000 keys | 1,348 / 2,488 / 1,563 ms | 767 / 875 / 809 ms | 34 / 46 / 38 ms per task |
+| Aggregate over a join | 1,535 ms | 366 ms | 53 ms per task |
+| GROUP BY 20 over a join | 7,326 ms (ran on the CPU, see below) | 858 ms | the GPU kernel was rejected |
 
+The runner has 4 CPU cores, so the PostgreSQL side used 4 workers (the M1 table above uses 8). Two runs agree within 1%.
 **On the T4 the GPU path is currently slower than parallel PostgreSQL on every query of this benchmark** (the M1 numbers above
-are the opposite). The kernels are not the main cause: they take about 0.5 s of the 1.4 s of the no-GROUP-BY query. The rest
-has not been attributed yet; the likely suspects are the page copy and upload over PCIe and the per-task overhead (the M1 maps
-the heap file into the GPU without a copy). A second run with per-task traces is being taken. The results are correct (every
-query matches the CPU's). Do not expect a speedup on a discrete GPU yet; the plan tracks the transfer path and the join GROUP BY
-case as the next performance items. One finding already fixed: a program read back through the T4's device-local host-visible
+are the opposite). The kernel is a small part: per 64 MB task about 48 ms go to reading the heap pages, 25-29 ms to setup and
+10-20 ms to the GPU, and the tasks run one after another. The first run of a query is 15-70% slower than the best one (an idle T4 sits at
+300 MHz). The results are correct (every query matches the CPU's).
+**A defect, T4 only:** the NVIDIA driver rejects the pipeline of the join GROUP BY kernel (`vkCreateComputePipelines failed:
+VK_ERROR_UNKNOWN`), and a few other kernel variants in the prewarm. The query then runs on the CPU (that is the 7.3 s above), so a
+green T4 test run does not yet prove that every program runs on the GPU there. Plan item A17 tracks it. Do not expect a speedup on a discrete
+GPU yet. One finding already fixed: a program read back through the T4's device-local host-visible
 window ran at about 5 MB/s, against 11.8 GB/s from cached system memory, so result buffers on a discrete GPU now use the cached
 memory (`PGSTROM_GPUSERV_RD_MEM=0` turns that off).
 Do not carry the M1 ratios over to another GPU. The acceptance criterion in the plan is relative to
