@@ -81,7 +81,7 @@ gen_pair(uint64_t i, uint64_t *pa, uint64_t *pb)
 {
 	uint64_t a, b, ea, eb;
 
-	switch (i % 12)
+	switch (i % 14)
 	{
 		case 0:		/* uniform bits */
 			a = rnd();
@@ -142,6 +142,14 @@ gen_pair(uint64_t i, uint64_t *pa, uint64_t *pb)
 			a = mkd(rnd() & 1, 1023 + 50 + rnd() % 15, (rnd() & 1) ? rnd() : sparse_frac());
 			b = mkd(rnd() & 1, 1023 + 50 + rnd() % 15, rnd());
 			break;
+		case 12:	/* odd 27-bit significands (top two bits set): a * b has exactly 54 bits, an exact tie (fma_c adds a far smaller c: sticky bits) */
+			a = mkd(rnd() & 1, 1023 + (int64_t)(rnd() % 200) - 100, (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26));
+			b = mkd(rnd() & 1, 1023 + (int64_t)(rnd() % 200) - 100, (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26));
+			break;
+		case 13:	/* a * a an exact tie (odd 27-bit mantissa) and b far below it (sqr_add: the sticky bit of the shifted addend) */
+			a = mkd(0, 1023 + (int64_t)(rnd() % 100) - 50, (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26));
+			b = mkd(rnd() & 1, (uint64_t)((int64_t)(((a >> 52) & 0x7FF) * 2 - 1023) - 1 - (int64_t)(rnd() % 160)), rnd());
+			break;
 		default:	/* x, and x*x of a short mantissa (perfect squares for sqrt) */
 			a = mkd(0, 1023 + (int64_t)(rnd() % 80) - 40, rnd() & 0xFFFFFFF0000000ull);
 			b = d2u(u2d(a) * u2d(a));
@@ -184,7 +192,7 @@ static uint64_t fma_c(uint64_t a, uint64_t b)
 {
 	uint64_t m = (a * 0x9E3779B97F4A7C15ULL) ^ (b >> 5) ^ (b << 11);
 	int ea = (int)((a >> 52) & 0x7FF), eb = (int)((b >> 52) & 0x7FF), ec = ea + eb - 1023 + (int)((a >> 7) % 9) - 4;
-	uint32_t sel = (uint32_t)((a >> 20) & 15);
+	uint32_t sel = (uint32_t)(((a >> 20) ^ (a >> 53) ^ (b >> 54)) & 15);
 
 	if (sel < 4)
 	{
@@ -195,6 +203,10 @@ static uint64_t fma_c(uint64_t a, uint64_t b)
 	if (sel == 4) return 0;
 	if (sel == 5) return 0x8000000000000000ull;
 	if (sel == 6) return 0x7FF0000000000000ull | (m & 0x8000000000000000ull);
+	if (sel < 10)											/* far below the product: the shifted-out bits are only a sticky bit (d = 3 .. 200) */
+		ec = ea + eb - 1023 - 3 - (int)((a >> 30) % 198);
+	if (sel < 10 && ((a >> 36) & 1))						/* half of them: d = 124 .. 129 (the shifted addend has lost all but a sticky bit near d = 126) */
+		ec = ea + eb - 1023 - 124 - (int)((a >> 37) % 6);
 	if (ec < 0) ec = 0;
 	if (ec > 2046) ec = 2046;
 	return (m & 0x800FFFFFFFFFFFFFull) | (((uint64_t) ec) << 52);

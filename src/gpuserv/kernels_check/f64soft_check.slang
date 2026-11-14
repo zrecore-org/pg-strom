@@ -9,7 +9,7 @@ uint64_t fma_c(uint64_t a, uint64_t b)
 {
 	uint64_t m = (a * 0x9E3779B97F4A7C15ull) ^ (b >> 5) ^ (b << 11);
 	int ea = int((a >> 52) & 0x7FFull), eb = int((b >> 52) & 0x7FFull), ec = ea + eb - 1023 + int((a >> 7) % 9ull) - 4;
-	uint sel = uint((a >> 20) & 15ull);
+	uint sel = uint(((a >> 20) ^ (a >> 53) ^ (b >> 54)) & 15ull);
 
 	if (sel < 4u)
 	{
@@ -19,6 +19,10 @@ uint64_t fma_c(uint64_t a, uint64_t b)
 	if (sel == 4u) return 0ull;
 	if (sel == 5u) return 0x8000000000000000ull;
 	if (sel == 6u) return 0x7FF0000000000000ull | (m & 0x8000000000000000ull);
+	if (sel < 10u)
+		ec = ea + eb - 1023 - 3 - int((a >> 30) % 198ull);
+	if (sel < 10u && ((a >> 36) & 1ull) != 0ull)
+		ec = ea + eb - 1023 - 124 - int((a >> 37) % 6ull);
 	if (ec < 0) ec = 0;
 	if (ec > 2046) ec = 2046;
 	return (m & 0x800FFFFFFFFFFFFFull) | (uint64_t(ec) << 52);
