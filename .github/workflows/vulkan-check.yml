@@ -586,6 +586,11 @@ jobs:
           grep -E ' gpu +[0-9]' "$RUNNER_TEMP/bench.out" | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
           # the service log has the per-task trace lines (pages, bytes, kernel time): keep it for reading the numbers
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service.log" || true
+          # A17: the join GROUP BY kernel was rejected (VK_ERROR_UNKNOWN) while the background prewarm was compiling; the same
+          # kernel compiles on its own. The join queries again with the prewarm off (the tests run with it off): do they stay on the GPU?
+          echo "## join queries with PGSTROM_GPUSERV_PREWARM=off" | tee -a "$GITHUB_STEP_SUMMARY"
+          PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_noprewarm.out"
+          cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_noprewarm.log" || true
 
       - name: Compile the suspect kernels one by one on the T4 (manual bench runs only, informational)
         if: github.event_name == 'workflow_dispatch' && inputs.bench_gpu
@@ -604,6 +609,8 @@ jobs:
           path: |
             ${{ runner.temp }}/bench_service.log
             ${{ runner.temp }}/bench_kernel_survey.log
+            ${{ runner.temp }}/bench_service_noprewarm.log
+            ${{ runner.temp }}/bench_noprewarm.out
           if-no-files-found: ignore
 
       - name: Save the pipeline cache (NVIDIA)
