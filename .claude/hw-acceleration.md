@@ -2,47 +2,49 @@
 
 ## Table of contents
 
-- L5: Context and decisions
-- L24: Corrections to earlier conclusions
-- L32: Target architecture
-- L74: Milestones
-- L97: A0 status
-- L135: A1 status
-- L170: A2 status
-- L240: A3 status
-- L329: A4 nest-loop joins
-- L333: A4 status
-- L371: A5 status
-- L420: A6 status
-- L522: A9 status
-- L542: A9 part 3
-- L562: A7 status
-- L576: A8 status
-- L588: A7 part 2 status
-- L607: A6/A9 robustness status
-- L619: A10 status
-- L727: A11 status
-- L755: A12 status
-- L790: A13 status
-- L845: A11 part 4: 3D
-- L851: Effort
-- L855: Validation matrix
-- L868: Desktop tier: pros and cons
-- L879: Risks
-- L888: Assumptions to confirm
-- L897: Verification
-- L905: Critical files
-- L909: Kernel source language: Slang
-- L922: Kernel ABI and build
-- L932: Appendix: spike results
-- L1151: Test speed
-- L1169: Smaller items
-- L1186: Exact distances and lengths
-- L1202: Distances, lengths and DWithin, exact
-- L1227: A14 status
-- L1291: A11/A13 remaining work
-- L1318: A15 status
-- L1359: A16 status
+- L52: Context and decisions
+- L71: Corrections to earlier conclusions
+- L79: Target architecture
+- L121: Milestones
+- L144: A0 status
+- L182: A1 status
+- L217: A2 status
+- L287: A3 status
+- L376: A4 nest-loop joins
+- L380: A4 status
+- L418: A5 status
+- L467: A6 status
+- L569: A9 status
+- L589: A9 part 3
+- L609: A7 status
+- L623: A8 status
+- L635: A7 part 2 status
+- L654: A6/A9 robustness status
+- L666: A10 status
+- L774: A11 status
+- L802: A12 status
+- L837: A13 status
+- L892: A11 part 4: 3D
+- L898: Effort
+- L902: Validation matrix
+- L915: Desktop tier: pros and cons
+- L926: Risks
+- L935: Assumptions to confirm
+- L944: Verification
+- L952: Critical files
+- L956: Kernel source language: Slang
+- L969: Kernel ABI and build
+- L979: Appendix: spike results
+- L1198: Test speed
+- L1216: Smaller items
+- L1233: Exact distances and lengths
+- L1249: Distances, lengths and DWithin, exact
+- L1274: A14 status
+- L1343: A11/A13 remaining work
+- L1370: A15 status
+- L1411: A16 status
+- L1457: A16 engine investigation
+- L1490: Licensing
 
 
 > The branch was created as `apple-silicon` and renamed `vulkan-gpu` after A2 (it is the Vulkan port, validated on Apple Silicon only). Older text below keeps the old name where it describes history.
@@ -1451,6 +1453,39 @@ Sources: https://postgis.net/docs/reference_sfcgal.html (function list), https:/
 
 **Effort and risk.** Research-grade; S0 about 2 weeks, S1-S3 about 3-4 months, S4 open. The main risk is that the serial parts (triangulation, bookkeeping) dominate and the GPU stage is a small fraction of the time (then the milestone stops at S1). Second risk: coplanar and touching data is common and declines too often. Third: the Metal compile budget for fixed-size big-integer kernels (each stage its own tier, below about 10.5 MB, see R15). Ranks after R1-R15 and A15 S0-S2.
 
+
+## A16 engine investigation: Manifold against SFCGAL (planned 2026-11-14; nothing is built or run)
+
+**Why.** The user asked (2026-11-14) for an investigation, with an advisor and proofs of concept as needed, of Manifold (`elalish/manifold`, Apache-2.0 as far as I know; Homebrew has formula `manifold` 3.5.4) against SFCGAL for the A16 mesh booleans. The reason is licensing: the A16 plan reimplements public mathematics clean-room because CGAL's boolean packages are GPL (SFCGAL itself is LGPL); an Apache-2.0 engine could be used, ported or called without that restriction. Facts about SFCGAL 2.3.0 and CGAL 6.2.1 are in the A15 study; licences below are from memory and are gate G1, so they must be read from the sources before the plan relies on them.
+
+**SFCGAL is not a candidate that can lose.** `CG_3DUnion`, `CG_3DIntersection` and `CG_3DDifference` run SFCGAL whenever `pg_strom.enabled = off`, and every differential test of this branch takes that answer as the truth. Manifold therefore cannot replace SFCGAL as the fallback or the oracle without breaking the rule "the GPU result equals the CPU result". The investigation decides which of three roles Manifold gets:
+- **(a) Algorithm and code source for the A16 GPU engine.** Apache-2.0 would allow porting its code into Slang (R-H today requires a clean-room engine for CGAL-derived ideas). Needs G5.
+- **(b) An opt-in parallel CPU engine** behind a switch (`pg_strom.sfcgal_gpu_booleans`-style, default off), with the documented statement "geometrically equal to SFCGAL's, not identical". Needs G2 and G3 to be acceptable and G4 to pay.
+- **(c) Not used** (reference reading only, or dropped).
+
+**Gates, tightest constraint first; each gate can stop the investigation and the stop is recorded here.**
+| Gate | Question | How it is answered | Stops the role if |
+|---|---|---|---|
+| G1 licences | What exactly are the licences of Manifold 3.5.4 and of its dependencies (Homebrew formula deps, for example Clipper2 and a threading library), of the installed SFCGAL, and of the installed CGAL packages `Nef_3`, `Polygon_mesh_processing` and the kernel? | Read the `LICENSE` / `COPYING` files in the source trees and the CGAL per-package `package_info/*/license.txt`; quote file paths; fold the result into R-H and the Licensing section | a dependency or the library is copyleft in a way that conflicts with the PostgreSQL License for the role (a) or (b) |
+| G2 agreement with SFCGAL | Does Manifold's output equal SFCGAL's under the equality definition of A16 (exact volume and area, vertex set after merging, canonical mesh)? First read in the Manifold source what coordinate type the intersection points are computed in (float or double) and whether constructed vertices are rounded: single precision or a different rounding rules out bit-level agreement whatever the topology | M0 harness below; plus R-A (which CGAL calls SFCGAL makes per function) to interpret differences | agreement is not reachable on clean generated solids (then (b) and (a) die as exact engines; (a) may stay as reading material) |
+| G3 degenerate input | Coplanar overlap, shared edges, shared vertices, slivers (the house case). Manifold resolves ties by symbolic perturbation, SFCGAL exactly: how often does each decline, error, or return a different topology? | M1 below, counted per category | Manifold's answers on degenerate input differ from SFCGAL's silently (a wrong answer is worse than a decline) |
+| G4 speed | Where does Manifold beat SFCGAL, single thread and parallel, at 1e4, 1e5 and 1e6 triangles? Timed through SQL (including WKB conversion) and library-direct, so the conversion is counted separately | M2 below; only if G2 and G3 leave (a) or (b) alive | less than 3x at the target sizes (the A16 gate 1 figure) |
+| G5 GPU portability | Does Manifold still ship a GPU backend, or only TBB / parallel-STL? Do its kernels need 64-bit integers or fp64 (Apple GPUs have neither; same question as R-E)? What would a port to Slang cost per stage? | M3 below (reading, no code) | only relevant to role (a): the stages are not data-parallel, or need fp64 |
+
+**Proofs of concept (CPU only, small, in `spike/a16-manifold/`; data under `test-data/meshes/` with the manifest the plan already requires; everything at `nice -n 10`, because ../mongo benchmarks on this machine; stop rules per PoC).**
+- **M0 harness.** Link Homebrew Manifold; run union, intersection and difference of generated solids (offset cubes, spheres, tori, translated copies) and run the same inputs through `postgis_sfcgal` in a scratch cluster (first check that the installed PostGIS provides the extension: `select name from pg_available_extensions where name = 'postgis_sfcgal'` in a cluster of its own, port from `test-data/agent_common_rules.txt`). Compute exact volume and area of both outputs with GMP `mpq`, compare per the equality definition. Stop if the two disagree beyond rounding on the clean inputs.
+- **M1 degenerate set.** Coplanar overlapping faces, a shared edge, a shared vertex, nearly coplanar slivers; per category: result, decline, error, topology difference. Stop if Manifold is silently wrong on a category that SFCGAL handles.
+- **M2 timing.** Only if G2 and G3 leave a role alive. Single thread and all threads, library-direct and through SQL, on generated meshes and the car, plane and house meshes of the benchmark section (after their licences are checked).
+- **M3 reading, no code.** Map Manifold's boolean pipeline onto the five engine stages of A16 and mark each as data-parallel or serial; cite the algorithm's source paper from Manifold's own documentation rather than from memory. This feeds R-I.
+
+**Advisor checkpoints (the advisor sees the whole conversation; show it tables, not summaries).**
+1. *Before M0:* the input meshes and the metrics (what exactly is compared, the tolerance for "equal", the sizes).
+2. *After M0 and M1:* the role decision: the agreement table (G2) and the degenerate-category table (G3) per operation.
+3. *Before any go / no-go on A16 itself (gate 1 of S0):* G4 and G5 numbers plus the A16 research items R-B, R-C, R-F.
+
+**Housekeeping rules.** If Manifold is linked or built, even for a proof of concept, it goes into the README credits table with its licence. R-A (what SFCGAL calls) is folded into the G2 setup. Manifold is never a build or run dependency of the module unless a role (b) decision is taken explicitly by the user; the module must keep building and running with no SFCGAL and no Manifold installed (as A15 requires).
+
+**Status.** Planned; the user has not yet asked to start M0, and A16 was put on hold on 2026-11-09 ("wait"). Ask before running any proof of concept.
 
 ## Licensing (decided 2026-11-11)
 `kernels_vm/area_ring.inc` reproduces PostGIS 3.7's `ptarray_signed_area` (GPL-2.0-or-later). Decision by the user: accept GPL for that file. It carries an SPDX header and `LICENSES/GPL-2.0.txt` is in the tree; binaries of `pgstrom-gpuserv` that include it are distributed under GPL terms (packaging in `files/` must ship the license and a source offer: not done yet). Re-check the README credits table whenever a dependency or reproduced algorithm is added.
