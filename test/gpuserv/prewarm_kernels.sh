@@ -53,7 +53,7 @@ fi
 # script needs and the set leaves out is compiled at its first use, as before.
 #   PREWARM_SET=all|nongeom overrides the choice by script name
 case "${PREWARM_SET:-$PREWARM_FOR}" in
-	nongeom|float8_dev.sh|arrow_dev.sh|keys_dev.sh|fallback_dev.sh|gtab_dev.sh|spec_dev.sh|joinagg_dev.sh|gpucache_dev.sh|gpusort_dev.sh|hash_check.sh)
+	nongeom|float8_dev.sh|arrow_dev.sh|keys_dev.sh|fallback_dev.sh|gtab_dev.sh|spec_dev.sh|joinagg_dev.sh|minmaxtext_dev.sh|gpucache_dev.sh|gpusort_dev.sh|hash_check.sh)
 		FILTERED=
 		for k in $LIST; do case "$k" in *_lite|*_nogeom) FILTERED="$FILTERED $k";; esac; done
 		LIST=$FILTERED ;;

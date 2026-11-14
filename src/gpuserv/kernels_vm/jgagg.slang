@@ -49,9 +49,28 @@ static const uint AC_FSUM       = 6;            // 6 float8 sum / avg, 7 min, 8 
 static const uint AC_VAR        = 10;           // variance / stddev (n, Sx, Sxx), regr head (11) + continuation (12): see vs_acc()
 static const uint AC_REG        = 11;
 static const uint AC_VCONT      = 12;
+static const uint AC_SMIN       = 14;           // min / max of text (14, 15) and bpchar (16, 17), A6b: the accumulator is a string register
 static const uint NONE_REG      = 0xffffffffu;
 static const uint COMMITTED     = 0x8000u;
 static const uint NO_SLOT       = 0xffffffffu;
+
+// bytewise order of two string registers (the C collation: memcmp, then the length); bpchar ignores the trailing blanks (as gagg.slang).
+// The source bits say where the bytes are: 0 / 1 the outer pages, 2 the inner buffer of the join.
+int str_reg_cmp(int64_t x, int64_t y, bool bp)
+{
+    uint sa = uint((uint64_t(x) >> 60) & 3u), sb = uint((uint64_t(y) >> 60) & 3u);
+    uint oa = uint(uint64_t(x) & 0xffffffffu), ob = uint(uint64_t(y) & 0xffffffffu);
+    uint la = uint((uint64_t(x) >> 32) & 0x0fffffffu), lb = uint((uint64_t(y) >> 32) & 0x0fffffffu);
+    if (bp)
+    {
+        la = str_truelen(sa, oa, la);
+        lb = str_truelen(sb, ob, lb);
+    }
+    int c = str_memcmp(sa, oa, sb, ob, min(la, lb));
+    if (c == 0 && la != lb)
+        c = (la < lb) ? -1 : 1;
+    return c;
+}
 
 groupshared uint    sh_owner[GA_C];
 groupshared uint    sh_knull[GA_C];
@@ -127,10 +146,15 @@ void jgagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint a_cls[GA_NA];
     for (uint k = 0; k < GA_NA; k++)
         a_cls[k] = (k < naggs) ? prog[aggoff + 4 * k] : 0;
-    bool has_f = false;                             // some aggregate is a float8 sum, min or max (class >= AC_FSUM)
+    bool has_f = false;                             // some aggregate is a float8 sum, min or max (class AC_FSUM .. 13)
+    bool has_s = false;                             // some aggregate is a min / max of a string (class >= AC_SMIN)
     for (uint k = 0; k < GA_NA; k++)
-        if (a_cls[k] >= AC_FSUM)
+    {
+        if (a_cls[k] >= AC_FSUM && a_cls[k] < AC_SMIN)
             has_f = true;
+        if (a_cls[k] >= AC_SMIN)
+            has_s = true;
+    }
 
     // empty table
     for (uint s = tid; s < GA_C; s += SCAN_WG)

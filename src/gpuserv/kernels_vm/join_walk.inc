@@ -446,6 +446,25 @@
 
                     if (rf != NONE_REG && (regs[rf].isnull != 0 || regs[rf].v == 0))
                         continue;                           // FILTER (WHERE ...) is not true
+                    if (cls >= AC_SMIN)
+                    {
+                        // min / max of a string (A6b): the accumulator is the string register of the winning row (as agg.slang)
+                        if (regs[ra].isnull == 0)
+                        {
+                            int64_t sv = regs[ra].v;
+                            bool    smin = (cls == AC_SMIN || cls == AC_SMIN + 2u);
+                            if (an[k] == 0)
+                                aa[k] = sv;
+                            else
+                            {
+                                int sc = str_reg_cmp(sv, aa[k], cls >= AC_SMIN + 2u);
+                                if (smin ? (sc < 0) : (sc > 0))
+                                    aa[k] = sv;
+                            }
+                            an[k] = 1;
+                        }
+                        continue;
+                    }
 #ifndef VM_NO_F8
                     if (cls >= AC_VAR)
                     {
@@ -743,7 +762,7 @@
                             continue;
                         for (uint k = 0; k < GA_NA; k++)
                         {
-                            if (a_cls[k] < AC_FSUM || st_ok[j * GA_NA + k] == 0)
+                            if (a_cls[k] < AC_FSUM || a_cls[k] >= AC_SMIN || st_ok[j * GA_NA + k] == 0)
                                 continue;
                             uint a = s * GA_NA + k;
                             if (a_cls[k] >= AC_VAR)
@@ -793,6 +812,40 @@
                 }
             }
 #endif
+            // min / max of a string (A6b): the slot's owner folds the staged rows of the round in thread order; the accumulator is
+            // the 64-bit string register of the winning row (sh_l0, sh_l1), compared by bytes in the outer pages or the inner buffer
+            if (has_s)
+            {
+                for (uint s = tid; s < GA_C; s += SCAN_WG)
+                {
+                    for (uint j = 0; j < SCAN_WG; j++)
+                    {
+                        if (st_slot[j] != s)
+                            continue;
+                        for (uint k = 0; k < GA_NA; k++)
+                        {
+                            uint cls = a_cls[k];
+                            if (cls < AC_SMIN || st_ok[j * GA_NA + k] == 0)
+                                continue;
+                            uint a = s * GA_NA + k;
+                            int64_t reg = st_val[j * GA_NA + k];
+                            bool take = (sh_an[a] == 0);
+                            if (!take)
+                            {
+                                int64_t cur = int64_t(uint64_t(sh_l0[a]) | (uint64_t(sh_l1[a]) << 32));
+                                int c = str_reg_cmp(reg, cur, cls >= AC_SMIN + 2u);
+                                take = (((cls - AC_SMIN) & 1u) == 0) ? (c < 0) : (c > 0);
+                            }
+                            if (take)
+                            {
+                                sh_an[a] = 1;
+                                sh_l0[a] = uint(uint64_t(reg) & 0xffffffffu);
+                                sh_l1[a] = uint(uint64_t(reg) >> 32);
+                            }
+                        }
+                    }
+                }
+            }
             for (uint s = tid; s < GA_C; s += SCAN_WG)
             {
                 uint o = sh_owner[s];

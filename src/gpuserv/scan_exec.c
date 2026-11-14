@@ -5333,14 +5333,23 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	}
 	if (prog->oj_words > 0)
 		join_merge_ojmap(prog, ji, out, oj_base);
+	/* text min / max (A6b): string registers of the outer pages (sources 0, 1) or of the join's inner buffer (source 2) */
+	const unsigned char *jsrcs[3] = {ps.baseF, ps.baseL, (const unsigned char *) ji->map};
+
 	if (!grouped)
-		agg_merge_workgroups(prog, st, out, ngroups_total, NULL);
+	{
+		if (agg_merge_workgroups(prog, st, out, ngroups_total, jsrcs) != 0)
+		{
+			snprintf(err, errlen, "out of memory or an unreadable string in the aggregate");
+			goto done;
+		}
+	}
 	else
 	{
 		const uint32_t *w = prog->words;
 		uint32_t	aggoff = w[11];
 
-		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, NULL) != 0)
+		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, jsrcs) != 0)
 		{
 			snprintf(err, errlen, "out of memory");
 			goto done;
@@ -5360,7 +5369,11 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 				snprintf(err, errlen, "out of memory for the GROUP BY groups (pg_strom.gpuserv_group_memory)");
 				goto done;
 			}
-			(void) acc_add_ov(st, prog, g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_JOIN, NULL);
+			if (acc_add_ov(st, prog, g->acc, nagg, w, aggoff, rec + 1 + 2 * SCAN_GROUP_KEYS_JOIN, jsrcs) != 0)
+			{
+				snprintf(err, errlen, "out of memory or an unreadable string in the aggregate");
+				goto done;
+			}
 		}
 	}
 	t3 = now_ms();

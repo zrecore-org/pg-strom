@@ -1745,19 +1745,19 @@ make_alternative_aggref(xpugroupby_build_path_context *con,
 
 	/*
 	 * A6b: min / max of a string. The device compares bytes: only the C collation orders strings that way, and the extreme
-	 * is the string register of a column of the scanned relation (no join, no computed value).
+	 * is the string register of a column of the scanned relation or of an inner relation of the join (no computed value).
 	 */
 	if (aggfn_cat->partial_func_action == KAGG_ACTION__PMIN_TEXT ||
 		aggfn_cat->partial_func_action == KAGG_ACTION__PMAX_TEXT)
 	{
 		Node   *arg;
 
-		if (list_length(aggref->args) != 1 || con->inner_target_list != NIL ||
+		if (list_length(aggref->args) != 1 ||
 			!OidIsValid(aggref->inputcollid) ||
 			!get_collation_isdeterministic(aggref->inputcollid) ||
 			!__collate_is_c(aggref->inputcollid))
 		{
-			elog(DEBUG2, "min/max of a string needs the C collation and a scan without a join: %s",
+			elog(DEBUG2, "min/max of a string needs the C collation: %s",
 				 nodeToString(aggref));
 			return NULL;
 		}

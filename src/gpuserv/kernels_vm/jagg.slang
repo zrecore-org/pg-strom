@@ -37,7 +37,26 @@ static const uint AC_FMAX       = 8;
 static const uint AC_VAR        = 10;           // variance / stddev (n, Sx, Sxx), regr head (11) + continuation (12): see vs_acc()
 static const uint AC_REG        = 11;
 static const uint AC_VCONT      = 12;
+static const uint AC_SMIN       = 14;           // min / max of text (14, 15) and bpchar (16, 17), A6b: the accumulator is a string register
 static const uint NONE_REG      = 0xffffffffu;
+
+// bytewise order of two string registers (the C collation: memcmp, then the length); bpchar ignores the trailing blanks (as agg.slang).
+// The source bits say where the bytes are: 0 / 1 the outer pages, 2 the inner buffer of the join.
+int str_reg_cmp(int64_t x, int64_t y, bool bp)
+{
+    uint sa = uint((uint64_t(x) >> 60) & 3u), sb = uint((uint64_t(y) >> 60) & 3u);
+    uint oa = uint(uint64_t(x) & 0xffffffffu), ob = uint(uint64_t(y) & 0xffffffffu);
+    uint la = uint((uint64_t(x) >> 32) & 0x0fffffffu), lb = uint((uint64_t(y) >> 32) & 0x0fffffffu);
+    if (bp)
+    {
+        la = str_truelen(sa, oa, la);
+        lb = str_truelen(sb, ob, lb);
+    }
+    int c = str_memcmp(sa, oa, sb, ob, min(la, lb));
+    if (c == 0 && la != lb)
+        c = (la < lb) ? -1 : 1;
+    return c;
+}
 
 groupshared uint    sh_h[SCAN_WG];
 groupshared uint    sh_n[AGG_MAX * SCAN_WG];
@@ -107,6 +126,23 @@ void jagg_main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint x = k * SCAN_WG + lid.x;
                 uint y = x + stride;
 
+                if (cls >= AC_SMIN)
+                {
+                    if (sh_n[y] != 0)
+                    {
+                        bool smin = (cls == AC_SMIN || cls == AC_SMIN + 2u);
+                        if (sh_n[x] == 0)
+                            sh_a[x] = sh_a[y];
+                        else
+                        {
+                            int sc = str_reg_cmp(sh_a[y], sh_a[x], cls >= AC_SMIN + 2u);
+                            if (smin ? (sc < 0) : (sc > 0))
+                                sh_a[x] = sh_a[y];
+                        }
+                        sh_n[x] = 1;
+                    }
+                    continue;
+                }
 #ifndef VM_NO_F8
                 if (cls >= AC_VAR)
                 {
