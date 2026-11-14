@@ -2881,12 +2881,21 @@ scan_exec_arrow_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, sc
 		}
 		if (prog->oj_words > 0)
 			scan_join_merge_ojmap(prog, ji, out, oj_base);
+		/* text min / max (A6b): string registers of the outer data buffer (source 0) or of the join's inner buffer (source 2) */
+		const unsigned char *jsrcs[3] = {(const unsigned char *) at.bg.map, NULL, (const unsigned char *) ji->map};
+
 		if (!grouped)
-			scan_agg_merge_workgroups(prog, st, out, ngroups, NULL);
+		{
+			if (scan_agg_merge_workgroups(prog, st, out, ngroups, jsrcs) != 0)
+			{
+				snprintf(err, errlen, "out of memory or an unreadable string in the aggregate");
+				goto done;
+			}
+		}
 		else
 		{
-			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, NULL) != 0 ||
-				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_JOIN, NULL) != 0)
+			if (scan_group_merge_blocks(prog, st, out, ngroups, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, jsrcs) != 0 ||
+				scan_group_merge_overflow(prog, st, out + ovf_base + 1, ovf_count, ov_rec, SCAN_GROUP_KEYS_JOIN, jsrcs) != 0)
 			{
 				snprintf(err, errlen, "out of memory");
 				goto done;

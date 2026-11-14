@@ -114,5 +114,45 @@ else
 fi
 nogpu "an expression is not a column: min(upper(t))" 'select g, min(upper(t) collate "C") from tmo group by g'
 nogpu "an expression is not a column: min(t || v)" 'select g, max((t || v) collate "C") from tmo group by g'
-echo "min / max of strings over a join (stays on the CPU)"
-nogpu "min over a join" 'select a.g, min(a.t collate "C") from tmo a join tm1 b on a.g = b.g group by a.g'
+nogpu "min over a join: an expression is not a column" 'select a.g, min(upper(b.jt) collate "C") from tmo a join tmj b on a.g = b.jk group by a.g'
+
+# 3. Over a join (A6b): the join kernels (jagg.slang without GROUP BY, jgagg.slang with it, and their Arrow twins) keep the string register of the
+# winning joined row, whose bytes are in the outer pages / data buffer (sources 0, 1) or in the join's inner buffer (source 2). Text from either side,
+# inner / LEFT / RIGHT / FULL joins, NULL keys and NULL strings, duplicate keys, an empty join result.
+echo "min / max of strings over a join: GPU against the CPU"
+MJSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_mergejoin=off; set enable_nestloop=off;"
+rmj() { # label, query-with-%T, table [, settings]: GpuPreAgg over a join in the plan, results equal to the CPU's
+	label=$1; tbl=${3:-tmo}; qry=$(printf '%s' "$2" | sed "s/%T/$tbl/g"); set_extra=${4:-}
+	pl=$($PSQL -d scantest -c "$GPU $MJSET $CMM $set_extra explain $qry")
+	plan=$(echo "$pl" | grep -c "$GPLAN"); jn=$(echo "$pl" | grep -c "Join Quals")
+	g=$(q "$GPU $MJSET $CMM $set_extra" "$qry"); c=$(q "$CPU" "$qry")
+	if [ "$g" = "$c" ] && ! echo "$g" | grep -q ERROR && { [ "$MM_EXPECT_GPU" != 1 ] || { [ "$plan" -ge 1 ] && [ "$jn" -ge 1 ]; } || [ "$ALLOW_CPU" = on ]; }; then
+		echo "  ok    $label (${g#*|} rows, GpuPreAgg=$plan join=$jn)"
+	else echo "  FAIL  $label (GpuPreAgg=$plan join=$jn)"; echo "        gpu: $g"; echo "        cpu: $c"; echo "$pl" | sed 's/^/        plan: /'; fail=$((fail+1)); fi
+}
+for src in tmo tmoa tmop tmog; do
+	rmj "$src: inner join, ungrouped, text of either side" 'select min(a.t collate "C"), max(b.jt collate "C"), min(b.jv collate "C"), max(a.v collate "C"), count(*) from %T a join tmj b on a.g = b.jk' $src
+	rmj "$src: inner join, ungrouped, char(10) and bpchar from the inner side" 'select min(b.jw collate "C"), max(b.jw collate "C"), min(a.w collate "C"), max(b.jwn collate "C")::text, count(b.jwn) from %T a join tmj b on a.g = b.jk' $src
+	rmj "$src: inner join, ungrouped, with other aggregates and FILTER" 'select min(b.jt collate "C") filter (where a.n > 10), max(a.t collate "C"), sum(a.n), max(b.jn), count(b.jt) from %T a join tmj b on a.g = b.jk where a.n < 40' $src
+	rmj "$src: inner join, GROUP BY an outer key" 'select a.g, min(a.t collate "C"), max(b.jt collate "C"), min(b.jv collate "C"), max(b.jw collate "C"), count(*) from %T a join tmj b on a.g = b.jk group by a.g' $src
+	rmj "$src: inner join, GROUP BY an inner key" 'select b.jn, max(a.t collate "C"), min(b.jv collate "C"), max(a.w collate "C"), sum(a.n) from %T a join tmj b on a.g = b.jk group by b.jn' $src
+	rmj "$src: inner join, GROUP BY two keys" 'select a.g2, b.jn, min(b.jt collate "C"), max(a.v collate "C") from %T a join tmj b on a.g = b.jk group by a.g2, b.jn' $src
+	rmj "$src: inner join, many groups" 'select a.gm, min(b.jt collate "C"), max(a.v collate "C"), count(*) from %T a join tmj b on a.g = b.jk group by a.gm' $src
+	rmj "$src: inner join, many groups, text from the inner side only" 'select a.gm, max(b.jv collate "C"), min(b.jwn collate "C")::text from %T a join tmj b on a.g = b.jk group by a.gm' $src
+	rmj "$src: inner join, a qual that removes every row" 'select min(a.t collate "C"), max(b.jt collate "C"), count(*) from %T a join tmj b on a.g = b.jk where a.n > 1000' $src
+	rmj "$src: inner join, an empty join result" 'select min(a.t collate "C"), max(b.jt collate "C"), min(b.jw collate "C"), count(*) from %T a join tmj b on a.g = b.jk + 1000000' $src
+	rmj "$src: inner join, an empty join result, GROUP BY" 'select a.g, min(a.t collate "C"), max(b.jt collate "C") from %T a join tmj b on a.g = b.jk + 1000000 group by a.g' $src
+	rmj "$src: LEFT join, NULL-extended strings of the inner side" 'select min(b.jt collate "C"), max(b.jv collate "C"), min(a.t collate "C"), max(b.jw collate "C"), count(*), count(b.jt) from %T a left join tmj b on a.g = b.jk + 6' $src
+	rmj "$src: LEFT join, GROUP BY, groups whose inner strings are all NULL" 'select a.g, min(b.jt collate "C"), max(b.jv collate "C"), max(a.v collate "C"), count(b.jk) from %T a left join tmj b on a.g = b.jk + 6 group by a.g' $src
+	rmj "$src: LEFT join with no match at all" 'select a.g2, min(b.jt collate "C"), max(b.jw collate "C"), min(a.t collate "C") from %T a left join tmj b on a.g = b.jk + 1000000 group by a.g2' $src
+	rmj "$src: LEFT join, ON qual on the inner side, FILTER" 'select min(b.jt collate "C") filter (where b.jn is null), max(b.jv collate "C"), max(a.w collate "C") from %T a left join tmj b on a.g = b.jk and b.jn < 2' $src
+	rmj "$src: two inner relations" 'select a.g2, min(b.jt collate "C"), max(c.jt collate "C"), min(a.t collate "C"), count(*) from %T a join tmj b on a.g = b.jk join tmj1 c on b.jn + 3 = c.jk group by a.g2' $src
+done
+# RIGHT and FULL joins: the inner rows nobody matched are added with a NULL outer side (the outer-join map of the kernels)
+for src in tmo tmoa; do
+	rmj "$src: RIGHT join, ungrouped" 'select min(a.t collate "C"), max(b.jt collate "C"), min(b.jv collate "C"), count(*), count(a.t) from %T a right join tmj b on a.g = b.jk and a.n < 5' $src
+	rmj "$src: RIGHT join, GROUP BY an inner key" 'select b.jn, min(a.t collate "C"), max(b.jt collate "C"), max(a.w collate "C"), count(a.i) from %T a right join tmj b on a.g = b.jk and a.n < 5 group by b.jn' $src
+	rmj "$src: FULL join, ungrouped" 'select min(a.t collate "C"), max(b.jt collate "C"), max(b.jv collate "C"), min(a.v collate "C"), count(*) from %T a full join tmj b on a.g = b.jk and a.n < 5' $src
+	rmj "$src: FULL join, GROUP BY" 'select b.jn, min(a.t collate "C"), max(b.jw collate "C"), count(*) from %T a full join tmj b on a.g = b.jk and a.n < 5 group by b.jn' $src
+done
+rmj "heap: join to a one-row inner table" 'select min(a.t collate "C"), max(b.jt collate "C"), max(b.jv collate "C"), min(b.jw collate "C"), count(*) from %T a join tmj1 b on a.g = b.jk' tmo

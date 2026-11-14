@@ -39,3 +39,15 @@ sql "create table tmog as select $KSEL from tmo where i <= 30000"
 sql "vacuum analyze tmog"
 sql "create trigger gc_sync after insert or update or delete on tmog for each row execute function pgstrom.gpucache_sync_trigger('max_num_rows=90000')"
 sql "analyze tmoa"; sql "analyze tmop"
+
+# the inner side of the join tests (A6b over a join): duplicate keys, keys the outer side has no row for (12, 13) and NULL keys, NULL / empty /
+# multi-byte / blank-padded strings, so the extremes come from the inner buffer of the join as well as from the outer pages
+sql "create table tmj as select i, (case when i % 17 = 0 then null else i % 14 end)::int4 as jk, (i % 4)::int4 as jn,
+	case when i % 9 = 0 then null when i % 11 = 0 then '' else repeat(chr(98 + i % 24), (i % 17)::int) end as jt,
+	case when i % 8 = 0 then null when i % 5 = 0 then repeat(chr(955 + i % 4), (i % 5)::int + 1) else repeat(chr(70 + i % 20), (i % 13)::int) end::varchar(40) as jv,
+	case when i % 7 = 0 then null else repeat(chr(97 + i % 9), (i % 8)::int) end::char(10) as jw,
+	case when i % 6 = 0 then null else repeat(chr(97 + i % 9), (i % 8)::int) || repeat(' ', (i % 3)::int) end::bpchar as jwn
+	from generate_series(1, 45) i"
+sql "analyze tmj"
+sql "create table tmj1 as select 3::int4 as jk, 'inner'::text as jt, 'iv'::varchar(10) as jv, 'iw'::char(4) as jw"
+sql "analyze tmj1"

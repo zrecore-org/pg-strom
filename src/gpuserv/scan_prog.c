@@ -2257,6 +2257,8 @@ join_agg_class(uint32_t action)
 		case KAGG_ACTION__STDDEV:		return 10;
 		case KAGG_ACTION__COVAR:		return 11;
 		case KAGG_ACTION__STDDEV_INT:	return 13;
+		case KAGG_ACTION__PMIN_TEXT:
+		case KAGG_ACTION__PMAX_TEXT:	return 14;		/* A6b: 14 / 15 text min / max, 16 / 17 bpchar (join_build_agg decides by the argument type) */
 		default:
 			break;
 	}
@@ -2390,6 +2392,18 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 		cls = join_agg_class(d->action);
 		if (cls == 0)
 			return fail(b, "aggregate action %u is not implemented by the Vulkan service", d->action);
+		if (cls == 14)
+		{
+			const kern_varslot_desc *vss = SESSION_KVARS_SLOT_DESC(b->session);
+			uint32_t	tc = (d->arg0_slot_id >= 0 && d->arg0_slot_id < (int) b->nslots) ? vss[d->arg0_slot_id].vs_type_code : 0;
+
+			if (tc != TypeOpCode__text && tc != TypeOpCode__bpchar)
+				return fail(b, "min / max of an argument that is not a string");
+			cls = (tc == TypeOpCode__bpchar ? 16 : 14) + (d->action == KAGG_ACTION__PMAX_TEXT ? 1 : 0);
+			prog->agg_bp[nagg] = (cls == 16 || cls == 17) ? 1 : 0;
+			if (nkeys > 0)
+				prog->has_str_agg = 1;
+		}
 		prog->agg_of_col[i] = (int8_t) nagg;
 		if ((cls == 11 || cls == 13) && nagg + 3 > SCAN_AGG_MAX)
 			return fail(b, "the aggregates need %d accumulators (up to %d are supported; covar/corr/regr take three each)", nagg + 3, SCAN_AGG_MAX);
@@ -2432,7 +2446,7 @@ join_build_agg(builder *b, scan_prog *prog, uint32_t *agg_tab, uint32_t *key_reg
 	if (nagg > SCAN_AGG_MAX)
 		return fail(b, "the aggregates need %d accumulators (up to %d are supported)", nagg, SCAN_AGG_MAX);
 	for (int k = 0; k < nagg; k++)
-		if ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10)
+		if (agg_tab[4 * k] < 14 && ((agg_tab[4 * k] >= 6 && nkeys > 0) || agg_tab[4 * k] >= 10))
 			b->feat |= SCAN_FEAT_F8;			/* the GROUP BY kernels compile their float8 accumulation only into the full tier */
 	prog->agg_mode = 1;
 	prog->nagg = nagg;
