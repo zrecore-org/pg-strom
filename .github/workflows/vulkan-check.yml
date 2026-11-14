@@ -621,6 +621,12 @@ jobs:
           echo "## join queries with PGSTROM_GPUSERV_NO_MAP=1" | tee -a "$GITHUB_STEP_SUMMARY"
           PGSTROM_GPUSERV_NO_MAP=1 PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_nomap.out"
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_nomap.log" || true
+          # exactmesh pins the loader to the NVIDIA ICD (VK_ICD_FILENAMES): our job installs mesa-vulkan-drivers too, so the service loads
+          # the NVIDIA driver and llvmpipe in one process. Try the join queries with only the NVIDIA driver loaded.
+          echo "## join queries with VK_ICD_FILENAMES pinned to the NVIDIA ICD" | tee -a "$GITHUB_STEP_SUMMARY"
+          ICD=$(ls /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null | head -1)
+          VK_ICD_FILENAMES="$ICD" PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_nvicd.out"
+          cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_nvicd.log" || true
           echo "## embedded lite kernels in a fresh process" | tee -a "$GITHUB_STEP_SUMMARY"
           PGSTROM_GPUSERV_PIPELINE_LOG=1 timeout 900 /usr/lib/postgresql/${PG_MAJOR}/lib/pgstrom-gpuserv --prewarm-all --prewarm-set lite 2>&1 | tee "$RUNNER_TEMP/bench_prewarm_lite.log" | grep -E "prewarm:|rc=-" | tail -40
 
@@ -650,6 +656,8 @@ jobs:
             ${{ runner.temp }}/bench_nomap.out
             ${{ runner.temp }}/bench_service_nomap.log
             ${{ runner.temp }}/bench_prewarm_lite.log
+            ${{ runner.temp }}/bench_nvicd.out
+            ${{ runner.temp }}/bench_service_nvicd.log
           if-no-files-found: ignore
 
       - name: Save the pipeline cache (NVIDIA)
