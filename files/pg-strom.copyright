@@ -1,0 +1,30 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: PG-Strom
+Source: https://github.com/zrecore-org/pg-strom
+Comment: The GPU service pgstrom-gpuserv includes one GPL-2.0-or-later source file
+ (src/gpuserv/kernels_vm/area_ring.inc), so the binary package is distributed under the
+ GPL terms; see SOURCE-OFFER.txt in this directory for where to get the source.
+
+Files: *
+Copyright: 2012-2026 KaiGai Kohei and HeteroDB Inc. (upstream PG-Strom), and the
+ contributors of the vulkan-gpu fork
+License: PostgreSQL
+
+Files: src/gpuserv/kernels_vm/area_ring.inc
+Copyright: PostGIS developers (the algorithm of ptarray_signed_area), and the contributors of the vulkan-gpu fork
+License: GPL-2+
+
+License: PostgreSQL
+ Permission to use, copy, modify, and distribute this software and its documentation
+ for any purpose, without fee, and without a written agreement is hereby granted,
+ provided that the above copyright notice and this paragraph and the following two
+ paragraphs appear in all copies. See the file LICENSE of the source distribution for
+ the complete text.
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it under the terms
+ of the GNU General Public License as published by the Free Software Foundation; either
+ version 2 of the License, or (at your option) any later version.
+ .
+ On Debian systems, the complete text of the GNU General Public License version 2 can be
+ found in /usr/share/common-licenses/GPL-2.

@@ -3,7 +3,8 @@ Version: @@STROM_VERSION@@
 Release: @@STROM_RELEASE@@%{?dist}
 Summary: PG-Strom extension module for PostgreSQL
 Group: Applications/Databases
-License: PostgreSQL
+# the binary pgstrom-gpuserv includes one GPL-2.0-or-later file (src/gpuserv/kernels_vm/area_ring.inc): see files/SOURCE-OFFER.txt
+License: PostgreSQL and GPLv2+
 URL: https://github.com/heterodb/pg-strom
 Source0: https://heterodb.github.io/swdc/tgz/@@STROM_TARBALL@@.tar.gz
 Source1: systemd-pg_strom.conf
@@ -425,7 +426,8 @@ fi
 
 %files
 %defattr(-,root,root,-)
-%doc LICENSE README.md doc
+%license LICENSE LICENSES/GPL-2.0.txt
+%doc README.md doc files/SOURCE-OFFER.txt
 
 %if %{__HAS_PG15}
 %files PG15

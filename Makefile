@@ -65,8 +65,8 @@ tarball:
 	git archive --format=tar			\
 	            --prefix=$(__PGSTROM_TGZ)/		\
 	            -o $(PGSTROM_TAR) $(GITHASH)	\
-	            LICENSE README.md Makefile		\
-	            doc src arrow-tools test/ssbm
+	            LICENSE LICENSES README.md Makefile	\
+	            doc src arrow-tools test/ssbm files/SOURCE-OFFER.txt
 	TARFILE=`realpath $(PGSTROM_TAR)` && 		\
 	TEMP=`mktemp -d` &&				\
 	mkdir -p $${TEMP}/$(__PGSTROM_TGZ) &&		\
@@ -118,4 +118,7 @@ deb:
 	make -C src PG_CONFIG=$(PG_CONFIG) DESTDIR=$${WORK} WITH_GPUSERV=1 clean && \
 	make -C src PG_CONFIG=$(PG_CONFIG) DESTDIR=$${WORK} WITH_GPUSERV=1 -j 8  && \
 	make -C src PG_CONFIG=$(PG_CONFIG) DESTDIR=$${WORK} WITH_GPUSERV=1 install && \
+	install -Dm 644 files/pg-strom.copyright $${WORK}/usr/share/doc/pg-strom-pg$(PG_MAJORVERSION)/copyright && \
+	install -Dm 644 files/SOURCE-OFFER.txt $${WORK}/usr/share/doc/pg-strom-pg$(PG_MAJORVERSION)/SOURCE-OFFER.txt && \
+	install -Dm 644 LICENSES/GPL-2.0.txt $${WORK}/usr/share/doc/pg-strom-pg$(PG_MAJORVERSION)/GPL-2.0.txt && \
 	fakeroot dpkg-deb --build $${WORK} .

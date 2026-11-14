@@ -1,0 +1,31 @@
+Source code offer for the GPL-licensed parts of PG-Strom (Vulkan port)
+======================================================================
+
+PG-Strom is distributed under the PostgreSQL License. One source file,
+
+    src/gpuserv/kernels_vm/area_ring.inc
+
+reproduces the algorithm of PostGIS's ptarray_signed_area() (PostGIS is GPL-2.0-or-later)
+and is licensed GPL-2.0-or-later (see LICENSES/GPL-2.0.txt). That file is compiled into
+the GPU service program "pgstrom-gpuserv" (the CPU twin of the interpreter and the
+Slang kernels, including the SPIR-V embedded in the binary). A binary package that
+contains pgstrom-gpuserv is therefore a combined work and is distributed under the
+terms of the GPL, version 2 or (at your option) any later version.
+
+The complete corresponding source code of the package you received (everything needed
+to build pgstrom-gpuserv and the module: the sources under src/, the Slang kernels
+under src/gpuserv/kernels_vm/, the build files and the scripts) is available
+
+  - in the source archive that accompanies this package or is named in its metadata
+    (for an RPM, Source0 of pg_strom.spec; for a Debian package, the same version
+    tag), and
+  - from the project repository, at the tag or commit that matches the package
+    version:  https://github.com/zrecore-org/pg-strom  (branch vulkan-gpu)
+
+On request, the maintainers will also send the source on a physical medium for no more
+than the cost of distributing it, for at least three years after you received the
+binary package. Ask through the issue tracker of the repository above.
+
+The rest of the package keeps the license stated in each source file (PostgreSQL
+License, or the license of the third-party component named in README.md,
+"Credits and licensing").
