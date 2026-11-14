@@ -47,6 +47,9 @@
 extern int scan_prog_df64;		/* scan_prog.h: the df64 prefilter of float8 comparisons (A10 part 6) */
 #include "wire.h"
 #include "kprewarm.h"
+/* A17 bisect hooks (defined in scan_exec.c) */
+void scan_bisect_try(gpu_vk_ctx *vk, const char *tag);
+void scan_bisect_dump(const char *tag);
 
 static volatile sig_atomic_t	got_signal = 0;
 static int		prewarm_mode = GPUSERV_PREWARM_LITE;	/* --prewarm-set (pg_strom.gpu_prewarm) */
@@ -213,6 +216,8 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 
 		gpu_vk_describe(&ss.vk, msg, sizeof(msg));
 		log_msg("opened '%s': %s", ss.vk.info.name, msg);
+		scan_bisect_dump("serve:open");
+		scan_bisect_try(&ss.vk, "serve:open");
 		if (gpuserv_vm_selftest(&ss.vk, msg, sizeof(msg)) != 0)
 		{
 			log_msg("VM self-test FAILED: %s", msg);
@@ -221,6 +226,7 @@ do_serve(const char *control_name, uint32_t device, int lifeline_fd,
 			return 3;
 		}
 		log_msg("VM self-test %s", msg);
+		scan_bisect_try(&ss.vk, "serve:after-selftest");
 		/*
 		 * A10 part 6: the df64 prefilter of float8 comparisons needs exact error-free transformations. It is validated on MoltenVK only
 		 * (gpu_vk.c switches its fast math off); on another driver it needs PGSTROM_GPUSERV_DF64=on, and in every case the device must
@@ -329,6 +335,8 @@ do_prewarm(long device, uint32_t nbind, uint32_t pcsize, char **files, int nfile
 		log_msg("prewarm: cannot open device %ld: %s", device, ctx ? ctx->err : "out of memory");
 		return 1;
 	}
+	scan_bisect_dump("prewarm:open");
+	scan_bisect_try(ctx, "prewarm:open");
 	for (int i = 0; i < nfiles; i++)
 	{
 		FILE	   *fp = fopen(files[i], "rb");

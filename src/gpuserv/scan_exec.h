@@ -146,6 +146,10 @@ typedef struct agg_state
 } agg_state;
 
 /* Run one task of a GpuPreAgg session and add its results to st. 0 on success. */
+/* A17 bisect (PGSTROM_GPUSERV_BISECT=1) */
+void	scan_bisect_try(gpu_vk_ctx *vk, const char *tag);
+void	scan_bisect_dump(const char *tag);
+
 int		scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 						   agg_state *st, const XpuCommand *task, char *err, size_t errlen);
 /* GROUP BY: the same, with the groups kept in st->groups. */

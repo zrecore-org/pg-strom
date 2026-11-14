@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -24,6 +25,84 @@
 #include "cpu_vm.h"
 #include "gpusort.h"
 #include "specialize.h"
+
+/*
+ * A17 bisect (PGSTROM_GPUSERV_BISECT=1): the NVIDIA driver rejected the join aggregation pipelines inside the service while the same
+ * files compile in a separate process. scan_bisect_try() creates jagg16_4_lite (the layout of the join kernels: 6 buffers, 20 bytes of
+ * push constants) at a named point and logs the result; scan_bisect_dump() logs the process state (signal masks, memory use, limits,
+ * environment variable names) so that the service and a --prewarm process can be diffed.
+ */
+extern char **environ;
+
+static int
+bisect_enabled(void)
+{
+	const char *e = getenv("PGSTROM_GPUSERV_BISECT");
+
+	return e && *e && strcmp(e, "0") != 0;
+}
+
+void
+scan_bisect_try(gpu_vk_ctx *vk, const char *tag)
+{
+	gpu_vk_pipeline pl;
+	struct timespec t0, t1;
+	int			rc;
+
+	if (!bisect_enabled())
+		return;
+	memset(&pl, 0, sizeof(pl));
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	rc = gpu_vk_pipeline_create(vk, &pl, kspv_jagg16_4_lite, kspv_jagg16_4_lite_len, 6, 20);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	fprintf(stderr, "bisect[%s]: jagg16_4_lite (%u bytes) %s in %.3f s%s%s\n", tag, kspv_jagg16_4_lite_len,
+			rc == 0 ? "created" : "FAILED",
+			(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9,
+			rc == 0 ? "" : ": ", rc == 0 ? "" : vk->err);
+	if (rc == 0)
+		gpu_vk_pipeline_destroy(vk, &pl);
+}
+
+void
+scan_bisect_dump(const char *tag)
+{
+	FILE	   *fp;
+	char		line[256];
+	static const struct { const char *name; int res; } lim[] = {
+		{"AS", RLIMIT_AS}, {"DATA", RLIMIT_DATA}, {"STACK", RLIMIT_STACK}, {"MEMLOCK", RLIMIT_MEMLOCK},
+		{"NOFILE", RLIMIT_NOFILE}, {"NPROC", RLIMIT_NPROC}, {"CORE", RLIMIT_CORE}
+	};
+
+	if (!bisect_enabled())
+		return;
+	fprintf(stderr, "bisect[%s]: pid %d ppid %d\n", tag, (int) getpid(), (int) getppid());
+	if ((fp = fopen("/proc/self/status", "r")) != NULL)
+	{
+		while (fgets(line, sizeof(line), fp))
+			if (!strncmp(line, "Sig", 3) || !strncmp(line, "Vm", 2) || !strncmp(line, "Threads", 7) || !strncmp(line, "Cap", 3))
+			{
+				line[strcspn(line, "\n")] = '\0';
+				fprintf(stderr, "bisect[%s]: status %s\n", tag, line);
+			}
+		fclose(fp);
+	}
+	for (size_t i = 0; i < sizeof(lim) / sizeof(lim[0]); i++)
+	{
+		struct rlimit rl;
+
+		if (getrlimit(lim[i].res, &rl) == 0)
+			fprintf(stderr, "bisect[%s]: rlimit %s soft %llu hard %llu\n", tag, lim[i].name,
+					(unsigned long long) rl.rlim_cur, (unsigned long long) rl.rlim_max);
+	}
+	fprintf(stderr, "bisect[%s]: environment names:", tag);
+	for (char **e = environ; e && *e; e++)
+	{
+		size_t n = strcspn(*e, "=");
+
+		fprintf(stderr, " %.*s", (int) n, *e);
+	}
+	fprintf(stderr, "\n");
+}
 
 #define SCAN_WG_MAX		65535U
 #define AGG_PAGES_PER_WG	32U		/* pages one aggregation workgroup runs over */
@@ -4440,6 +4519,12 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 	ji->map = map;
 	ji->maplen = maplen;
 	ji->ready = 1;
+	{
+		static int	bisect_once;
+
+		if (!bisect_once++)
+			scan_bisect_try(vk, "join:after-inner-import");
+	}
 	return 0;
 }
 

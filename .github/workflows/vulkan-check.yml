@@ -627,6 +627,14 @@ jobs:
           ICD=$(ls /usr/share/vulkan/icd.d/nvidia_icd.json /etc/vulkan/icd.d/nvidia_icd.json 2>/dev/null | head -1)
           VK_ICD_FILENAMES="$ICD" PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_nvicd.out"
           cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_nvicd.log" || true
+          # A17 bisect (the advisor's experiment): the service creates jagg16_4_lite right after the device opens, after the VM self-test
+          # and after the first join's inner-store import, and logs the process state (signal masks, Vm*, rlimits, environment names);
+          # a standalone --prewarm logs the same state. Diff the two logs.
+          echo "## A17 bisect: pipeline creation at three points of the service start-up" | tee -a "$GITHUB_STEP_SUMMARY"
+          PGSTROM_GPUSERV_BISECT=1 PGSTROM_GPUSERV_PIPELINE_LOG=1 PGSTROM_GPUSERV_PREWARM=off CPU_WORKERS=$(nproc) LABEL_RE='^join agg$' NOCPU=1 ROOT="$RUNNER_TEMP/sp_bench" sh test/gpuserv/perf_bench.sh 2>&1 | tee "$RUNNER_TEMP/bench_bisect.out"
+          cp "$RUNNER_TEMP/sp_bench/log" "$RUNNER_TEMP/bench_service_bisect.log" || true
+          grep -a "bisect\[" "$RUNNER_TEMP/bench_service_bisect.log" | grep -a -E "created|FAILED" | tee -a "$GITHUB_STEP_SUMMARY" || true
+          PGSTROM_GPUSERV_BISECT=1 timeout 300 /usr/lib/postgresql/${PG_MAJOR}/lib/pgstrom-gpuserv --prewarm 6 20 src/gpuserv/build/jagg16_4_lite.spv 2>&1 | tee "$RUNNER_TEMP/bench_prewarm_bisect.log" | grep -a -E "created|FAILED" || true
           echo "## embedded lite kernels in a fresh process" | tee -a "$GITHUB_STEP_SUMMARY"
           PGSTROM_GPUSERV_PIPELINE_LOG=1 timeout 900 /usr/lib/postgresql/${PG_MAJOR}/lib/pgstrom-gpuserv --prewarm-all --prewarm-set lite 2>&1 | tee "$RUNNER_TEMP/bench_prewarm_lite.log" | grep -E "prewarm:|rc=-" | tail -40
 
@@ -658,6 +666,9 @@ jobs:
             ${{ runner.temp }}/bench_prewarm_lite.log
             ${{ runner.temp }}/bench_nvicd.out
             ${{ runner.temp }}/bench_service_nvicd.log
+            ${{ runner.temp }}/bench_bisect.out
+            ${{ runner.temp }}/bench_service_bisect.log
+            ${{ runner.temp }}/bench_prewarm_bisect.log
           if-no-files-found: ignore
 
       - name: Save the pipeline cache (NVIDIA)
