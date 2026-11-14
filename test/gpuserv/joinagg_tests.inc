@@ -128,6 +128,9 @@ runjagg s1 "parallel workers, LEFT JOIN with a NULL group" "select d.grp, count(
 # above adds it to the GPU's states). Each test below needs both halves: matched rows aggregated on the device and
 # unmatched ones from the CPU.
 echo "aggregation over RIGHT and FULL joins"
+# these plan checks flipped between tables and runs: the GPU and the CPU hash join cost about the same, so the planner is told to favour the GPU
+# (as perf_bench.sh does) for the RIGHT/FULL shapes; the results are compared with the CPU's either way
+JAGGBIG_SAVE=$JAGGBIG; JAGGBIG="$JAGGBIG set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0;"
 sql "create table if not exists sdnl as select case when grp % 4 = 0 then null else k end as k, grp, pay, txt from sd"; sql "analyze sdnl"
 for t in s1 s2 s3; do
 	JAGGPAT='Right Outer Join Quals \[1\]'
@@ -174,6 +177,7 @@ for t in s1 s2 s3; do
 	runjagg $t "inner join, then RIGHT join" "select count(*), count(t.i), sum(e.g2), sum(d.grp) from %T t join sd2 e on t.a % 400 = e.k2 right join %D d on t.b = d.k and t.a + d.grp > 9000"
 	runjagg $t "inner join, then RIGHT join, GROUP BY" "select d.grp % 5 as k, count(*), count(t.i), sum(e.g2) from %T t join sd2 e on t.a % 400 = e.k2 right join %D d on t.b = d.k and t.a + d.grp > 9000 group by 1 order by 1"
 done
+JAGGBIG=$JAGGBIG_SAVE
 JAGGPAT='Right Outer Join Quals \[1\]'
 runjagg s1 "RIGHT join, then LEFT join on the inner side's column" "select count(*), count(t.i), count(e.g2), sum(d.grp), sum(e.p2) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 left join sd2 e on d.grp = e.k2"
 runjagg s1 "RIGHT join, then inner join on the inner side's column, GROUP BY" "select e.g2, count(*), count(t.i), sum(d.grp) from %T t right join %D d on t.b = d.k and t.a + d.grp > 9000 join sd2 e on d.grp = e.k2 group by 1 order by 1"
