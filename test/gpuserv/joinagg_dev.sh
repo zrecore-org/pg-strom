@@ -95,5 +95,6 @@ if [ -n "$ADHOC" ]; then
 	[ -n "$SKIP_TESTS" ] && exit 0
 fi
 . "${0%/*}/joinagg_tests.inc"
+. "${0%/*}/svc_log_check.inc"; svc_log_check "$ROOT/log" "${SVC_ALLOW:-}"
 echo
 if [ $fail -eq 0 ]; then echo "JOINAGG DEV: ALL PASSED"; else echo "JOINAGG DEV: $fail FAILED"; exit 1; fi

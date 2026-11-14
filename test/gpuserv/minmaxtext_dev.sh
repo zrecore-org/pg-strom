@@ -76,4 +76,7 @@ for src in tmo tmoa tmop tmog; do
 done
 rmc "heap: overflow rows, text key" 'select w, min(t collate "C"), max(v collate "C") from %T group by w' tmo
 echo
+. "${0%/*}/svc_log_check.inc"
+# known, documented fallback (A6b slice 2, plan): GROUP BY with many groups and long text values, a single table
+svc_log_check "$ROOT/log" "${SVC_ALLOW:-no accumulator for the column}"
 if [ $fail -eq 0 ]; then echo "MINMAXTEXT DEV: ALL PASSED"; else echo "MINMAXTEXT DEV: $fail FAILED"; exit 1; fi
