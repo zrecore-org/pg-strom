@@ -45,6 +45,7 @@
 - L1411: A16 status
 - L1459: A16 engine selection
 - L1500: Licensing
+- A17 discrete-GPU performance (T4 benchmark, 2026-11-14)
 
 
 > The branch was created as `apple-silicon` and renamed `vulkan-gpu` after A2 (it is the Vulkan port, validated on Apple Silicon only). Older text below keeps the old name where it describes history.
@@ -1499,3 +1500,7 @@ Sources: https://postgis.net/docs/reference_sfcgal.html (function list), https:/
 
 ## Licensing (decided 2026-11-11)
 `kernels_vm/area_ring.inc` reproduces PostGIS 3.7's `ptarray_signed_area` (GPL-2.0-or-later). Decision by the user: accept GPL for that file. It carries an SPDX header and `LICENSES/GPL-2.0.txt` is in the tree; binaries of `pgstrom-gpuserv` that include it are distributed under GPL terms (packaging in `files/` must ship the license and a source offer: not done yet). Re-check the README credits table whenever a dependency or reproduced algorithm is added.
+
+## A17 discrete-GPU performance (T4 benchmark, 2026-11-14)
+**Finding (CI run 43573554810, hosted T4, `perf_bench.sh`, 16.8M rows, one run, PostgreSQL side with one worker per runner core):** every query is correct but the GPU path is 2.5x to 4x *slower* than parallel PostgreSQL end to end (no-GROUP-BY aggregate 1,389 ms vs 434 ms; GROUP BY 100 keys 2,488 vs 849; aggregate over a join 1,533 vs 329) and GROUP BY 20 over a join takes 7,280 ms vs 877 with no task trace lines (0 tasks: a CPU path or a cold kernel; unknown). The kernel time is small (10 ms per task, 48 tasks = 0.5 s of 1.4 s). The first run of each query is the slowest (1.6 s, 2.4 s: cold T4 clocks, see the mongo finding that idle clocks slow the first query). Fixed already: read-back buffers in the cached memory type (4 MB/s -> 11.9 GB/s, bdde8c1a).
+**Plan:** (1) attribute the 0.9 s per query: the second benchmark run uploads the service log with per-task trace lines (pages, bytes, kernel time) and prints nproc and the GPU clocks; (2) the likely costs are the heap-page copy by the backend, the upload over PCIe (the M1 maps the file without a copy), per-task submit/wait, and idle clocks; candidates: larger batches, pinned staging buffers, overlapped upload and compute (double buffering), reading pages straight from shared buffers into a mapped host-visible buffer; (3) find why the join GROUP BY 20 shows 0 tasks; (4) re-run on the T4 after each change, and keep the doc/features.md T4 table honest.
