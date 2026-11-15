@@ -5055,7 +5055,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	size_t		out_words, ovf_base = 0, oj_base = 0;
 	const uint32_t *out = NULL;
 	int			rv = -1;
-	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
+	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0, tm1 = 0;
 	uint32_t	bm_words = 0, flag_words = 0, flag_base = 0;
 	int			scout;
 
@@ -5402,6 +5402,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			snprintf(err, errlen, "out of memory");
 			goto done;
 		}
+		tm1 = now_ms();
 		/* the joined rows that found no slot: their staged key and argument values */
 		for (uint32_t r = 0; r < ovf_count; r++)
 		{
@@ -5427,8 +5428,8 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	t3 = now_ms();
 	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
 	if (eng->trace)
-		fprintf(stderr, "pgstrom-gpuserv: join%s agg task: %u pages, pages-in %.1f ms, gpu %.1f ms, merge %.1f ms, overflow rows %u\n",
-				grouped ? " group" : "", npages, t1 - t0, t2 - t1, t3 - t2, ovf_count);
+		fprintf(stderr, "pgstrom-gpuserv: join%s agg task: %u pages, pages-in %.1f ms, gpu %.1f ms, merge %.1f ms (blocks %.1f), overflow rows %u\n",
+				grouped ? " group" : "", npages, t1 - t0, t2 - t1, t3 - t2, tm1 > 0 ? tm1 - t2 : 0.0, ovf_count);
 	rv = 0;
 done:
 	if (have_prog)
