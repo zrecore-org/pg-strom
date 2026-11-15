@@ -60,6 +60,13 @@
 #include "vagg.inc"             // A10: PostgreSQL's float8_accum / float8_regr_accum / ..._combine on it (variance, stddev, covar, corr, regr_*)
 #endif
 
+// experiment (A17): -DVM_EXP_NOINL makes the big opcode groups real functions (the driver compilers inline everything otherwise)
+#ifdef VM_EXP_NOINL
+#define VM_NI [noinline]
+#else
+#define VM_NI
+#endif
+
 #ifndef VM_MAX_REGS
 #define VM_MAX_REGS 32
 #endif
@@ -635,7 +642,7 @@ void num_unary(uint k0, Reg x, out int64_t r)
 }
 
 // The numeric instructions. Returns 0, or SOP_RECHECK_CODE.
-uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_num(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     switch (op)
     {
@@ -1112,7 +1119,7 @@ uint jb_contains(Reg x, uint pat)
 }
 
 // The jsonb instructions. Returns 0, or SOP_RECHECK_CODE.
-uint vm_json(uint op, uint dst, uint ra, uint rb, uint k0, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_json(uint op, uint dst, uint ra, uint rb, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
     uint xs = str_src(x);
@@ -1307,7 +1314,7 @@ uint vm_json(uint op, uint dst, uint ra, uint rb, uint k0, inout Reg regs[VM_MAX
 // Instructions of A6 (not in the original VM). Returns 0 or the error code.
 // The float8 instructions (A10): a register holds the 64 bits of the double, every operation is f64_soft.inc's.
 // Returns 0, or k1 | reason << 16 of the error PostgreSQL raises.
-uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_f8(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
     Reg y = regs[rb];
@@ -1916,7 +1923,7 @@ GBox geom_box2d(uint src, uint off, uint len, bool nd)
 bool gf_le(uint a, uint b) { return f4cmpbits(a, b) <= 0; }
 
 // The PostGIS instructions. Returns 0, or SOP_RECHECK_CODE.
-uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
     Reg y = regs[rb];
@@ -2137,7 +2144,7 @@ uint gdw_load(Reg r, inout uint srid, inout uint64_t px, inout uint64_t py, inou
     return 0u;
 }
 
-uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_dwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     Reg a = regs[ra];
     Reg b = regs[rb];
@@ -2239,7 +2246,7 @@ uint gdw3_load(Reg r, inout uint srid, inout uint64_t px, inout uint64_t py, ino
 }
 
 // ST_Z (k0 = 0), ST_M (k0 = 1), ST_X (2) and ST_Y (3) of a point
-uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_zm(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg a = regs[ra];
     if (a.isnull != 0u)
@@ -2581,7 +2588,7 @@ uint gd_hdr(Reg r, inout uint srid, inout uint nd, inout uint o)
 // ST_Distance / ST_3DDistance / ST_3DMaxDistance of two points (GEOMDIST), the same as geom_dist() of cpu_vm.c. PostGIS evaluates
 // sqrt(fma(dz, dz, fma(dx, dx, dy * dy))) (3D) / sqrt(fma(dx, dx, dy * dy)) (2D); f64_sqr_add is the fused step, so the value is
 // PostGIS' own, bit for bit (postgis/dist_probe.c), not an approximation to be rechecked at a boundary.
-uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     Reg a = regs[ra];
     Reg b = regs[rb];
@@ -2653,7 +2660,7 @@ uint vm_geom_dist(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[V
 // ST_DWithin forms need SOP_GDW_NP (the planner's calibration) and SOP_GDW_EXACT; PostGIS decides them as "distance <= tolerance" with the distance of
 // ST_Distance / ST_3DDistance (lwgeom_mindistance2d_tolerance, initial value FLT_MAX), an empty geometry is false. The 3D forms measure lines, points
 // and multi-geometries of those that have a Z; a polygon is the backend's.
-uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     bool isdw = (op == SOP_GEOMDWITHIN || op == SOP_GEOM3DDW);
     bool d3 = (op == SOP_GEOM3DDW) || (op == SOP_GEOMDIST && (k1 & SOP_GDIST_3D) != 0u);
@@ -2767,7 +2774,7 @@ uint vm_geom_dwdist(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout
 #define AR_LD(src, off) ld64s(src, off)
 #include "area_ring.inc"
 
-uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
     if (x.isnull != 0u)
@@ -2961,7 +2968,7 @@ uint vm_geom_len(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 // geometry is empty when no member has an element (a polygon: a ring); ST_NumGeometries is 0 for an empty geometry, the member count of a
 // collection or 1; ST_NumPoints is the point count of a LINESTRING only and ST_NumInteriorRings that of a POLYGON (rings - 1, 0 when empty),
 // NULL for every other type (probe: postgis/measure_probe.sql).
-uint vm_geom_cnt(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_cnt(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
     if (x.isnull != 0u)
@@ -3105,7 +3112,7 @@ uint vm_geom_cnt(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
     return 0u;
 }
 
-uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 {
     if (k0 >= 6u)
         return vm_geom_cnt(dst, ra, k0, regs);
@@ -3143,7 +3150,7 @@ uint vm_geom_flag(uint dst, uint ra, uint k0, inout Reg regs[VM_MAX_REGS])
 }
 
 // ST_3DDWithin of two points (GEOM3DDW), the same as geom_3ddwithin() of cpu_vm.c
-uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     Reg a = regs[ra];
     Reg b = regs[rb];
@@ -3235,7 +3242,7 @@ uint vm_geom_3ddwithin(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg r
 
 // Returns 0 (res set), or SOP_RECHECK_CODE. a: the polygon register; b: the point register, or with SOP_GPIP_FUSED
 // the float8 x (xv) and y (yv) of a point with SRID fsrid.
-uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     Reg x = regs[ra];
     Reg y = regs[rb];
@@ -3405,7 +3412,7 @@ uint vm_geom_pip(uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM
     return 0u;
 }
 
-uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_ext(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout Reg regs[VM_MAX_REGS])
 {
     switch (op)
     {
@@ -3697,7 +3704,7 @@ bool agg_scales_ok(uint aggoff, uint naggs, uint keyoff, uint nkeys, inout Reg r
 // FuncOpCode of a failing function, 0 on success. vm_run() below interprets a program with it; the
 // specialized kernels (specialize.c) call it with constant operands, so the generated code runs
 // exactly the semantics of the VM. (The loop is only there to keep the body's nesting unchanged.)
-uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint ip,
+VM_NI uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint ip,
              inout Reg regs[VM_MAX_REGS])
 {
     [loop]
@@ -4077,7 +4084,7 @@ uint vm_step(uint op, uint dst, uint ra, uint rb, uint k0, uint k1, inout uint i
 }
 
 // Runs instructions [ip, end). Returns the FuncOpCode of a failing function, 0 on success.
-uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
+VM_NI uint vm_run(uint insnoff, uint ip, uint end, inout Reg regs[VM_MAX_REGS])
 {
     while (ip < end)
     {
