@@ -1604,3 +1604,31 @@ Reading: the GPU wins where a big join or aggregate dominates (Q3 4x, Q9 2.4x, Q
 (0.07: 8408, Q9 lost with 3784 ms and one Gpu node; 0.2: 8191, the GPU is off everywhere.) At the default the GPU plans win Q9 (576 vs 2935 ms), Q18 (1034 vs 1767), Q14 (69 vs 213), Q8 (68 vs 133), Q12 (116 vs 170), Q10 (248 vs 322) and the planner keeps the parallel CPU plan for the short queries; the remaining losers are Q1 (603 vs 535), Q6 (130 vs 116), Q15 (249 vs 137) and Q19 (262 vs 166). The optimum is narrow (0.07 already loses Q9: plan shapes flip), it is calibrated on one machine and scale factor: re-calibrate with `GPUSET_EXTRA='set pg_strom.gpu_scan_tuple_cost=<x>;' sh test/gpuserv/locked_test.sh "$PWD" tpch_bench.sh`. Open: a floor that scales with the device (a discrete GPU has a faster kernel, the host copy stays) and the GPU aggregate/join cost model (Q9 and Q18 are the wins; Q1/Q6/Q15/Q19 should stay on the CPU).
 
 **A18: two bugs found by the TPC-H result comparison (2026-11-15).** (1) **Wrong rows from a parallel GpuJoin with a Gather inside (TPC-H Q18 at `gpu_scan_tuple_cost = 0`, 8 workers: 1 row instead of 10).** `gpu_join.c` marked every GpuJoin path `parallel_safe = join_rel->consider_parallel` although its inner path (here `HashAggregate` over `Gather` over a parallel `GpuPreAgg`, the `IN (select ... having sum > 312)` subquery) is not parallel safe; the join above it then ran that subtree in every worker, the nested parallel scan was split between the 6 processes and each saw about one sixth of lineitem, so the HAVING filter dropped the groups. Fix: `parallel_safe` also requires `inner_path->parallel_safe` (GpuJoin) and every inner path's (GpuPreAgg; `gpu_preagg.c`). (2) **Leak of shared-memory buffers (WARNING "shared-memory '/pgsb...' leaks, and still alive", 5-6 per query):** a GPU node that is not parallel-aware but runs inside a parallel worker creates its preload buffer in that worker (`pgstromSharedStateInitDSM()` with local memory), and `pgstromExecEndTaskState()` released it only in the leader (`!IsParallelWorker()`); now the creating process drops it (`ss_handle == DSM_HANDLE_INVALID` marks local state; `executor.c`). The segments were unlinked at the end of the transaction anyway, so the effect was the warning and memory held until then. Regression script `test/gpuserv/parallel_nested_dev.sh` (Q18-shaped query on a TPC-H SF1-sized synthetic set, parallel plan with zero GPU costs, CPU vs GPU rows and no WARNING; it FAILS on the old code at 1.5M orders: result differs, 6 warnings; smaller sizes do not give the plan shape). The other differences of the comparison were harmless: Q11's DIFF is the order of rows with equal sort keys. `vulkan_installcheck.sh`: All 23 tests passed.
+
+**A18 final baseline at the default (`gpu_scan_tuple_cost` 0.05, after the parallel-safety and shared-memory fixes; M1 Pro, TPC-H SF1, best of 3, both engines with 8 parallel workers):**
+
+| q | cpu8 ms | gpu ms | gpu/cpu | Gpu nodes | result |
+|---|---|---|---|---|---|
+| Q1 | 601 | 611 | 1.02 | 1 | same |
+| Q2 | 141 | 142 | 1.01 | 0 | same |
+| Q3 | 227 | 167 | 0.74 | 0 | same |
+| Q4 | 87 | 83 | 0.96 | 0 | same |
+| Q5 | 103 | 85 | 0.83 | 1 | same |
+| Q6 | 134 | 132 | 0.99 | 1 | same |
+| Q7 | 147 | 150 | 1.02 | 0 | same |
+| Q8 | 136 | 73 | 0.54 | 1 | same |
+| Q9 | 3225 | 635 | 0.20 | 2 | same |
+| Q10 | 404 | 300 | 0.74 | 2 | same |
+| Q11 | 70 | 66 | 0.95 | 0 | DIFF |
+| Q12 | 227 | 223 | 0.98 | 2 | same |
+| Q13 | 899 | 885 | 0.99 | 0 | same |
+| Q14 | 253 | 73 | 0.29 | 1 | same |
+| Q15 | 159 | 257 | 1.62 | 1 | same |
+| Q16 | 182 | 183 | 1.01 | 0 | same |
+| Q18 | 2109 | 1146 | 0.54 | 1 | same |
+| Q19 | 167 | 272 | 1.63 | 1 | same |
+| Q21 | 221 | 215 | 0.97 | 1 | same |
+| Q22 | 73 | 70 | 0.96 | 0 | same |
+| total (20 queries; Q17, Q20 exceed 60 s on both) | 9562 | 5771 | 0.60 | | |
+
+The GPU engine wins Q9 (5.1x), Q18 (1.8x), Q14 (3.5x), Q8 (1.8x), Q10 (1.3x), Q3 and Q5 slightly, and loses Q1 (1.0x), Q15 (1.6x), Q19 (1.6x); Q11's DIFF is the order of rows with equal sort keys. Next from this table: Q15 and Q19 (why the device is slower than parallel PostgreSQL: scan floor vs host work), Q18 and Q3 (many groups, top-N through the radix sort).
