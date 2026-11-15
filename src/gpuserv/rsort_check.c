@@ -40,6 +40,74 @@ kvcmp(const void *a, const void *b)
 	return x->i < y->i ? -1 : (x->i > y->i ? 1 : 0);
 }
 
+
+static double
+now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+/* RSORT_BENCH=1: wall time of a whole sort (key copy in, 16 passes, index read back) against qsort of (key, index) pairs */
+static int
+bench(gpu_vk_ctx *vk, gpu_vk_pipeline pipe[2][3], gpu_vk_buffer *K0, gpu_vk_buffer *K1, gpu_vk_buffer *I0, gpu_vk_buffer *I1,
+	  gpu_vk_buffer *H)
+{
+	static const uint32_t bn[] = {1024, 4096, 16384, 65536, 262144, 1000000};
+	printf("%9s %10s %10s %10s\n", "rows", "radix ms", "dev ms", "qsort ms");
+	for (size_t bi = 0; bi < sizeof(bn) / sizeof(bn[0]); bi++)
+	{
+		uint32_t	n = bn[bi], B = (n + 4095) / 4096;
+		uint64_t   *src = malloc(8 * (size_t) n), *kin = (uint64_t *) K0->map;
+		uint32_t   *perm = malloc(4 * (size_t) n);
+		kv		   *ref = malloc(sizeof(kv) * n);
+		gpu_vk_step steps[48];
+		rs_pc		pcs[48];
+		gpu_vk_buffer *bufs[2][5] = {{K0, H, I0, K1, I1}, {K1, H, I1, K0, I0}};
+		double		t0, t1, t2, dev = 0;
+		int			ns = 0;
+
+		for (uint32_t i = 0; i < n; i++)
+			src[i] = rnd() % 100000;
+		t0 = now_ms();
+		memcpy(kin, src, 8 * (size_t) n);
+		for (uint32_t p = 0; p < 16; p++)
+			for (int s = 0; s < 3; s++)
+			{
+				pcs[ns] = (rs_pc){n, B, p, 0};
+				steps[ns] = (gpu_vk_step){&pipe[p & 1][s], bufs[p & 1], &pcs[ns], s == 1 ? 1 : B, 1, 1};
+				ns++;
+			}
+		if (gpu_vk_dispatch_seq(vk, steps, ns, &dev) != 0)
+		{
+			printf("dispatch failed: %s\n", vk->err);
+			return 1;
+		}
+		memcpy(perm, I0->map, 4 * (size_t) n);
+		t1 = now_ms();
+		for (uint32_t i = 0; i < n; i++)
+		{
+			ref[i].k = src[i];
+			ref[i].i = i;
+		}
+		qsort(ref, n, sizeof(kv), kvcmp);
+		t2 = now_ms();
+		for (uint32_t i = 0; i < n; i++)
+			if (perm[i] != ref[i].i)
+			{
+				printf("MISMATCH at %u\n", i);
+				break;
+			}
+		printf("%9u %10.2f %10.2f %10.2f\n", n, t1 - t0, dev, t2 - t1);
+		free(src);
+		free(perm);
+		free(ref);
+	}
+	return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -82,6 +150,8 @@ main(int argc, char **argv)
 				return 1;
 			}
 	printf("pipelines\n");
+	if (getenv("RSORT_BENCH"))
+		return bench(&vk, pipe, &K[0], &K[1], &I[0], &I[1], &H);
 	for (size_t si = 0; si < sizeof(sizes) / sizeof(sizes[0]); si++)
 	{
 		uint32_t	n = sizes[si], B = (n + 4095) / 4096;

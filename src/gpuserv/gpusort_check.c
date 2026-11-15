@@ -261,8 +261,8 @@ main(int argc, char **argv)
 			struct timespec ts;
 
 			memset(&spec, 0, sizeof(spec));
-			spec.nkeys = 2;
-			for (int k = 0; k < 2; k++)
+			spec.nkeys = getenv("GPUSORT_BENCH1") ? 1 : 2;	/* BENCH1: one 64-bit key (2 words), like rsort_check */
+			for (int k = 0; k < spec.nkeys; k++)
 			{
 				spec.key[k].asc = ba[k];
 				spec.key[k].wide = bw[k];
@@ -273,7 +273,8 @@ main(int argc, char **argv)
 			for (uint32_t r = 0; r < n; r++)
 			{
 				gpusort_encode(&spec, 0, keys + (size_t) r * spec.nwords, 0, (int64_t)(rnd() % 100000));
-				gpusort_encode(&spec, 1, keys + (size_t) r * spec.nwords, rnd() % 50 == 0, (int64_t) rnd() >> 8);
+				if (spec.nkeys > 1)
+					gpusort_encode(&spec, 1, keys + (size_t) r * spec.nwords, rnd() % 50 == 0, (int64_t) rnd() >> 8);
 			}
 			setenv("PGSTROM_GPUSERV_SORT", "gpu", 1);
 			clock_gettime(CLOCK_MONOTONIC, &ts);
