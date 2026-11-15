@@ -2427,6 +2427,16 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	cpath->path.param_info       = con->param_info;
 	cpath->path.parallel_aware   = con->try_parallel;
 	cpath->path.parallel_safe    = con->input_rel->consider_parallel;
+	{
+		ListCell   *lc_ip;
+
+		/* an inner path with a Gather makes the whole aggregation not parallel safe */
+		foreach (lc_ip, con->inner_paths_list)
+		{
+			if (!((Path *) lfirst(lc_ip))->parallel_safe)
+				cpath->path.parallel_safe = false;
+		}
+	}
 	cpath->path.parallel_workers = pp_info->parallel_nworkers;
 	cpath->path.rows             = con->num_groups;
 	cpath->path.startup_cost     = pp_info->startup_cost;

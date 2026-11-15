@@ -2289,11 +2289,13 @@ pgstromExecEndTaskState(CustomScanState *node)
 	}
 	if (pts->h_kmrels)
 		__munmapShmem(pts->h_kmrels);
-	if (!IsParallelWorker())
-	{
-		if (ps_state && ps_state->preload_shmem_handle != 0)
-			__shmemDrop(ps_state->preload_shmem_handle);
-	}
+	/*
+	 * The buffer is dropped by the process that created it: the leader, or a worker whose node is not parallel-aware
+	 * (its shared state is local memory, ss_handle is invalid: pgstromSharedStateInitDSM() created it there).
+	 */
+	if (ps_state && ps_state->preload_shmem_handle != 0 &&
+		(!IsParallelWorker() || ps_state->ss_handle == DSM_HANDLE_INVALID))
+		__shmemDrop(ps_state->preload_shmem_handle);
 	foreach (lc, pts->css.custom_ps)
 		ExecEndNode((PlanState *) lfirst(lc));
 	/* for performance investigation */

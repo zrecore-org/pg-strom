@@ -948,7 +948,8 @@ tryAddSimpleGpuJoinPath(PlannerInfo *root,
 		cpath->path.pathtarget = join_rel->reltarget;
 		cpath->path.param_info = param_info;
 		cpath->path.parallel_aware = be_parallel;
-		cpath->path.parallel_safe = join_rel->consider_parallel;
+		/* a join that contains a Gather (a non parallel-safe inner path) must not run inside parallel workers (A18, TPC-H Q18) */
+		cpath->path.parallel_safe = (join_rel->consider_parallel && inner_path->parallel_safe);
 		cpath->path.parallel_workers = pp_info->parallel_nworkers;
 		cpath->path.pathkeys = NIL;
 		cpath->path.rows = PP_INFO_NUM_ROWS(pp_info);
