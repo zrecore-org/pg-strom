@@ -278,6 +278,7 @@ __gpuScanBuildPlanInfo(PlannerInfo *root,
 		scan_rels_list = lappend(scan_rels_list, pp_scan);
 	}
 	curr_ntuples = total_ntuples;
+	run_cost += pgstrom_gpu_scan_tuple_cost * total_ntuples / parallel_divisor;
 
 	/*
 	 * Cost for GPU qualifiers

@@ -49,6 +49,8 @@ pg_strom.gpu_allow_cpu_device = $ALLOW_CPU
 CONF
 	sh "$HERE/gpuserv/pgconf_test.sh" io >> "$ROOT/data/postgresql.conf"	# throwaway cluster: no fsync (cannot change a plan)
 fi
+# the expected outputs assume the GPU plans of small data: no per-row scan floor in the planner (A18, default 0.05)
+grep -q '^pg_strom.gpu_scan_tuple_cost' "$ROOT/data/postgresql.conf" || echo 'pg_strom.gpu_scan_tuple_cost = 0' >> "$ROOT/data/postgresql.conf"
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w -o "-p $PORT -k $ROOT" start >/dev/null 2>&1 || { echo "start failed (see $ROOT/log)"; exit 1; }
 n=0; while [ $n -lt 60 ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break

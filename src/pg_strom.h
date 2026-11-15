@@ -813,6 +813,7 @@ extern void			pgstrom_init_pcie(void);
  */
 extern double	pgstrom_gpu_setup_cost;		/* GUC */
 extern double	pgstrom_gpu_tuple_cost;		/* GUC */
+extern double	pgstrom_gpu_scan_tuple_cost;	/* GUC */
 extern double	pgstrom_gpu_operator_cost;	/* GUC */
 extern double	pgstrom_gpu_direct_seq_page_cost; /* GUC */
 extern double	pgstrom_gpu_operator_ratio(void);

@@ -1,6 +1,6 @@
 #!/bin/sh
 # TPC-H (22 queries, test/tpch/queries) on a throwaway cluster: PostgreSQL with 8 parallel workers against PG-Strom with the planner's
-# own choice (the GPU nodes it picks, the rest on the CPU). The A18 baseline: which operations dominate, where the GPU helps. Run it
+# own choice (the GPU nodes it picks, the rest on the CPU, also with 8 parallel workers: GPU_WORKERS=<n>). The A18 baseline: which operations dominate, where the GPU helps. Run it
 # through the wrapper (the cluster is kept between runs):
 #
 #   GPUSERV_BIN=<installed pgstrom-gpuserv> sh test/gpuserv/locked_test.sh "$PWD" tpch_bench.sh
@@ -9,6 +9,7 @@
 #   make CC=cc  -> dbgen-tpch, then `dbgen-tpch -s 1 -f` in an empty directory with dists.dss)
 #   TBL=<directory of the .tbl files> (default <checkout>/test-data/tpch_sf1)   ROOT=<cluster dir> (default test-data/tpch_bench)
 #   FRESH=1   rebuild the cluster and tables         LABEL_RE='^(01|06|18)$'  only these queries (the file number)
+#   GPUSET_EXTRA='set pg_strom.gpu_scan_tuple_cost=0.01;'  more settings for the GPU runs (cost calibration)
 #   NOCPU=1   skip the PostgreSQL runs               RUNS=3 (default 2)   timeout per query QTIMEOUT=300 s
 # One line per query: CPU time (best of RUNS), GPU time (best of RUNS), the number of Gpu nodes in the GPU plan, and whether the output
 # of the two engines is identical (md5 of the rows; a float formatted differently shows as DIFF and is judged by hand).
@@ -66,7 +67,7 @@ if [ "$(sql "select count(*) from pg_class where relname = 'lineitem'")" = 0 ]; 
 fi
 echo "=== service: $(sql "select state from pgstrom.gpu_service_state()"), lineitem $(sql "select count(*) from lineitem") rows, $(sql "select pg_size_pretty(pg_database_size('tpch'))")"
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8;"
-GPUSET="set pg_strom.enabled=on; set max_parallel_workers_per_gather=0;"
+GPUSET="set pg_strom.enabled=on; set max_parallel_workers_per_gather=${GPU_WORKERS:-8}; $GPUSET_EXTRA"
 # the time of a query file: the largest "Time:" of its statements (Q15 creates and drops a view)
 run_ms() { # settings file
 	(echo "$1"; printf '%s\n' '\timing on'; cat "$2") | timeout $QTIMEOUT $PSQL -d tpch 2>&1 | grep '^Time:' | sed 's/Time: \([0-9.]*\) ms.*/\1/' | sort -n | tail -1

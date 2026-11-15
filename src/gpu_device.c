@@ -22,6 +22,7 @@ int				numGpuDevAttrs = 0;
 double			pgstrom_gpu_setup_cost;			/* GUC */
 double			pgstrom_gpu_tuple_cost;			/* GUC */
 double			pgstrom_gpu_operator_cost;		/* GUC */
+double			pgstrom_gpu_scan_tuple_cost;	/* GUC */
 double			pgstrom_gpu_direct_seq_page_cost; /* GUC */
 
 /*
@@ -165,6 +166,17 @@ pgstrom_init_gpu_options(void)
 							 NULL,
 							 &pgstrom_gpu_tuple_cost,
 							 DEFAULT_CPU_TUPLE_COST,
+							 0,
+							 DBL_MAX,
+							 PGC_USERSET,
+							 GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+	/* the per-row floor of a GPU scan: page copy, row decode, result handling, whatever the quals cost (A18) */
+	DefineCustomRealVariable("pg_strom.gpu_scan_tuple_cost",
+							 "Cost of a GPU scan per scanned tuple, independent of the quals",
+							 "The page copy and row decode of the GPU service; 0.05 was calibrated on TPC-H SF1 (Apple M1 Pro, A18)",
+							 &pgstrom_gpu_scan_tuple_cost,
+							 0.05,
 							 0,
 							 DBL_MAX,
 							 PGC_USERSET,
