@@ -2720,6 +2720,18 @@ group_lookup(struct group_table **p_gt, uint32_t nagg, const int64_t *key, uint3
 	}
 }
 
+
+/* the hash slot of the key of an overflow record of the join GROUP BY (rec[0] = key null flags, then the keys as word pairs) */
+static inline uint32_t
+ovf_slot(const scan_prog *prog, const uint32_t *rec, uint32_t hcap)
+{
+	int64_t		pk[SCAN_GROUP_KEYS] = {0};
+
+	for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
+		pk[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
+	return group_hash(pk, rec[0]) & (hcap - 1);
+}
+
 static void gtab_destroy(agg_state *st);
 
 void
@@ -5411,15 +5423,21 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
 
-			if (r + 8 < ovf_count && st->groups && st->groups->hcap)
+			if (st->groups && st->groups->hcap)
 			{
-				/* the table is memory-latency bound: touch the slot of a row a few ahead */
-				const uint32_t *pr = rec + 8 * (size_t) ov_rec;
-				int64_t		pk[SCAN_GROUP_KEYS] = {0};
+				/* the table is memory-latency bound: two stages ahead, the hash slot of a row 16 ahead and the entry that the
+				 * slot of a row 8 ahead points to */
+				const struct group_table *gt = st->groups;
 
-				for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
-					pk[i] = (int64_t)((uint64_t) pr[1 + 2 * i] | ((uint64_t) pr[2 + 2 * i] << 32));
-				__builtin_prefetch(&st->groups->htab[group_hash(pk, pr[0]) & (st->groups->hcap - 1)]);
+				if (r + 16 < ovf_count)
+					__builtin_prefetch(&gt->htab[ovf_slot(prog, out + ovf_base + 1 + (size_t) (r + 16) * ov_rec, gt->hcap)]);
+				if (r + 8 < ovf_count)
+				{
+					uint32_t	ix = gt->htab[ovf_slot(prog, out + ovf_base + 1 + (size_t) (r + 8) * ov_rec, gt->hcap)];
+
+					if (ix)
+						__builtin_prefetch(GENT(gt, ix - 1));
+				}
 			}
 			for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
 				key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
