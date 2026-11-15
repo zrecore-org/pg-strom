@@ -47,3 +47,5 @@ short (the default maximum is 60 minutes; the cold NVIDIA compile of a big kerne
 maximum). If the GPU is lost on the Windows side (`nvidia-smi` fails, "Invalid physicalDevice"): release, tell the user, change
 nothing on the machine. Builds and file transfers happen outside the turn. WSL2 has no NVIDIA Vulkan driver: Vulkan work runs as
 Windows-native executables (mingw cross build), see `test/gpuserv/vk_survey.c`.
+
+**Moving files to and from the Windows host.** The Windows laptop shares a folder as the SMB share `FileTransfers` (`smb://desktop-nvg0avo.local/FileTransfers`, mounted on the Mac at `/Volumes/FileTransfers`; the user mounts it, the password is never typed into a chat). Put artifacts (SPIR-V, bundles, executables, logs) there with `cp`, and check a sha256 on both sides after the copy; never put the repo or secrets in it. Message text is not a transfer path (a 3.6 KB base64 was mangled twice). The mount disappears when the laptop sleeps: check `ls /Volumes/FileTransfers` first. Copying is disk work and needs no GPU turn. The older share `vks` (D:\vks) is read-only for the Mac and holds the survey kernels.
