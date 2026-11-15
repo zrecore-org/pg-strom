@@ -76,6 +76,9 @@ SPV_GEO    := $(foreach t,$(GEO_TIERS),$(patsubst build/%.spv,build/%_$(t).spv,$
 SPV_FILES  += $(SPV_GEO)
 $(SPV_VMBASE) $(SPV_LITE) $(SPV_NOGEOM) $(SPV_GEO): $(KDEPS)
 SPV_FILES  += build/gsort.spv
+# radix sort kernels (ported from the mongo fork, Apache-2.0; kernels_vm/rsort.slang): one Slang file, three entry points
+RSORT_SPV  := build/rsort_count.spv build/rsort_scan.spv build/rsort_scatter.spv
+SPV_FILES  += $(RSORT_SPV)
 LIB_OBJS   += gpusort.o gpu_vk_seq.o kprewarm.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
 # kernel sources are embedded for the compiler
@@ -184,6 +187,10 @@ build/gsort.spv: kernels_vm/gsort.slang | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/gsort.slang -I kernels_vm -target spirv -entry gsort_main -stage compute -o $@
 
+$(RSORT_SPV): build/rsort_%.spv: kernels_vm/rsort.slang | build
+	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
+	$(SLANGC) kernels_vm/rsort.slang -I kernels_vm -target spirv -entry rsort_$* -stage compute -o $@
+
 gpusort.o: gpusort.c gpusort.h scan_exec.h kernels_spv.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -MMD -MP -c -o $@ $<
 
@@ -208,6 +215,13 @@ gpusort_check.o: gpusort_check.c gpusort.h scan_exec.h ../xpu_common.h
 
 gpusort_check: gpusort_check.o libgpuserv.a
 	$(CC) $(CFLAGS) -o $@ gpusort_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
+
+# self-check of the radix sort kernels against qsort (not part of "all")
+rsort_check.o: rsort_check.c gpu_vk.h kernels_spv.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+rsort_check: rsort_check.o libgpuserv.a
+	$(CC) $(CFLAGS) -o $@ rsort_check.o libgpuserv.a $(VK_LIBS) -lpthread -lm
 
 # time to create the VM pipelines with and without the persisted pipeline cache (not part of "all"; test/gpuserv/pcache_test.sh)
 pcache_check.o: pcache_check.c gpu_vk.h kernels_spv.h
