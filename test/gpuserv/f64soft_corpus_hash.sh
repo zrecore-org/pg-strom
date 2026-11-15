@@ -3,10 +3,11 @@
 # (host part only, no GPU, no lock). The corpus must not depend on the compiler's order of evaluation: run it with clang and with
 # GCC (CC=gcc) and compare the lines. Recorded value on the M1 (clang) after the rewrite of 2026-11-14, N=300000:
 #   RNDHASH ddd0cc8e93da99b0 calls 65460421
+# The first run on a fresh tree compiles every Slang kernel (libgpuserv.a): 20 minutes on a 12-core Linux box, then it is quick.
 ROOT=$(cd "${0%/*}/../.." && pwd); GS=$ROOT/src/gpuserv
 N=${1:-300000}; CC=${CC:-cc}
 W=${PGSTROM_TEST_DATA:-$ROOT/test-data}/f64soft_corpus_hash
-make -C "$GS" libgpuserv.a >/dev/null 2>&1 || { echo "libgpuserv.a: build failed"; exit 2; }
+make -C "$GS" -j3 libgpuserv.a >/dev/null 2>&1 || { echo "libgpuserv.a: build failed"; exit 2; }
 rm -rf "$W"; mkdir -p "$W"
 cat > "$W/rndhash.h" <<'H'
 #include <stdint.h>
