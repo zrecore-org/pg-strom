@@ -5295,7 +5295,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 	 * Run. With GROUP BY the rows that found no slot in their workgroup's table are appended to an
 	 * overflow list; if it was too small, run again with room for all (nothing is merged before).
 	 */
-	ovf_cap = 4096;
+	ovf_cap = st->join_ovf_hint ? st->join_ovf_hint + st->join_ovf_hint / 4 + 1024 : 4096;	/* the previous task's count: no wasted run */
 	for (int attempt = 0; attempt < 4; attempt++)
 	{
 		gpu_vk_pipeline *pipe = vmpipe;
@@ -5397,6 +5397,7 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 		const uint32_t *w = prog->words;
 		uint32_t	aggoff = w[11];
 
+		st->join_ovf_hint = ovf_count;
 		if (group_merge_blocks(prog, st, out, ngroups_total, cap, rec_words, blk_words, SCAN_GROUP_KEYS_JOIN, jsrcs) != 0)
 		{
 			snprintf(err, errlen, "out of memory");
@@ -5410,6 +5411,16 @@ scan_exec_joinagg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_pro
 			int64_t		key[SCAN_GROUP_KEYS] = {0};
 			group_entry *g;
 
+			if (r + 8 < ovf_count && st->groups && st->groups->hcap)
+			{
+				/* the table is memory-latency bound: touch the slot of a row a few ahead */
+				const uint32_t *pr = rec + 8 * (size_t) ov_rec;
+				int64_t		pk[SCAN_GROUP_KEYS] = {0};
+
+				for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
+					pk[i] = (int64_t)((uint64_t) pr[1 + 2 * i] | ((uint64_t) pr[2 + 2 * i] << 32));
+				__builtin_prefetch(&st->groups->htab[group_hash(pk, pr[0]) & (st->groups->hcap - 1)]);
+			}
 			for (int i = 0; i < SCAN_GROUP_KEYS_JOIN && i < prog->nkeys; i++)
 				key[i] = (int64_t)((uint64_t) rec[1 + 2 * i] | ((uint64_t) rec[2 + 2 * i] << 32));
 			g = group_lookup(&st->groups, nagg, key, rec[0]);

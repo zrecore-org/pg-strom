@@ -132,6 +132,7 @@ typedef struct agg_state
 {
 	recheck_buf	rck;				/* rows for the backend, sent with the final reply */
 	struct group_table *groups;		/* GROUP BY: the groups of the session (NULL otherwise) */
+	uint32_t	join_ovf_hint;		/* join GROUP BY: the overflow rows of the previous task (sizes the next task's list) */
 	struct gtab_state *gt;			/* GROUP BY over many groups: the hash table in device memory (gtab.slang), NULL if not used */
 	struct str_dict *sdict;			/* GROUP BY a string key: the distinct values, a group's key is the id (A6) */
 	int			nagg;
