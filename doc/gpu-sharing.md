@@ -29,3 +29,21 @@ both; every participant must use the same value.
 
 **Disk and caches.** The local drive is nearly full by design. Large caches go to the external volume
 (`/Volumes/CrucialX9/...`); see the notes on the PG-Strom kernel cache in `CLAUDE.md`.
+
+## The NVIDIA eGPU on the Windows host
+
+A second GPU (RTX 4060 Ti eGPU on a Windows 10 laptop, `desktop-nvg0avo`) is reached through the Remote Control Claude session
+named `win`. The GPU is not on this Mac, so its queue is a separate lock on the Mac (the agents of all projects run here); it never
+blocks the Apple GPU and is never blocked by it. Same protocol as above, own files (`/tmp/win_egpu.lock`, `/tmp/win_egpu.lock.queue`).
+
+```
+sh /Volumes/CrucialX9/Projects/pg-strom/test/gpuserv/win_gpu_lock.sh hold <label> [max-minutes]   # run in the BACKGROUND; waits, prints HOLDING
+sh .../win_gpu_lock.sh release <label>                                                            # give the turn back
+sh .../win_gpu_lock.sh status
+```
+
+Only the holder asks `win` to run anything on the GPU, one GPU program at a time, and says which project holds the turn. Turns are
+short (the default maximum is 60 minutes; the cold NVIDIA compile of a big kernel is 15-40 minutes: its own turn with an honest
+maximum). If the GPU is lost on the Windows side (`nvidia-smi` fails, "Invalid physicalDevice"): release, tell the user, change
+nothing on the machine. Builds and file transfers happen outside the turn. WSL2 has no NVIDIA Vulkan driver: Vulkan work runs as
+Windows-native executables (mingw cross build), see `test/gpuserv/vk_survey.c`.
