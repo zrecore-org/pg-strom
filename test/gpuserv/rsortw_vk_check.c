@@ -1,11 +1,11 @@
 /*
- * rsortw_vk_check.c: dispatches the multi-word radix sort kernels of GPU-Sort (src/gpuserv/kernels_vm/rsortw.slang) on any Vulkan
+ * rsortw_vk_check.c: dispatches the multi-word radix sort kernels of GPU-Sort (src/gpuserv/kernels_vm/rsortk.slang) on any Vulkan
  * device and compares the result with a CPU stable sort. Standalone and portable like vk_survey.c (the Vulkan loader is loaded at
  * run time, only the Vulkan headers are needed), so it also checks the NVIDIA driver on Windows, where the service does not run:
  *
  *   cc -O2 -o rsortw_vk_check rsortw_vk_check.c                          (Linux, macOS)
  *   x86_64-w64-mingw32-gcc -O2 -o rsortw_vk_check.exe rsortw_vk_check.c  (Windows)
- *   rsortw_vk_check [-d N] [-b] <dir with rsortw_count.spv rsortw_scan.spv rsortw_scatter.spv>
+ *   rsortw_vk_check [-d N] [-b] <dir with rsortk_gather.spv rsortk_count.spv rsortk_scan.spv rsortk_scatter.spv>
  *
  * Cases: key words nw = 1, 2, 8, rows n around the block size (4096) up to 300000, keys full range / few distinct values /
  * already sorted / all equal. -b adds a timing table (wall time of the whole sort, 1M rows). No device feature is enabled (the kernels
@@ -89,10 +89,10 @@ static VkDevice dev;
 static VkQueue queue;
 static VkCommandBuffer cb;
 static VkFence fence;
-static VkPipeline pipes[3];
+static VkPipeline pipes[4];
 static VkPipelineLayout layout;
 static VkDescriptorSet dsets[2];
-static void *mkeys, *mbh, *mp[2];
+static void *mkeys, *mp[2];		/* mapped staging buffers: keys, pairs */
 static PFN_vkBeginCommandBuffer vkBeginCommandBuffer;
 static PFN_vkEndCommandBuffer vkEndCommandBuffer;
 static PFN_vkResetCommandBuffer vkResetCommandBuffer;
@@ -105,49 +105,16 @@ static PFN_vkQueueSubmit vkQueueSubmit;
 static PFN_vkWaitForFences vkWaitForFences;
 static PFN_vkResetFences vkResetFences;
 
-/* sorts keys (n rows of nw words); returns the number of passes, the order in perm; ms = wall time of the submission */
-static int
-gpu_sort(const uint32_t *keys, uint32_t n, uint32_t nw, uint32_t *perm, double *ms)
+static VkBuffer bufs_all[6];
+static PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
+static double g_up_ms, g_down_ms;		/* host <-> device copies of the last sort (staging buffers) */
+
+static void
+submit_wait(double *ms)
 {
-	uint32_t	B = (n + 4095) / 4096, npass = 0;
-	uint32_t	diff[64] = {0};
-	double		t0;
-	VkCommandBufferBeginInfo bi;
 	VkSubmitInfo si;
-	VkMemoryBarrier mb;
+	double		t0;
 
-	for (uint32_t r = 1; r < n; r++)
-		for (uint32_t w = 0; w < nw; w++)
-			diff[w] |= keys[(size_t) r * nw + w] ^ keys[w];
-	memcpy(mkeys, keys, (size_t) n * nw * 4);
-	for (uint32_t i = 0; i < n; i++)
-		((uint32_t *) mp[0])[i] = i;
-	memset(&bi, 0, sizeof(bi));
-	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	memset(&mb, 0, sizeof(mb));
-	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-	mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-	vkResetCommandBuffer(cb, 0);
-	VK(vkBeginCommandBuffer(cb, &bi));
-	for (uint32_t w = nw; w-- > 0;)
-		for (uint32_t d = 0; d < 8; d++)
-		{
-			if (((diff[w] >> (4 * d)) & 15) == 0)
-				continue;
-			for (int s = 0; s < 3; s++)
-			{
-				pc_t pc = {n, B, nw, w, 4 * d, 0};
-
-				vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[s]);
-				vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &dsets[npass & 1], 0, NULL);
-				vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-				vkCmdDispatch(cb, s == 1 ? 1 : B, 1, 1);
-				vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-			}
-			npass++;
-		}
-	VK(vkEndCommandBuffer(cb));
 	memset(&si, 0, sizeof(si));
 	si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	si.commandBufferCount = 1;
@@ -157,7 +124,103 @@ gpu_sort(const uint32_t *keys, uint32_t n, uint32_t nw, uint32_t *perm, double *
 	VK(vkQueueSubmit(queue, 1, &si, fence));
 	VK(vkWaitForFences(dev, 1, &fence, VK_TRUE, 60ull * 1000000000ull));
 	*ms = now_ms() - t0;
-	memcpy(perm, mp[npass & 1], (size_t) n * 4);
+}
+
+/*
+ * Sorts keys (n rows of nw words): pairs (key word, row index) in two ping-pong buffers, per key word one gather, then the digit
+ * passes. The compute buffers are device local (on a discrete GPU, host visible memory would be read over the PCIe link on
+ * every pass); the keys go up and the order comes back through staging buffers. Returns the number of passes; *ms is the time of
+ * the compute submission, g_up_ms / g_down_ms the copies.
+ */
+static int
+gpu_sort_k(const uint32_t *keys, uint32_t n, uint32_t nw, uint32_t *perm, double *ms)
+{
+	uint32_t	B = (n + 4095) / 4096, npass = 0;
+	uint32_t	diff[64] = {0};
+	VkCommandBufferBeginInfo bi;
+	VkMemoryBarrier mb, tb;
+	VkBufferCopy cr;
+	uint32_t   *stag_p = (uint32_t *) mp[0];
+	double		t;
+
+	for (uint32_t r = 1; r < n; r++)
+		for (uint32_t w = 0; w < nw; w++)
+			diff[w] |= keys[(size_t) r * nw + w] ^ keys[w];
+	memcpy(mkeys, keys, (size_t) n * nw * 4);
+	for (uint32_t i = 0; i < n; i++)
+	{
+		stag_p[2 * i] = 0;
+		stag_p[2 * i + 1] = i;
+	}
+	memset(&bi, 0, sizeof(bi));
+	bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	memset(&mb, 0, sizeof(mb));
+	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	tb = mb;
+	tb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	tb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	/* upload */
+	vkResetCommandBuffer(cb, 0);
+	VK(vkBeginCommandBuffer(cb, &bi));
+	cr.srcOffset = cr.dstOffset = 0;
+	cr.size = (VkDeviceSize) n * nw * 4;
+	vkCmdCopyBuffer(cb, bufs_all[4], bufs_all[0], 1, &cr);
+	cr.size = (VkDeviceSize) n * 8;
+	vkCmdCopyBuffer(cb, bufs_all[5], bufs_all[2], 1, &cr);
+	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &tb, 0, NULL, 0, NULL);
+	VK(vkEndCommandBuffer(cb));
+	submit_wait(&g_up_ms);
+	/* compute */
+	vkResetCommandBuffer(cb, 0);
+	VK(vkBeginCommandBuffer(cb, &bi));
+	for (uint32_t w = nw; w-- > 0;)
+	{
+		int			gathered = 0;
+
+		for (uint32_t d = 0; d < 8; d++)
+		{
+			if (((diff[w] >> (4 * d)) & 15) == 0)
+				continue;
+			if (!gathered)
+			{
+				pc_t pc = {n, B, nw, w, 0, 0};
+
+				vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[0]);
+				vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &dsets[npass & 1], 0, NULL);
+				vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+				vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
+				vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+				gathered = 1;
+			}
+			for (int s = 0; s < 3; s++)
+			{
+				pc_t pc = {n, B, nw, w, 4 * d, 0};
+
+				vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[1 + s]);
+				vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &dsets[npass & 1], 0, NULL);
+				vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+				vkCmdDispatch(cb, s == 1 ? 1 : B, 1, 1);
+				vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+			}
+			npass++;
+		}
+	}
+	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &tb, 0, NULL, 0, NULL);
+	VK(vkEndCommandBuffer(cb));
+	submit_wait(&t);
+	*ms = t;
+	/* download the pairs (the second buffer after an odd number of passes) */
+	vkResetCommandBuffer(cb, 0);
+	VK(vkBeginCommandBuffer(cb, &bi));
+	cr.size = (VkDeviceSize) n * 8;
+	vkCmdCopyBuffer(cb, bufs_all[2 + (npass & 1)], bufs_all[5], 1, &cr);
+	vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &tb, 0, NULL, 0, NULL);
+	VK(vkEndCommandBuffer(cb));
+	submit_wait(&g_down_ms);
+	for (uint32_t i = 0; i < n; i++)
+		perm[i] = stag_p[2 * i + 1];
 	return (int) npass;
 }
 
@@ -179,10 +242,12 @@ main(int argc, char **argv)
 	VkExtensionProperties *ie, *de;
 	const char *iexts[1] = {"VK_KHR_portability_enumeration"}, *dexts[1] = {"VK_KHR_portability_subset"};
 	float		prio = 1.0f;
-	VkBuffer	buf[4];
-	VkDeviceMemory mem[4];
-	size_t		maxn = 1000000, bytes[4];
-	static const char *const names[3] = {"rsortw_count.spv", "rsortw_scan.spv", "rsortw_scatter.spv"};
+	VkBuffer	buf[6];
+	VkDeviceMemory mem[6];
+	size_t		maxn = 1000000, bytes[6];
+	static const char *const names_k[4] = {"rsortk_gather.spv", "rsortk_count.spv", "rsortk_scan.spv", "rsortk_scatter.spv"};
+	const char *const *names;
+	int			npipe;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	while (a < argc && argv[a][0] == '-')
@@ -197,10 +262,12 @@ main(int argc, char **argv)
 	}
 	if (a >= argc)
 	{
-		fprintf(stderr, "usage: %s [-d N] [-b] <dir with rsortw_*.spv>\n", argv[0]);
+		fprintf(stderr, "usage: %s [-d N] [-b] <dir with rsortk_gather/count/scan/scatter.spv>\n", argv[0]);
 		return 2;
 	}
 	dir = argv[a];
+	names = names_k;
+	npipe = 4;
 	{
 #ifdef _WIN32
 		HMODULE h = LoadLibraryA("vulkan-1.dll");
@@ -333,6 +400,7 @@ main(int argc, char **argv)
 		vkCmdDispatch = (PFN_vkCmdDispatch) pGDPA(dev, "vkCmdDispatch");
 		vkCmdPipelineBarrier = (PFN_vkCmdPipelineBarrier) pGDPA(dev, "vkCmdPipelineBarrier");
 		vkQueueSubmit = (PFN_vkQueueSubmit) pGDPA(dev, "vkQueueSubmit");
+		vkCmdCopyBuffer = (PFN_vkCmdCopyBuffer) pGDPA(dev, "vkCmdCopyBuffer");
 		vkWaitForFences = (PFN_vkWaitForFences) pGDPA(dev, "vkWaitForFences");
 		vkResetFences = (PFN_vkResetFences) pGDPA(dev, "vkResetFences");
 		vkGetDeviceQueue(dev, qf, 0, &queue);
@@ -340,8 +408,10 @@ main(int argc, char **argv)
 		/* buffers: keys (maxn rows x 8 words), histogram, two index arrays; host visible and coherent */
 		bytes[0] = maxn * 8 * 4;
 		bytes[1] = 16 * ((maxn + 4095) / 4096) * 4;
-		bytes[2] = bytes[3] = maxn * 4;
-		for (int i = 0; i < 4; i++)
+		bytes[2] = bytes[3] = maxn * 8;
+		bytes[4] = bytes[0];		/* staging: keys */
+		bytes[5] = maxn * 8;		/* staging: pairs */
+		for (int i = 0; i < 6; i++)
 		{
 			VkBufferCreateInfo bci;
 			VkMemoryRequirements req;
@@ -353,30 +423,45 @@ main(int argc, char **argv)
 			memset(&bci, 0, sizeof(bci));
 			bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 			bci.size = bytes[i];
-			bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			bci.usage = (i < 4 ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT : 0) | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 			VK(vkCreateBuffer(dev, &bci, NULL, &buf[i]));
 			vkGetBufferMemoryRequirements(dev, buf[i], &req);
+			/* the compute buffers: device local memory (not host visible when there is such a type); the staging buffers: host visible */
+			const VkMemoryPropertyFlags hv = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+			if (i < 4)
+				for (uint32_t t = 0; t < mprops.memoryTypeCount && !found; t++)
+					if ((req.memoryTypeBits & (1u << t)) &&
+						(mprops.memoryTypes[t].propertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) ==
+						VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+					{
+						mt = t;
+						found = 1;
+					}
 			for (uint32_t t = 0; t < mprops.memoryTypeCount && !found; t++)
-				if ((req.memoryTypeBits & (1u << t)) &&
-					(mprops.memoryTypes[t].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
-					(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+				if ((req.memoryTypeBits & (1u << t)) && (mprops.memoryTypes[t].propertyFlags & hv) == hv)
 				{
 					mt = t;
 					found = 1;
 				}
 			if (!found)
 			{
-				fprintf(stderr, "no host visible coherent memory type\n");
+				fprintf(stderr, "no suitable memory type\n");
 				return 2;
 			}
+			printf("buffer %d: memory type %u (%s)\n", i, mt, (mprops.memoryTypes[mt].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? "host visible" : "device local only");
 			memset(&mai, 0, sizeof(mai));
 			mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 			mai.allocationSize = req.size;
 			mai.memoryTypeIndex = mt;
 			VK(vkAllocateMemory(dev, &mai, NULL, &mem[i]));
 			VK(vkBindBufferMemory(dev, buf[i], mem[i], 0));
-			VK(vkMapMemory(dev, mem[i], 0, VK_WHOLE_SIZE, 0, &map));
-			if (i == 0) mkeys = map; else if (i == 1) mbh = map; else mp[i - 2] = map;
+			bufs_all[i] = buf[i];
+			if (i >= 4)
+			{
+				VK(vkMapMemory(dev, mem[i], 0, VK_WHOLE_SIZE, 0, &map));
+				if (i == 4) mkeys = map; else mp[0] = map;
+			}
 		}
 		for (int i = 0; i < 4; i++)
 		{
@@ -401,7 +486,7 @@ main(int argc, char **argv)
 		pli.pushConstantRangeCount = 1;
 		pli.pPushConstantRanges = &pcr;
 		VK(vkCreatePipelineLayout(dev, &pli, NULL, &layout));
-		for (int s = 0; s < 3; s++)
+		for (int s = 0; s < npipe; s++)
 		{
 			char		path[1024];
 			size_t		len;
@@ -528,7 +613,7 @@ main(int argc, char **argv)
 					for (uint32_t r = 0; r < rows; r++)
 						ref[r] = r;
 					qsort(ref, rows, 4, rowcmp);
-					npass = gpu_sort(keys, rows, nw, perm, &ms);
+					npass = gpu_sort_k(keys, rows, nw, perm, &ms);
 					for (uint32_t r = 0; r < rows && bad < 3; r++)
 						if (perm[r] != ref[r])
 						{
@@ -543,7 +628,7 @@ main(int argc, char **argv)
 				}
 		if (bench)
 		{
-			printf("%9s %4s %10s %10s\n", "rows", "nw", "radix ms", "qsort ms");
+			printf("%9s %4s %10s %10s %10s %10s\n", "rows", "nw", "compute ms", "up ms", "down ms", "qsort ms");
 			for (size_t wi = 0; wi < 3; wi++)
 			{
 				uint32_t	nw = nws[wi], rows = 1000000;
@@ -559,8 +644,8 @@ main(int argc, char **argv)
 				t0 = now_ms();
 				qsort(ref, rows, 4, rowcmp);
 				t1 = now_ms();
-				gpu_sort(keys, rows, nw, perm, &ms);
-				printf("%9u %4u %10.2f %10.2f%s\n", rows, nw, ms, t1 - t0, memcmp(perm, ref, rows * 4) ? "  MISMATCH" : "");
+				gpu_sort_k(keys, rows, nw, perm, &ms);
+				printf("%9u %4u %10.2f %10.2f %10.2f %10.2f%s\n", rows, nw, ms, g_up_ms, g_down_ms, t1 - t0, memcmp(perm, ref, rows * 4) ? "  MISMATCH" : "");
 				free(keys);
 				free(perm);
 				free(ref);

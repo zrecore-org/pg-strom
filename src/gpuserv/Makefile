@@ -79,8 +79,8 @@ SPV_FILES  += build/gsort.spv
 # radix sort kernels (ported from the mongo fork, Apache-2.0; kernels_vm/rsort.slang): one Slang file, three entry points
 RSORT_SPV  := build/rsort_count.spv build/rsort_scan.spv build/rsort_scatter.spv
 SPV_FILES  += $(RSORT_SPV)
-RSORTW_SPV := build/rsortw_count.spv build/rsortw_scan.spv build/rsortw_scatter.spv
-SPV_FILES  += $(RSORTW_SPV)
+RSORTK_SPV := build/rsortk_gather.spv build/rsortk_count.spv build/rsortk_scan.spv build/rsortk_scatter.spv
+SPV_FILES  += $(RSORTK_SPV)
 LIB_OBJS   += gpusort.o gpu_vk_seq.o kprewarm.o
 # A6: specialized kernels generated from the programs and compiled at run time (specialize.c, spec_mgr.c); the
 # kernel sources are embedded for the compiler
@@ -193,9 +193,9 @@ $(RSORT_SPV): build/rsort_%.spv: kernels_vm/rsort.slang | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
 	$(SLANGC) kernels_vm/rsort.slang -I kernels_vm -target spirv -entry rsort_$* -stage compute -o $@
 
-$(RSORTW_SPV): build/rsortw_%.spv: kernels_vm/rsortw.slang | build
+$(RSORTK_SPV): build/rsortk_%.spv: kernels_vm/rsortk.slang | build
 	@test -n "$(SLANGC)" || { echo "slangc not found: set SLANGC=/path/to/slangc"; exit 1; }
-	$(SLANGC) kernels_vm/rsortw.slang -I kernels_vm -target spirv -entry rsortw_$* -stage compute -o $@
+	$(SLANGC) kernels_vm/rsortk.slang -I kernels_vm -target spirv -entry rsortk_$* -stage compute -o $@
 
 gpusort.o: gpusort.c gpusort.h scan_exec.h kernels_spv.h ../xpu_common.h
 	$(CC) $(CFLAGS) -Wno-format -DCUDA_MAXTHREADS_PER_BLOCK=512 -I .. -MMD -MP -c -o $@ $<

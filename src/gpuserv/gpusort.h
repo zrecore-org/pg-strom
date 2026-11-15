@@ -5,7 +5,7 @@
  * (LIMIT pushed down) and the window-rank filter (rank() / dense_rank() / row_number() < N per
  * PARTITION BY). The caller turns each row's sort keys into key words (gpusort_encode); the
  * order of the unsigned words is the sort order, so the same encoded keys serve the bitonic
- * network on the device (kernels_vm/gsort.slang) and the CPU merge sort used for small inputs,
+ * network or the radix sort on the device (kernels_vm/gsort.slang, rsortk.slang) and the CPU merge sort used for small inputs,
  * for inputs that do not fit the device buffers and when the device fails.
  */
 #ifndef GPUSERV_GPUSORT_H
