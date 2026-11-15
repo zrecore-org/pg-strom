@@ -26,6 +26,7 @@
 
 #define GS_TILE					512
 #define GPUSORT_MIN_ROWS_DEFAULT	16384
+#define GPUSORT_RADIX_MIN_ROWS	65536	/* below it the bitonic network is as fast (A18) */
 #define GPUSORT_MAX_ROWS		(1U << 22)
 #define GPUSORT_MAX_KEY_BYTES	((size_t) 512 << 20)
 
@@ -241,9 +242,137 @@ done:
 	return rv;
 }
 
+
+/*
+ * Radix variant (kernels_vm/rsortw.slang): LSD passes over the key words, last word first, 4 bits at a time, each pass a stable
+ * counting sort of the row indexes by one digit read through the index; a digit that is the same in every row is skipped
+ * (its pass would not move anything). The identity is the initial order, so the result equals the bitonic order.
+ */
+typedef struct
+{
+	uint32_t	n, B, nw, word, shift, pad;
+} rw_pc;
+
+static int
+gpu_sort_radix(scan_engine *eng, const uint32_t *keys, uint32_t nw, uint32_t n, uint32_t *perm,
+			   char *err, size_t errlen)
+{
+	gpu_vk_ctx *vk = eng->vk;
+	const unsigned char *spv[3] = {kspv_rsortw_count, kspv_rsortw_scan, kspv_rsortw_scatter};
+	const unsigned int *spvlen[3] = {&kspv_rsortw_count_len, &kspv_rsortw_scan_len, &kspv_rsortw_scatter_len};
+	uint32_t	B = (n + 4095) / 4096;
+	uint32_t	diff[64] = {0};
+	gpu_vk_buffer bkeys, bh, bp[2];
+	int			nbuf = 0, rv = -1;
+	gpu_vk_step *steps = NULL;
+	rw_pc	   *pcs = NULL;
+	uint32_t	nsteps = 0, npass = 0;
+	double		ms = 0.0;
+	gpu_vk_buffer *bufs[2][4];
+
+	if (nw > 64)
+	{
+		snprintf(err, errlen, "too many key words for the radix sort");
+		return -1;
+	}
+	if (!eng->rsort_pipe_ready)
+	{
+		for (int par = 0; par < 2; par++)
+			for (int s = 0; s < 3; s++)
+				if (gpu_vk_pipeline_create(vk, &eng->rsort_pipe[par][s], spv[s], *spvlen[s], 4, sizeof(rw_pc)) != 0)
+				{
+					snprintf(err, errlen, "cannot create the radix sort pipeline: %s", vk->err);
+					while (--s >= 0)
+						gpu_vk_pipeline_destroy(vk, &eng->rsort_pipe[par][s]);
+					if (par == 1)
+						for (int s2 = 0; s2 < 3; s2++)
+							gpu_vk_pipeline_destroy(vk, &eng->rsort_pipe[0][s2]);
+					return -1;
+				}
+		eng->rsort_pipe_ready = 1;
+	}
+	/* the bits that differ between rows, per word */
+	for (uint32_t r = 1; r < n; r++)
+		for (uint32_t w = 0; w < nw; w++)
+			diff[w] |= keys[(size_t) r * nw + w] ^ keys[w];
+	steps = calloc(3 * 8 * (size_t) nw + 3, sizeof(*steps));
+	pcs = calloc(3 * 8 * (size_t) nw + 3, sizeof(*pcs));
+	if (!steps || !pcs)
+	{
+		snprintf(err, errlen, "out of memory");
+		goto done;
+	}
+	if (gpu_vk_buffer_create(vk, &bkeys, (size_t) n * nw * sizeof(uint32_t), 0) != 0)
+	{
+		snprintf(err, errlen, "radix sort key buffer: %s", vk->err);
+		goto done;
+	}
+	nbuf = 1;
+	if (gpu_vk_buffer_create(vk, &bh, (size_t) 16 * B * sizeof(uint32_t), 0) != 0)
+	{
+		snprintf(err, errlen, "radix sort histogram buffer: %s", vk->err);
+		goto done;
+	}
+	nbuf = 2;
+	for (int j = 0; j < 2; j++)
+	{
+		if (gpu_vk_buffer_create(vk, &bp[j], (size_t) n * sizeof(uint32_t), 0) != 0)
+		{
+			snprintf(err, errlen, "radix sort index buffer: %s", vk->err);
+			goto done;
+		}
+		nbuf++;
+	}
+	memcpy(bkeys.map, keys, (size_t) n * nw * sizeof(uint32_t));
+	for (uint32_t i = 0; i < n; i++)
+		((uint32_t *) bp[0].map)[i] = i;
+	bufs[0][0] = &bkeys; bufs[0][1] = &bh; bufs[0][2] = &bp[0]; bufs[0][3] = &bp[1];
+	bufs[1][0] = &bkeys; bufs[1][1] = &bh; bufs[1][2] = &bp[1]; bufs[1][3] = &bp[0];
+	for (uint32_t w = nw; w-- > 0;)
+		for (uint32_t d = 0; d < 8; d++)
+		{
+			if (((diff[w] >> (4 * d)) & 15) == 0)
+				continue;
+			for (int s = 0; s < 3; s++)
+			{
+				pcs[nsteps] = (rw_pc){ n, B, nw, w, 4 * d, 0 };
+				steps[nsteps] = (gpu_vk_step){ &eng->rsort_pipe[npass & 1][s], bufs[npass & 1], &pcs[nsteps],
+											   s == 1 ? 1 : B, 1, 1 };
+				nsteps++;
+			}
+			npass++;
+		}
+	if (npass > 0 && gpu_vk_dispatch_seq(vk, steps, nsteps, &ms) != 0)
+	{
+		snprintf(err, errlen, "radix sort failed: %s", vk->err);
+		goto done;
+	}
+	/* an odd number of passes leaves the order in the second buffer */
+	memcpy(perm, bp[npass & 1].map, sizeof(uint32_t) * n);
+	if (eng->trace)
+		fprintf(stderr, "pgstrom-gpuserv: gpu-sort (radix): %u rows, %u key words, %u passes, %.2f ms\n", n, nw, npass, ms);
+	rv = 0;
+done:
+	free(steps);
+	free(pcs);
+	for (int j = 0; j < 2; j++)
+		if (nbuf > 2 + j)
+			gpu_vk_buffer_destroy(vk, &bp[j]);
+	if (nbuf >= 2)
+		gpu_vk_buffer_destroy(vk, &bh);
+	if (nbuf >= 1)
+		gpu_vk_buffer_destroy(vk, &bkeys);
+	return rv;
+}
+
 void
 gpusort_engine_fini(scan_engine *eng)
 {
+	if (eng->rsort_pipe_ready)
+		for (int par = 0; par < 2; par++)
+			for (int s = 0; s < 3; s++)
+				gpu_vk_pipeline_destroy(eng->vk, &eng->rsort_pipe[par][s]);
+	eng->rsort_pipe_ready = 0;
 	if (eng->sort_pipe_ready)
 		gpu_vk_pipeline_destroy(eng->vk, &eng->sort_pipe);
 	eng->sort_pipe_ready = 0;
@@ -336,7 +465,16 @@ gpusort_run(scan_engine *eng, const gpusort_spec *spec, const uint32_t *keys, ui
 	{
 		char		gerr[256];
 
-		if (gpu_sort(eng, keys, nw, n, perm, gerr, sizeof(gerr)) == 0)
+		const char *engine = getenv("PGSTROM_GPUSERV_SORT_ENGINE");	/* radix: the radix sort (off by default until it is validated on every driver) */
+		const char *rminenv = getenv("PGSTROM_GPUSERV_RSORT_MIN");
+		uint32_t	rmin = rminenv ? (uint32_t) strtoul(rminenv, NULL, 10) : GPUSORT_RADIX_MIN_ROWS;
+		int			ok;
+
+		if (engine && strcmp(engine, "radix") == 0 && n >= rmin)
+			ok = gpu_sort_radix(eng, keys, nw, n, perm, gerr, sizeof(gerr));
+		else
+			ok = gpu_sort(eng, keys, nw, n, perm, gerr, sizeof(gerr));
+		if (ok == 0)
 			*p_used_gpu = 1;
 		else
 		{

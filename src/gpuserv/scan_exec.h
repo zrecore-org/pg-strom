@@ -62,6 +62,8 @@ typedef struct scan_engine
 	int				arrow_pipe_ready[SCAN_NV3];
 	gpu_vk_pipeline	sort_pipe;				/* GPU-Sort (gpusort.c) */
 	int				sort_pipe_ready;
+	gpu_vk_pipeline	rsort_pipe[2][3];		/* GPU-Sort, radix (gpusort.c): [pass parity][count, scan, scatter] */
+	int				rsort_pipe_ready;
 
 	/* Arrow record batches as the outer relation (registers 16/32 + 2 * tier; aggregates 4/8/12) */
 	gpu_vk_pipeline	aagg_pipe[SCAN_NV2][3], agagg_pipe[SCAN_NV2][3], ajagg_pipe[SCAN_JV2][3], ajgagg_pipe[SCAN_JV2][3];
