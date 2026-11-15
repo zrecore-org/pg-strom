@@ -4016,7 +4016,12 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 				int			a = (prog && prog->words) ? prog->agg_of_col[j] : -1;
 
 				memset(&cols[j], 0, sizeof(cols[j]));
-				if (a < 0 || (grouped && !tup_scratch))
+				/*
+				 * No dictionary (tup_scratch == 0) just means that no string value reached the device (for example every value of the
+				 * column is stored out of line): every group is then "no value", which the !g->acc[a].n branch answers. Only a group
+				 * with a value needs the scratch space.
+				 */
+				if (a < 0 || (grouped && !tup_scratch && g->acc[a].n))
 				{
 					snprintf(err, errlen, "min / max of a string: no accumulator for the column");
 					free(resp); free(tup);
