@@ -80,6 +80,9 @@ static void
 gen_pair(uint64_t i, uint64_t *pa, uint64_t *pb)
 {
 	uint64_t a, b, ea, eb;
+	/* C leaves the order of evaluation of the operands of an operator and of the arguments of a call unspecified (clang and GCC differ):
+	 * every draw of the generator is a statement of its own, so that the corpus is the same with every compiler */
+	uint64_t r1, r2, r3;
 
 	switch (i % 14)
 	{
@@ -92,18 +95,37 @@ gen_pair(uint64_t i, uint64_t *pa, uint64_t *pb)
 			eb = ea + (int64_t)(rnd() % 7) - 3;
 			if (eb < 1 || eb > 2046)
 				eb = ea;
-			a = mkd(rnd() & 1, ea, rnd());
-			b = mkd(rnd() & 1, eb, rnd());
+			r1 = rnd() & 1;
+			r2 = rnd();
+			a = mkd(r1, ea, r2);
+			r1 = rnd() & 1;
+			r2 = rnd();
+			b = mkd(r1, eb, r2);
 			break;
 		case 2:		/* sparse mantissas, close exponents: exact results and ties */
 			ea = 900 + rnd() % 200;
 			eb = ea + (int64_t)(rnd() % 120) - 60;
-			a = mkd(rnd() & 1, ea, sparse_frac());
-			b = mkd(rnd() & 1, eb, sparse_frac());
+			r1 = rnd() & 1;
+			r2 = sparse_frac();
+			a = mkd(r1, ea, r2);
+			r1 = rnd() & 1;
+			r2 = sparse_frac();
+			b = mkd(r1, eb, r2);
 			break;
 		case 3:		/* subnormal operands */
-			a = mkd(rnd() & 1, 0, rnd() >> (rnd() % 52));
-			b = (rnd() & 1) ? mkd(rnd() & 1, 0, rnd() >> (rnd() % 52)) : rnd();
+			r1 = rnd() & 1;
+			r2 = rnd();
+			r3 = rnd() % 52;
+			a = mkd(r1, 0, r2 >> r3);
+			if (rnd() & 1)
+			{
+				r1 = rnd() & 1;
+				r2 = rnd();
+				r3 = rnd() % 52;
+				b = mkd(r1, 0, r2 >> r3);
+			}
+			else
+				b = rnd();
 			break;
 		case 4:		/* specials */
 			a = specials[rnd() % NSPECIAL];
@@ -115,43 +137,86 @@ gen_pair(uint64_t i, uint64_t *pa, uint64_t *pb)
 							 : (uint64_t)(int64_t)(ea + 1023 - (int64_t)(rnd() % 70) + 5);
 			if ((int64_t) eb < 1 || eb > 2046)
 				eb = 1 + rnd() % 2045;
-			a = mkd(rnd() & 1, ea, rnd());
-			b = mkd(rnd() & 1, eb, rnd());
+			r1 = rnd() & 1;
+			r2 = rnd();
+			a = mkd(r1, ea, r2);
+			r1 = rnd() & 1;
+			r2 = rnd();
+			b = mkd(r1, eb, r2);
 			break;
 		case 6:		/* around overflow */
 			ea = 1000 + rnd() % 47;
 			eb = 2046 - (ea - 1023) + (int64_t)(rnd() % 5) - 2;
 			if ((int64_t) eb < 1 || eb > 2046)
 				eb = 1023;
-			a = mkd(rnd() & 1, ea, rnd());
-			b = mkd(rnd() & 1, eb, rnd());
+			r1 = rnd() & 1;
+			r2 = rnd();
+			a = mkd(r1, ea, r2);
+			r1 = rnd() & 1;
+			r2 = rnd();
+			b = mkd(r1, eb, r2);
 			break;
 		case 7:		/* powers of two and neighbours */
-			a = mkd(rnd() & 1, 1 + rnd() % 2045, (rnd() & 1) ? 0 : F64_FRAC);
-			b = mkd(rnd() & 1, 1 + rnd() % 2045, (rnd() & 1) ? 0 : (rnd() & 1) ? F64_FRAC : 1);
+			r1 = rnd() & 1;
+			r2 = 1 + rnd() % 2045;
+			r3 = (rnd() & 1) ? 0 : F64_FRAC;
+			a = mkd(r1, r2, r3);
+			r1 = rnd() & 1;
+			r2 = 1 + rnd() % 2045;
+			r3 = (rnd() & 1) ? 0 : ((rnd() & 1) ? F64_FRAC : 1);
+			b = mkd(r1, r2, r3);
 			break;
 		case 8:		/* ranges where a double becomes a float4 subnormal, or overflows */
-			a = mkd(rnd() & 1, (rnd() & 1) ? 860 + rnd() % 60 : 1135 + rnd() % 30, rnd());
-			b = mkd(rnd() & 1, 860 + rnd() % 320, rnd());
+			r1 = rnd() & 1;
+			r2 = (rnd() & 1) ? 860 + rnd() % 60 : 1135 + rnd() % 30;
+			r3 = rnd();
+			a = mkd(r1, r2, r3);
+			r1 = rnd() & 1;
+			r2 = 860 + rnd() % 320;
+			r3 = rnd();
+			b = mkd(r1, r2, r3);
 			break;
 		case 9:		/* small integers and halves (rint, exact sums) */
-			a = d2u((double)((int64_t)(rnd() % 4001) - 2000) / (double)(1 << (rnd() % 4)));
-			b = d2u((double)((int64_t)(rnd() % 4001) - 2000) / (double)(1 << (rnd() % 4)));
+			r1 = rnd() % 4001;
+			r2 = rnd() % 4;
+			a = d2u((double)((int64_t) r1 - 2000) / (double)(1 << r2));
+			r1 = rnd() % 4001;
+			r2 = rnd() % 4;
+			b = d2u((double)((int64_t) r1 - 2000) / (double)(1 << r2));
 			break;
 		case 10:	/* around 2^52 .. 2^64 (rint, int64 range) */
-			a = mkd(rnd() & 1, 1023 + 50 + rnd() % 15, (rnd() & 1) ? rnd() : sparse_frac());
-			b = mkd(rnd() & 1, 1023 + 50 + rnd() % 15, rnd());
+			r1 = rnd() & 1;
+			r2 = 1023 + 50 + rnd() % 15;
+			r3 = (rnd() & 1) ? rnd() : sparse_frac();
+			a = mkd(r1, r2, r3);
+			r1 = rnd() & 1;
+			r2 = 1023 + 50 + rnd() % 15;
+			r3 = rnd();
+			b = mkd(r1, r2, r3);
 			break;
 		case 12:	/* odd 27-bit significands (top two bits set): a * b has exactly 54 bits, an exact tie (fma_c adds a far smaller c: sticky bits) */
-			a = mkd(rnd() & 1, 1023 + (int64_t)(rnd() % 200) - 100, (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26));
-			b = mkd(rnd() & 1, 1023 + (int64_t)(rnd() % 200) - 100, (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26));
+			r1 = rnd() & 1;
+			r2 = 1023 + (int64_t)(rnd() % 200) - 100;
+			r3 = (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26);
+			a = mkd(r1, r2, r3);
+			r1 = rnd() & 1;
+			r2 = 1023 + (int64_t)(rnd() % 200) - 100;
+			r3 = (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26);
+			b = mkd(r1, r2, r3);
 			break;
 		case 13:	/* a * a an exact tie (odd 27-bit mantissa) and b far below it (sqr_add: the sticky bit of the shifted addend) */
-			a = mkd(0, 1023 + (int64_t)(rnd() % 100) - 50, (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26));
-			b = mkd(rnd() & 1, (uint64_t)((int64_t)(((a >> 52) & 0x7FF) * 2 - 1023) - 1 - (int64_t)(rnd() % 160)), rnd());
+			r2 = 1023 + (int64_t)(rnd() % 100) - 50;
+			r3 = (1ull << 51) | ((rnd() & 0x1FFFFFFull) << 26) | (1ull << 26);
+			a = mkd(0, r2, r3);
+			r1 = rnd() & 1;
+			r2 = (uint64_t)((int64_t)(((a >> 52) & 0x7FF) * 2 - 1023) - 1 - (int64_t)(rnd() % 160));
+			r3 = rnd();
+			b = mkd(r1, r2, r3);
 			break;
 		default:	/* x, and x*x of a short mantissa (perfect squares for sqrt) */
-			a = mkd(0, 1023 + (int64_t)(rnd() % 80) - 40, rnd() & 0xFFFFFFF0000000ull);
+			r2 = 1023 + (int64_t)(rnd() % 80) - 40;
+			r3 = rnd() & 0xFFFFFFF0000000ull;
+			a = mkd(0, r2, r3);
 			b = d2u(u2d(a) * u2d(a));
 			if (rnd() & 1)
 			{
@@ -402,9 +467,30 @@ prep(int op, uint64_t *a, uint64_t *b)
 		{
 			case 0: break;
 			case 1: *a = (uint64_t)((int64_t) *a >> (rnd() % 64)); break;
-			case 2: *a = (uint64_t)((int64_t)(*a >> (rnd() % 64)) * ((rnd() & 1) ? 1 : -1)); break;
-			case 3: *a = (rnd() & 1 ? 0x20000000000000ull : 0x40000000000000ull) + (rnd() % 9) - 4; break;
-			case 4: *a = (1ull << (rnd() % 64)) + (rnd() % 5) - 2; break;
+			case 2:
+			{
+				uint64_t	sh = rnd() % 64;
+				int			sgn = (rnd() & 1) ? 1 : -1;
+
+				*a = (uint64_t)((int64_t)(*a >> sh) * sgn);
+				break;
+			}
+			case 3:
+			{
+				uint64_t	base = (rnd() & 1 ? 0x20000000000000ull : 0x40000000000000ull);
+				uint64_t	off = rnd() % 9;
+
+				*a = base + off - 4;
+				break;
+			}
+			case 4:
+			{
+				uint64_t	sh = rnd() % 64;
+				uint64_t	off = rnd() % 5;
+
+				*a = (1ull << sh) + off - 2;
+				break;
+			}
 			default: *a = (rnd() & 1) ? 0x8000000000000000ull : 0x7FFFFFFFFFFFFFFFull; *a += rnd() % 3; break;
 		}
 	}
