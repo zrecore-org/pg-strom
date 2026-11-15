@@ -13,3 +13,4 @@ kernels_src.c
 kernels_src.h
 spec_check
 pcache_check
+src/gpuserv/rsort_check
