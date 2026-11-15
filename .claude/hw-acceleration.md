@@ -1574,3 +1574,31 @@ PostgreSQL 17 with 8 parallel workers (`cpu8`) against PG-Strom with the planner
 | Q11 important stock identification | 68 | 118 | 1.7 | 4 | GROUP BY + scalar subquery (output differs: DIFF, to investigate: probably numeric formatting) |
 
 Reading: the GPU wins where a big join or aggregate dominates (Q3 4x, Q9 2.4x, Q2, Q6) and is on par for Q13/Q14; it LOSES by 6-33x on Q15, Q19, Q21, Q22 and 1.4-2.6x on many short queries (Q4, Q5, Q7, Q8, Q10, Q12, Q16, Q18): the planner picks Gpu nodes whose per-task cost (page upload, setup) it does not price, and the GPU plan is run without parallel workers. The slowest PostgreSQL operations are the correlated subqueries (Q17, Q20, not offloadable), Q18's 1.5M-group GROUP BY and Q9's join cascade. Next steps from this table: (1) planner: do not choose a Gpu node when its estimated gain is small (Q15, Q19, Q21, Q22 first: find out whether those plans fail over to the CPU or are slow on the device); (2) Q18: many groups over a join (A3, now at parity) and the semi join; (3) sort and top-N (Q3, Q18) through the radix sort.
+
+**A18 calibration of the GPU scan floor (2026-11-15, M1 Pro, TPC-H SF1, best of 3 runs, GPU side with 8 parallel workers like PostgreSQL).** The first table above (RUNS=1, GPU side without parallel workers) was biased: the GPU column included the first-use kernel compile of each query and the 'no Gpu node' queries ran single-process. Warm numbers: the GPU plan won only on a few queries, because the planner had no per-row floor for the GPU scan (the page copy and row decode of the service, about 0.3-0.5 s per million heap rows, A17). New GUC `pg_strom.gpu_scan_tuple_cost` (cost per scanned tuple, added to the GpuScan cost, divided by the parallel divisor; `gpu_scan.c`), default **0.05**; the regression cluster of `vulkan_installcheck.sh` sets it to 0 because the expected outputs assume the GPU plans of small data.
+
+| q | cpu8 ms | gpu@0 | gpu@0.005 | gpu@0.02 | gpu@0.05 (default) | gpu@0.1 |
+|---|---|---|---|---|---|---|
+| Q1 | 535 | 604 | 605 | 604 | 603 | 605 |
+| Q2 | 132 | 120 | 118 | 133 | 131 | 132 |
+| Q3 | 159 | 202 | 202 | 190 | 156 | 156 |
+| Q4 | 84 | 529 | 504 | 100 | 80 | 81 |
+| Q5 | 96 | 175 | 171 | 99 | 88 | 97 |
+| Q6 | 116 | 130 | 130 | 130 | 130 | 117 |
+| Q7 | 143 | 222 | 204 | 142 | 144 | 145 |
+| Q8 | 133 | 139 | 111 | 101 | 68 | 134 |
+| Q9 | 2935 | 581 | 561 | 573 | 576 | 2767 |
+| Q10 | 322 | 313 | 306 | 300 | 248 | 321 |
+| Q11 | 64 | 94 | 59 | 56 | 65 | 66 |
+| Q12 | 170 | 158 | 169 | 152 | 116 | 170 |
+| Q13 | 599 | 603 | 606 | 598 | 598 | 600 |
+| Q14 | 213 | 149 | 64 | 68 | 69 | 212 |
+| Q15 | 137 | 251 | 249 | 249 | 249 | 137 |
+| Q16 | 176 | 208 | 205 | 206 | 177 | 175 |
+| Q18 | 1767 | 1511 | 1486 | 1090 | 1034 | 1802 |
+| Q19 | 166 | 369 | 367 | 263 | 262 | 165 |
+| Q21 | 201 | 235 | 183 | 192 | 207 | 202 |
+| Q22 | 71 | 105 | 104 | 102 | 71 | 69 |
+| total (20 queries; Q17, Q20 excluded: > 60 s) | 8219 | 6696 | 6405 | 5349 | **5071** | 8153 |
+
+(0.07: 8408, Q9 lost with 3784 ms and one Gpu node; 0.2: 8191, the GPU is off everywhere.) At the default the GPU plans win Q9 (576 vs 2935 ms), Q18 (1034 vs 1767), Q14 (69 vs 213), Q8 (68 vs 133), Q12 (116 vs 170), Q10 (248 vs 322) and the planner keeps the parallel CPU plan for the short queries; the remaining losers are Q1 (603 vs 535), Q6 (130 vs 116), Q15 (249 vs 137) and Q19 (262 vs 166). The optimum is narrow (0.07 already loses Q9: plan shapes flip), it is calibrated on one machine and scale factor: re-calibrate with `GPUSET_EXTRA='set pg_strom.gpu_scan_tuple_cost=<x>;' sh test/gpuserv/locked_test.sh "$PWD" tpch_bench.sh`. Open: a floor that scales with the device (a discrete GPU has a faster kernel, the host copy stays) and the GPU aggregate/join cost model (Q9 and Q18 are the wins; Q1/Q6/Q15/Q19 should stay on the CPU).
