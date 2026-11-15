@@ -975,7 +975,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	int			have_out = 0, have_prog = 0, have_tab = 0, mapped;
 	gpu_vk_pipeline *sp;
 	size_t		btab_sz;
-	uint32_t	npages, nloaded, total_lps = 0, ncomp, rec_words;
+	uint32_t	npages, nloaded, total_lps = 0, ncomp;
 	size_t		out_words;
 	uint32_t   *out;
 	XpuCommand *resp = NULL;
@@ -1022,7 +1022,6 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 			return NULL;
 	}
 	ncomp = prog->ncomp;
-	rec_words = 2 + 3 * ncomp;
 
 	/* variant: 0-2 the registers (8/16/32), + 3 * tier (scan_caps.h: full, lite, nogeom) */
 	variant = (prog->nregs <= 8 ? 0 : prog->nregs <= 16 ? 1 : 2) + 3 * scan_feat_tier(prog->feat);
@@ -1889,44 +1888,6 @@ done:
 /*
  * Aggregate state helpers shared by aggregation with and without GROUP BY
  */
-
-/* add the contribution of one GPU record { n, A, B } to an accumulator */
-static void
-acc_merge_record(agg_acc *acc, uint32_t action, const uint32_t *rec)
-{
-	int64_t		a = (int64_t)((uint64_t) rec[2] | ((uint64_t) rec[3] << 32));
-	int64_t		b = (int64_t)((uint64_t) rec[4] | ((uint64_t) rec[5] << 32));
-
-	switch (action)
-	{
-		case KAGG_ACTION__NROWS_ANY:
-		case KAGG_ACTION__NROWS_COND:
-			acc->n += rec[0];
-			break;
-		case KAGG_ACTION__PSUM_INT:
-		case KAGG_ACTION__PSUM_INT64:
-		case KAGG_ACTION__PAVG_INT:
-		case KAGG_ACTION__PAVG_INT64:
-		case KAGG_ACTION__PSUM_NUMERIC:
-		case KAGG_ACTION__PAVG_NUMERIC:
-			acc->n += rec[0];
-			acc->sum += (__int128) b * 4294967296LL + (__int128) a;
-			break;
-		case KAGG_ACTION__PMIN_INT32:
-		case KAGG_ACTION__PMIN_INT64:
-			if (rec[0] && (!acc->n || a < acc->val))
-				acc->val = a;
-			if (rec[0])
-				acc->n = 1;
-			break;
-		default:		/* PMAX_* */
-			if (rec[0] && (!acc->n || a > acc->val))
-				acc->val = a;
-			if (rec[0])
-				acc->n = 1;
-			break;
-	}
-}
 
 /* add one record of the GROUP BY kernel (gagg.slang: counts, 16-bit limbs of biased sums, biased min/max) */
 static void
@@ -3702,8 +3663,7 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	size_t		out_words;
 	const uint32_t *out;
 	int			rv = -1, redo = 0;
-	const uint32_t *w;
-	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
+	double		t1 = 0, t2 = 0, t3 = 0;
 	uint64_t	n_overflow = 0;
 
 	memset(&ps, 0, sizeof(ps));
@@ -3742,7 +3702,6 @@ scan_exec_group_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog 
 	if (scan_gtab_forced(st, prog))
 		return group_task_gtab(eng, session, prog, st, task, kds_src, err, errlen);
 	nagg = prog->nagg;
-	w = prog->words;
 	variant = (prog->nregs <= 16 ? 0 : 1) + 2 * scan_feat_tier(prog->feat);
 	avariant = scan_agg_variant(nagg);
 	/* the kernel of this task: the specialized one has its own table capacity and aggregate count (spec_shape) */
@@ -4053,7 +4012,8 @@ agg_final_build(const XpuCommand *session_cmd, const scan_prog *prog,
 			}
 			else
 			{
-				agg_acc		acc[3], *pacc;
+				agg_acc		acc[3];
+				const agg_acc *pacc;
 
 				if (grouped)
 				{
@@ -4406,8 +4366,6 @@ scan_exec_join_open(scan_engine *eng, const XpuCommand *session_cmd, join_inner 
 	size_t		align, maplen;
 	void	   *map;
 	const kern_multirels *kmrels;
-	const kern_data_store *kds;
-	uint64_t	kds_offset;
 
 	memset(ji, 0, sizeof(*ji));
 	if (session->join_inner_handle == 0)
