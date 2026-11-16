@@ -6,7 +6,7 @@ D=${0%/*}
 OUT=${PROBE_SQL:-/tmp/nvidia_probe.sql}
 {
 	cat "$D/nvidia_probe_setup.sql"
-	echo "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1;"
+	echo "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=1000000; set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1;"
 	while IFS= read -r q; do
 		[ -z "$q" ] && continue
 		printf '\\echo ## %s\n' "$q"

@@ -75,7 +75,7 @@ start_cluster() { # specialize-mode[:NAME=value,NAME=value ...]
 	sql "create extension if not exists pg_strom" >/dev/null 2>&1
 }
 
-GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000;"
+GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000;"
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=${CPU_WORKERS:-8}; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 bench() { # label query
 	label=$1; qry=$2

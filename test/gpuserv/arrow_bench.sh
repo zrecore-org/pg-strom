@@ -52,7 +52,7 @@ sql "analyze big"
 sql "create table bd as select (i * 25 - 50000)::int4 as k, (i % 17)::int4 as grp, (i * 3)::int8 as pay from generate_series(0, 3999) i"
 sql "analyze bd"
 
-GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000;"
+GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpupreagg_max_groups=100000;"
 OLDSET="$GPUSET set pg_strom.enable_gpupreagg=off; set pg_strom.enable_gpujoin=off;"
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 bench() { # label query

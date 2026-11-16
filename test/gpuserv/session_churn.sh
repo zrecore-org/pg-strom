@@ -45,7 +45,7 @@ check "service is ready" "$([ $n -lt 40 ]; echo $?)"
 $PSQL -d postgres -c "create database churn" >/dev/null
 $PSQL -d churn -c "create extension pg_strom; create table t as select i, (i % 1000)::int4 as a, (i * 7 % 10007)::int4 as b from generate_series(1, 60000) i; analyze t" >/dev/null
 
-GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
+GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 want=$($PSQL -d churn -c "set pg_strom.enabled=off; select count(*) from t where a > 500" | tail -1)
 plan=$($PSQL -d churn -c "$GPU explain select count(*) from t where a > 500" | grep -c "Custom Scan (Gpu")
 check "the churn query runs on the GPU (plan)" "$([ "$plan" -ge 1 ]; echo $?)"

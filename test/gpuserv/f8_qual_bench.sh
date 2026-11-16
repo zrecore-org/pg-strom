@@ -54,7 +54,7 @@ start_cluster() { # a specialize mode (default, off, force ...), "+nodf" after i
 	$PSQL -d postgres -c "select 1 from pg_database where datname = 'bench'" | grep -q 1 || $PSQL -d postgres -c "create database bench" >/dev/null
 	sql "create extension if not exists pg_strom" >/dev/null 2>&1
 }
-GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0;"
+GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0;"
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 bench() { # label query
 	label=$1; qry=$2

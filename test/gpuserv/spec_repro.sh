@@ -56,7 +56,7 @@ for v in ${VARIANTS:--}; do
 	[ "$v" != - ] && export "$v"
 	start
 	echo "=== service variant: $v (mode $PGSTROM_GPUSERV_SPECIALIZE)"
-	$PSQL -d t -c "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0;" -f "$ADHOC" 2>&1 | head -${OUT_LINES:-80}
+	$PSQL -d t -c "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0;" -f "$ADHOC" 2>&1 | head -${OUT_LINES:-80}
 	echo "--- specializer log"
 	grep "specialize" "$ROOT/log" | tail -${LOG_LINES:-12}
 done

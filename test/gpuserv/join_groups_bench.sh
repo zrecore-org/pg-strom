@@ -62,7 +62,7 @@ if [ "$(sql "select count(*) from pg_class where relname = 'jf'")" = 0 ]; then
 	sql "vacuum analyze jf"; sql "vacuum analyze jd"
 fi
 echo "=== service: $(sql "select state from pgstrom.gpu_service_state()"), jf $(sql "select pg_size_pretty(pg_table_size('jf'))"), jd $(sql "select pg_size_pretty(pg_table_size('jd'))")"
-GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpu_error_fallback=off; set pg_strom.gpupreagg_max_groups=$CAP; set pg_strom.gpupreagg_max_groups_heap=$CAP;"
+GPUSET="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.gpu_error_fallback=off; set pg_strom.gpupreagg_max_groups=$CAP; set pg_strom.gpupreagg_max_groups_heap=$CAP;"
 CPUSET="set pg_strom.enabled=off; set max_parallel_workers_per_gather=8; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 med() { sort -n | awk '{a[NR]=$1} END {if (NR) printf "%.1f", a[int((NR+1)/2)]; else printf "-"}'; }
 bench() { # label query

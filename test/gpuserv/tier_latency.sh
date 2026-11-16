@@ -52,7 +52,7 @@ $PSQL -d tl -c "create table u as select i as k, (i % 1000)::float8 as y from ge
 $PSQL -d tl -c "vacuum analyze u" >/dev/null
 stop
 
-GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
+GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 JOINSET="set cpu_operator_cost=0.1; set cpu_tuple_cost=0.1; set enable_seqscan=off; set enable_mergejoin=off; set enable_nestloop=off;"
 # label|query|plan pattern. The float8 join aggregate has a join qual that mixes both sides, which is part of the join program
 # (a qual on one side only is evaluated by the scan kernel of that side): that program uses the float8 group, so it needs

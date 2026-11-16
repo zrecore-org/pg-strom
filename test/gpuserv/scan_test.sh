@@ -96,7 +96,7 @@ sql "delete from s2 where i % 13 = 0"; sql "set default_statistics_target=1000; 
 sql "create table s3 as select * from s_base"; sql "vacuum s3"
 sql "update s3 set c = c + 7 where i % 17 = 0"; sql "set default_statistics_target=1000; analyze s3"                # mix of vacuumed and fresh pages
 
-GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
+GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 CPU="set max_parallel_workers_per_gather=0; set pg_strom.enabled=off;"
 q() { # query -> md5 of the sorted result text
 	$PSQL -d scantest -c "$1 select md5(coalesce(string_agg(x::text, E'\n' order by x::text), '')), count(*) from ($2) x" 2>&1 | tail -1
@@ -416,7 +416,7 @@ runjoin a1 "join with a heap table (Arrow side stays a GpuScan)" "select t.i, d.
 runjoin a1 "Arrow table as the inner relation" "select t.i, x.i from s1 t join %T x on t.b = x.b where t.a > 9900 and x.a > 9900"
 ANYPLAN=0
 if mine_tbl a1; then
-g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0; set parallel_leader_participation=off;" "select a, c, f from a1 where b < 1000")
+g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0; set parallel_leader_participation=off;" "select a, c, f from a1 where b < 1000")
 c=$(q "$CPU" "select a, c, f from a1 where b < 1000")
 [ "$g" = "$c" ]; check "parallel GpuScan on an Arrow table matches the CPU" $?
 g=$($PSQL -d scantest -c "$GPU select c / a from a1 where b < 0" 2>&1 | head -1)
@@ -452,7 +452,7 @@ fi
 
 echo "parallel workers"
 if mine_tbl s1; then
-g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;" "select a, c from s1 where b < 1000")
+g=$(q "set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=2; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;" "select a, c from s1 where b < 1000")
 c=$(q "$CPU" "select a, c from s1 where b < 1000")
 [ "$g" = "$c" ]; check "parallel GpuScan matches the CPU" $?
 fi

@@ -47,7 +47,7 @@ sql "create extension pg_strom" >/dev/null
 
 . "${0%/*}/minmaxtext_setup.inc"
 
-GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
+GPU="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0; set pg_strom.enabled=on;"
 CPU="set max_parallel_workers_per_gather=0; set pg_strom.enabled=off;"
 q() { # query -> md5 of the sorted result text
 	$PSQL -d scantest -c "$1 select md5(coalesce(string_agg(x::text, E'\n' order by x::text), '')), count(*) from ($2) x" 2>&1 | tail -1
