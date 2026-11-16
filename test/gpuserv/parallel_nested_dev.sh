@@ -61,5 +61,13 @@ fail=0
 [ "$warn" = 0 ] && echo "  ok    no WARNING (no leaked shared-memory buffer)" || { echo "  FAIL  $warn WARNING lines"; fail=1; }
 [ "$rows" -ge 10 ] || { echo "  FAIL  the query returns too few rows ($rows)"; fail=1; }
 [ "$nodes" -ge 1 ] && echo "  ok    the plan uses a Gpu node" || { echo "  FAIL  no Gpu node in the plan"; fail=1; }
+# an aggregate argument that is parallel unsafe (the grouping rel is not parallel safe): no GpuPreAgg may run under a Gather (A18 review)
+$PSQL -d t -c "create function unsafe_f(numeric) returns numeric as 'select \$1' language sql immutable parallel unsafe" >/dev/null
+UQ="select o_custkey % 3 as g, sum(unsafe_f(o_totalprice)) from orders group by 1 order by 1"
+uc=$($PSQL -d t -c "$CPU $UQ" 2>&1 | md5 -q)
+ug=$($PSQL -d t -c "$GPU $UQ" 2>&1 | md5 -q)
+under=$($PSQL -d t -c "$GPU explain $UQ" | grep -A1 "Gather" | grep -c "Custom Scan (GpuPreAgg")
+[ "$uc" = "$ug" ] && echo "  ok    parallel-unsafe aggregate argument: same rows" || { echo "  FAIL  parallel-unsafe aggregate argument: rows differ"; fail=1; }
+[ "$under" = 0 ] && echo "  ok    no GpuPreAgg directly under a Gather for it" || { echo "  FAIL  GpuPreAgg under a Gather with a parallel-unsafe aggregate argument"; fail=1; }
 [ "$fail" = 0 ] && echo "PARALLEL NESTED DEV: ALL PASSED" || echo "PARALLEL NESTED DEV: FAILED"
 exit $fail

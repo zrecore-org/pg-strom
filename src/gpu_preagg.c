@@ -1632,6 +1632,7 @@ typedef struct
 	QualCost		final_proj_clause_costs;
 	pgstromPlanInfo *pp_info;
 	List		   *inner_paths_list;
+	bool			input_parallel_safe;	/* the input path itself (a Gather inside is not) */
 	List		   *inner_target_list;
 	List		   *groupby_keys;
 	List		   *groupby_keys_refno;
@@ -2426,7 +2427,10 @@ __buildXpuPreAggCustomPath(xpugroupby_build_path_context *con)
 	cpath->path.pathtarget       = con->target_partial;
 	cpath->path.param_info       = con->param_info;
 	cpath->path.parallel_aware   = con->try_parallel;
-	cpath->path.parallel_safe    = con->input_rel->consider_parallel;
+	/* the grouping rel also covers the aggregate arguments and HAVING (is_parallel_safe in create_grouping_paths) */
+	cpath->path.parallel_safe    = (con->input_rel->consider_parallel &&
+									con->group_rel->consider_parallel &&
+									con->input_parallel_safe);
 	{
 		ListCell   *lc_ip;
 
@@ -2882,6 +2886,7 @@ tryAddSimpleGpuPreAggPath(PlannerInfo *root,
 	con.target_proj_final = create_empty_pathtarget();
 	con.pp_info        = pp_input;
 	con.inner_paths_list = input_path->custom_paths;
+	con.input_parallel_safe = input_path->path.parallel_safe;
 	con.inner_target_list = inner_target_list;
 	/* construction of the target-list for each level */
 	if (!xpugroupby_build_path_target(&con))
