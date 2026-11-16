@@ -49,8 +49,12 @@ on:
         description: "Run the GPU tests on a self-hosted Apple Silicon runner"
         type: boolean
         default: false
+      run_gpu_t4:
+        description: "Run the billed NVIDIA T4 job (it never runs on a push or a pull request: the hosted T4 has a monthly budget, so it is requested by hand)"
+        type: boolean
+        default: false
       skip_gpu_job:
-        description: "Do not run the billed NVIDIA T4 job in this manual run"
+        description: "Do not run the billed NVIDIA T4 job in this manual run (only meaningful together with run_gpu_t4 = false defaults; kept for old dispatch scripts)"
         type: boolean
         default: false
       apt_offline:
@@ -432,7 +436,8 @@ jobs:
     # Never for a pull request from a fork: the runner is billed and shared with the organization.
     # Nor for a manual run that probes the macOS runner or tests the apt cache with the mirrors blocked (those runs exist to
     # spend only the minutes they test).
-    if: needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline || inputs.skip_gpu_job))
+    # Opt-in: only a manual run with run_gpu_t4 (a push or a pull request never starts the billed job).
+    if: github.event_name == 'workflow_dispatch' && inputs.run_gpu_t4 && needs.gpu-changes.outputs.gpu == 'true' && vars.GPU_RUNNER_LABEL != '' && !(github.event_name == 'workflow_dispatch' && (inputs.try_xlarge_runner || inputs.apt_offline || inputs.skip_gpu_job))
     needs: gpu-changes
     # The hosted T4 (repository variable GPU_RUNNER_LABEL) unless a manual run asks for AWS: a RunsOn label for an AWS spot g4dn.xlarge
     # (one T4, 4 vCPU) with RunsOn's official GPU image (ubuntu24-gpu-x64, NVIDIA driver preinstalled; whether it ships the NVIDIA Vulkan

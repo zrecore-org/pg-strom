@@ -107,3 +107,10 @@ do not lower dynamic register-array indexing through LLVM), which a first run on
 
 Open follow-ups: the client of a query hangs when the service is killed in the middle of its task (the backend should get an error), and
 the service crashes with signal 11 on the device-lost exit path.
+
+## The T4 job is opt-in (2026-11-16)
+
+The hosted T4 has a monthly budget, so `vulkan-check.yml` no longer starts the NVIDIA job on a push or a pull request. Start it by hand
+(Actions > vulkan-check > Run workflow, `run_gpu_t4` = true, or `gh workflow run vulkan-check.yml -f run_gpu_t4=true --ref vulkan-gpu`),
+after joining the shared T4 queue (`t4_ci_turn.sh` in the mongo checkout) and after telling the user the running T4 total. The lavapipe and
+macOS-build jobs still run on every push. A skipped job counts as success for branch protection.
