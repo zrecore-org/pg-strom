@@ -42,7 +42,7 @@ SETTINGS = {
     "gist": COSTS + " " + BIGGROUPS + " " + JOINSET + " " + GISTON,
 }
 GPU = ("set pg_strom.enabled=on; set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; "
-       "set max_parallel_workers_per_gather=0;")
+       "set pg_strom.gpu_scan_tuple_cost=0; set max_parallel_workers_per_gather=0;")
 CPU = "set pg_strom.enabled=off; set max_parallel_workers_per_gather=0;"
 
 SHAPES = []
@@ -192,7 +192,7 @@ add("aggjoin.type.group_float8_key", "aggjoin", "aggjoin", "select f.gf8, d.dg, 
 add("aggjoin.type.group_text_key", "aggjoin", "aggjoin", "select f.gt, count(*), sum(d.dp) from cf f join cd d on f.k4 = d.k4 group by 1")
 add("aggjoin.type.sum_numeric", "aggjoin", "aggjoin", "select d.dg, sum(f.vn) from cf f join cd d on f.k4 = d.k4 group by 1")
 add("aggjoin.type.sum_float8", "aggjoin", "aggjoin", "select d.dg, sum(f.vf8) from cf f join cd d on f.k4 = d.k4 group by 1")
-add("aggjoin.type.min_max_text", "aggjoin", "aggjoin", "select d.dg, min(f.vt collate "C"), max(d.dtx collate "C") from cf f join cd d on f.k4 = d.k4 group by 1")
+add("aggjoin.type.min_max_text", "aggjoin", "aggjoin", 'select d.dg, min(f.vt collate "C"), max(d.dtx collate "C") from cf f join cd d on f.k4 = d.k4 group by 1')
 add("aggjoin.type.nestloop", "aggjoin", "nlagg", "select d.dg, count(*) from cf f join cd d on f.k4 < d.dp where f.id <= 200 and d.k4 <= 20 group by 1")
 add("aggjoin.type.count_distinct", "aggjoin", "aggjoin", "select d.dg, count(distinct f.v4) from cf f join cd d on f.k4 = d.k4 group by 1")
 
