@@ -960,6 +960,234 @@ task_pages_open(scan_engine *eng, page_set *ps, const kern_data_store *kds_src,
 	return 0;
 }
 
+/*
+ * The result pass of a scan task forms one tuple per surviving row (about 200 ns each): with many rows
+ * it is most of the task time (A18, TPC-H Q19: 10 ms of 16). form_tuple() only reads its inputs, so the
+ * pages are split into ranges and each thread forms its range's tuples into a private buffer; the
+ * buffers are then joined in heap order (the same bytes as the serial pass). Used when no row needs the
+ * backend's recheck (that list is built serially) and there are enough rows.
+ * PGSTROM_GPUSERV_FORM_THREADS: threads (default min(4, cpus); 0 or 1 = the serial pass).
+ */
+#define FORM_PAR_MIN_ROWS	20000	/* PGSTROM_GPUSERV_FORM_MIN_ROWS overrides (the tests force the parallel pass) */
+#define FORM_MAX_THREADS	16
+
+typedef struct
+{
+	const form_ctx *fc;
+	const page_set *ps;
+	const uint32_t *lp_base;
+	uint32_t		npages, total_lps, ncomp;
+	const uint32_t *flags, *vals;
+	uint32_t		p0, p1;			/* the pages of this range */
+	uint32_t		row0, nrows;	/* its first row id and the number of its rows */
+	char		   *buf;			/* the tuples, forward */
+	size_t			usage, cap;
+	uint64_t	   *offs;			/* the start of each tuple in buf */
+	char			err[128];
+	int				rc;
+} form_range;
+
+static int
+form_threads(void)
+{
+	static int	n = -1;
+
+	if (n < 0)
+	{
+		const char *env = getenv("PGSTROM_GPUSERV_FORM_THREADS");
+		long		cpus = sysconf(_SC_NPROCESSORS_ONLN);
+
+		n = (cpus > 4 ? 4 : (cpus < 1 ? 1 : (int) cpus));
+		if (env && *env)
+			n = atoi(env);
+		if (n > FORM_MAX_THREADS)
+			n = FORM_MAX_THREADS;
+		if (n < 1)
+			n = 1;
+	}
+	return n;
+}
+
+static uint32_t
+form_min_rows(void)
+{
+	static long	n = -1;
+
+	if (n < 0)
+	{
+		const char *env = getenv("PGSTROM_GPUSERV_FORM_MIN_ROWS");
+
+		n = (env && *env) ? atol(env) : FORM_PAR_MIN_ROWS;
+		if (n < 1)
+			n = 1;
+	}
+	return (uint32_t) n;
+}
+
+static void *
+form_range_run(void *arg)
+{
+	form_range *fr = (form_range *) arg;
+	uint32_t	row = 0;
+
+	fr->rc = 0;
+	fr->cap = (size_t) fr->nrows * 64 + 4096;
+	fr->buf = malloc(fr->cap);
+	fr->offs = malloc(sizeof(uint64_t) * (fr->nrows ? fr->nrows : 1));
+	if (!fr->buf || !fr->offs)
+	{
+		snprintf(fr->err, sizeof(fr->err), "out of memory");
+		fr->rc = -1;
+		return NULL;
+	}
+	for (uint32_t i = fr->p0; i < fr->p1 && row < fr->nrows; i++)
+	{
+		const unsigned char *page = PAGE_AT(fr->ps, i);
+		uint32_t	nlp = ((i + 1 < fr->npages ? fr->lp_base[i + 1] : fr->total_lps) - fr->lp_base[i]);
+		BlockNumber	blkno = ((const BlockNumber *) KDS_BODY_ADDR(fr->fc->kds_src))[i];
+
+		for (uint32_t lp = 0; lp < nlp && row < fr->nrows; lp++)
+		{
+			uint32_t	g = fr->lp_base[i] + lp;
+			uint32_t	lpd;
+			int			sz;
+
+			if (fr->flags[g] != 1)
+				continue;
+			memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+			if (fr->usage + (lpd >> 17) + 256 + 16 * (size_t) fr->fc->prog->nattrs > fr->cap)
+			{
+				size_t		ncap = fr->cap * 2 + (lpd >> 17) + 4096;
+				char	   *nb = realloc(fr->buf, ncap);
+
+				if (!nb)
+				{
+					snprintf(fr->err, sizeof(fr->err), "out of memory");
+					fr->rc = -1;
+					return NULL;
+				}
+				fr->buf = nb;
+				fr->cap = ncap;
+			}
+			sz = form_tuple(fr->fc, page + (lpd & 0x7fff), NULL,
+							fr->vals + (size_t) g * 3 * fr->ncomp,
+							blkno, lp + 1, (kern_tupitem *)(fr->buf + fr->usage),
+							fr->row0 + row, fr->err, sizeof(fr->err));
+			if (sz < 0)
+			{
+				fr->rc = -1;
+				return NULL;
+			}
+			fr->offs[row++] = fr->usage;
+			fr->usage += MAXALIGN(sz);
+		}
+	}
+	return NULL;
+}
+
+/*
+ * The parallel form of the loop in scan_exec_task(): *p_resp is a new response holding the header gap,
+ * the row index (forward positions, as the serial loop leaves them) and the tuples; *p_usage their size.
+ */
+static int
+form_rows_parallel(const form_ctx *fc, const page_set *ps, const uint32_t *lp_base,
+				   uint32_t npages, uint32_t total_lps, uint32_t ncomp,
+				   const uint32_t *flags, const uint32_t *vals, uint32_t nmatch,
+				   size_t resp_sz, size_t head_sz, size_t idx_sz,
+				   XpuCommand **p_resp, size_t *p_usage, char *err, size_t errlen)
+{
+	int			nt = form_threads();
+	form_range	fr[FORM_MAX_THREADS];
+	pthread_t	th[FORM_MAX_THREADS];
+	int			started[FORM_MAX_THREADS] = {0};
+	size_t		usage = 0;
+	uint32_t	row = 0;
+	XpuCommand *resp;
+	int			rc = 0;
+
+	if ((uint32_t) nt > npages)
+		nt = (int) npages;
+	memset(fr, 0, sizeof(fr));
+	for (int t = 0; t < nt; t++)
+	{
+		uint32_t	p0 = (uint32_t)((uint64_t) npages * t / nt);
+		uint32_t	p1 = (uint32_t)((uint64_t) npages * (t + 1) / nt);
+		uint32_t	lp_end = (p1 < npages ? lp_base[p1] : total_lps);
+		uint32_t	n = 0;
+
+		for (uint32_t g = lp_base[p0]; g < lp_end; g++)
+			n += (flags[g] == 1);
+		fr[t].fc = fc;
+		fr[t].ps = ps;
+		fr[t].lp_base = lp_base;
+		fr[t].npages = npages;
+		fr[t].total_lps = total_lps;
+		fr[t].ncomp = ncomp;
+		fr[t].flags = flags;
+		fr[t].vals = vals;
+		fr[t].p0 = p0;
+		fr[t].p1 = p1;
+		fr[t].row0 = row;
+		fr[t].nrows = n;
+		row += n;
+	}
+	for (int t = 1; t < nt; t++)
+		started[t] = (pthread_create(&th[t], NULL, form_range_run, &fr[t]) == 0);
+	form_range_run(&fr[0]);
+	for (int t = 1; t < nt; t++)
+	{
+		if (started[t])
+			pthread_join(th[t], NULL);
+		else
+			form_range_run(&fr[t]);		/* no thread: do the range here */
+	}
+	for (int t = 0; t < nt; t++)
+	{
+		if (fr[t].rc != 0)
+		{
+			snprintf(err, errlen, "%s", fr[t].err);
+			rc = -1;
+		}
+		usage += fr[t].usage;
+	}
+	if (rc == 0 && row != nmatch)
+	{
+		snprintf(err, errlen, "result rows %u differ from the flagged rows %u", row, nmatch);
+		rc = -1;
+	}
+	if (rc == 0)
+	{
+		resp = calloc(1, resp_sz + head_sz + idx_sz + usage + 4096);
+		if (!resp)
+		{
+			snprintf(err, errlen, "out of memory");
+			rc = -1;
+		}
+		else
+		{
+			uint64_t   *fwd = (uint64_t *)((char *) resp + resp_sz + head_sz);
+			char	   *tup_area = (char *) resp + resp_sz + head_sz + idx_sz;
+			size_t		base = 0;
+
+			for (int t = 0; t < nt; t++)
+			{
+				memcpy(tup_area + base, fr[t].buf, fr[t].usage);
+				for (uint32_t k = 0; k < fr[t].nrows; k++)
+					fwd[fr[t].row0 + k] = base + fr[t].offs[k];
+				base += fr[t].usage;
+			}
+			*p_resp = resp;
+			*p_usage = usage;
+		}
+	}
+	for (int t = 0; t < nt; t++)
+	{
+		free(fr[t].buf);
+		free(fr[t].offs);
+	}
+	return rc;
+}
+
 XpuCommand *
 scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 			   const XpuCommand *task, size_t *p_len, char *err, size_t errlen)
@@ -1152,65 +1380,74 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 			nrck += (flags[i] == 2);
 		}
 		idx_sz = MAXALIGN(sizeof(uint64_t) * nmatch);
-		/* a first guess of the tuples' size; grown on demand */
-		cap = resp_sz + head_sz + idx_sz + (size_t) nmatch * 64 + 4096;
-		resp = calloc(1, cap);
-		if (!resp)
+		if (nrck == 0 && nmatch >= form_min_rows() && form_threads() > 1)
 		{
-			snprintf(err, errlen, "out of memory");
-			goto error;
+			if (form_rows_parallel(&fc, &ps, lp_base, npages, total_lps, ncomp, flags, vals, nmatch,
+								   resp_sz, head_sz, idx_sz, &resp, &usage, err, errlen) != 0)
+				goto error;
 		}
-		for (uint32_t i = 0, row = 0, nrck_seen = 0; i < npages && (row < nmatch || nrck_seen < nrck); i++)
+		else
 		{
-			const unsigned char *page = PAGE_AT(&ps, i);
-			uint32_t	nlp = ((i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i]);
-			BlockNumber	blkno = ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i];
-
-			for (uint32_t lp = 0; lp < nlp; lp++)
+			/* a first guess of the tuples' size; grown on demand */
+			cap = resp_sz + head_sz + idx_sz + (size_t) nmatch * 64 + 4096;
+			resp = calloc(1, cap);
+			if (!resp)
 			{
-				uint32_t	g = lp_base[i] + lp;
-				uint32_t	lpd;
-				int			sz;
-				char	   *dest;
+				snprintf(err, errlen, "out of memory");
+				goto error;
+			}
+			for (uint32_t i = 0, row = 0, nrck_seen = 0; i < npages && (row < nmatch || nrck_seen < nrck); i++)
+			{
+				const unsigned char *page = PAGE_AT(&ps, i);
+				uint32_t	nlp = ((i + 1 < npages ? lp_base[i + 1] : total_lps) - lp_base[i]);
+				BlockNumber	blkno = ((const BlockNumber *) KDS_BODY_ADDR(kds_src))[i];
 
-				if (flags[g] == 2)		/* a string the GPU cannot read: the backend evaluates the row */
+				for (uint32_t lp = 0; lp < nlp; lp++)
 				{
+					uint32_t	g = lp_base[i] + lp;
+					uint32_t	lpd;
+					int			sz;
+					char	   *dest;
+
+					if (flags[g] == 2)		/* a string the GPU cannot read: the backend evaluates the row */
+					{
+						memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
+						if (rck_add(&rck, blkno, lp + 1, page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+						{
+							snprintf(err, errlen, "out of memory");
+							goto error;
+						}
+						nrck_seen++;
+						continue;
+					}
+					if (flags[g] != 1)
+						continue;
 					memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
-					if (rck_add(&rck, blkno, lp + 1, page + (lpd & 0x7fff), (lpd >> 17) & 0x7fff) != 0)
+					/* the tuple needs at most its source's length plus the header, the row id and padding */
+					if (resp_sz + head_sz + idx_sz + usage + (lpd >> 17) + 256 + 16 * (size_t) prog->nattrs > cap)
 					{
-						snprintf(err, errlen, "out of memory");
-						goto error;
-					}
-					nrck_seen++;
-					continue;
-				}
-				if (flags[g] != 1)
-					continue;
-				memcpy(&lpd, page + 24 + (size_t) lp * 4, 4);
-				/* the tuple needs at most its source's length plus the header, the row id and padding */
-				if (resp_sz + head_sz + idx_sz + usage + (lpd >> 17) + 256 + 16 * (size_t) prog->nattrs > cap)
-				{
-					size_t		ncap = cap * 2 + (lpd >> 17) + 4096;
-					XpuCommand *nr = realloc(resp, ncap);
+						size_t		ncap = cap * 2 + (lpd >> 17) + 4096;
+						XpuCommand *nr = realloc(resp, ncap);
 
-					if (!nr)
-					{
-						snprintf(err, errlen, "out of memory");
-						goto error;
+						if (!nr)
+						{
+							snprintf(err, errlen, "out of memory");
+							goto error;
+						}
+						resp = nr;
+						cap = ncap;
 					}
-					resp = nr;
-					cap = ncap;
+					tup_area = (char *) resp + resp_sz + head_sz + idx_sz;
+					dest = tup_area + usage;
+					sz = form_tuple(&fc, page + (lpd & 0x7fff), NULL, vals + (size_t) g * 3 * ncomp,
+									blkno, lp + 1, (kern_tupitem *) dest, row, err, errlen);
+					if (sz < 0)
+						goto error;
+					/* forward position for now (see below) */
+					((uint64_t *)((char *) resp + resp_sz + head_sz))[row] = usage;
+					usage += MAXALIGN(sz);
+					row++;
 				}
-				tup_area = (char *) resp + resp_sz + head_sz + idx_sz;
-				dest = tup_area + usage;
-				sz = form_tuple(&fc, page + (lpd & 0x7fff), NULL, vals + (size_t) g * 3 * ncomp,
-								blkno, lp + 1, (kern_tupitem *) dest, row, err, errlen);
-				if (sz < 0)
-					goto error;
-				/* forward position for now (see below) */
-				((uint64_t *)((char *) resp + resp_sz + head_sz))[row] = usage;
-				usage += MAXALIGN(sz);
-				row++;
 			}
 		}
 		chunk_len = head_sz + idx_sz + usage;
