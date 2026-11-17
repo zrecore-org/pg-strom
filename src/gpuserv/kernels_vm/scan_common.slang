@@ -361,16 +361,36 @@ bool num_decode(uint o, uint plen, out int64_t v, out uint sc)
     }
     if (dscale > 255u || ndig > 5u)
         return false;
+    int e = 4 * (weight - int(ndig) + 1) + int(dscale);
+    // A18: a value with trailing zeros in its last base-10000 digit (every numeric(p,2)) needs acc / 10^m; the divisor is
+    // 10^m <= 10^4 and divides 10000, so the division is done on the last digit alone (32-bit) and the earlier digits are
+    // scaled by 10000 / 10^m: no 64-bit division or remainder per row (Apple GPUs emulate them). The overflow check is a
+    // constant compare (conservative: false only sends the row to the CPU).
+    uint m4 = (e < 0) ? uint(-e) : 0u;
+    bool split = (ndig > 0u && m4 >= 1u && m4 <= 4u);
+    uint nfull = split ? ndig - 1u : ndig;
     int64_t acc = 0;
-    for (uint i = 0; i < ndig; i++)
+    for (uint i = 0; i < nfull; i++)
     {
         int64_t d = int64_t(ld16u(doff + 2u * i));
-        if (acc > (NUM_MAX - d) / 10000)
-            return false;
+        if (acc > 922337203685477 || (acc == 922337203685477 && d > 5807))
+            return false;               // acc * 10000 + d would exceed INT64_MAX
         acc = acc * 10000 + d;
     }
-    int e = 4 * (weight - int(ndig) + 1) + int(dscale);
-    if (acc != 0)
+    if (split)
+    {
+        uint last = ld16u(doff + 2u * (ndig - 1u));
+        uint p32 = 1u;
+        for (uint i = 0; i < m4; i++)
+            p32 = p32 * 10u;
+        if (last % p32 != 0u)
+            return false;               // a digit below the declared scale: the CPU decides
+        uint mul = 10000u / p32;
+        if (acc >= 9223372036854775)
+            return false;
+        acc = acc * int64_t(mul) + int64_t(last / p32);
+    }
+    else if (acc != 0)
     {
         if (e >= 0)
         {
