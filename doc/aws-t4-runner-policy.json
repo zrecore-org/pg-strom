@@ -1,0 +1,59 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LaunchT4SpotRunnerInstance",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceType": "g4dn.xlarge",
+          "ec2:InstanceMarketType": "spot",
+          "aws:RequestTag/Project": "pg-strom-ci",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchSupportingResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:us-east-1::image/*",
+        "arn:aws:ec2:us-east-1:*:subnet/*",
+        "arn:aws:ec2:us-east-1:*:network-interface/*",
+        "arn:aws:ec2:us-east-1:*:security-group/*",
+        "arn:aws:ec2:us-east-1:*:spot-instances-request/*"
+      ]
+    },
+    {
+      "Sid": "LaunchRootVolumeUpTo150GB",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:*:volume/*",
+      "Condition": {
+        "NumericLessThanEquals": { "ec2:VolumeSize": "150" },
+        "StringEquals": { "aws:RequestTag/Project": "pg-strom-ci" }
+      }
+    },
+    {
+      "Sid": "TagOnlyAtLaunch",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-1:*:*/*",
+      "Condition": {
+        "StringEquals": { "ec2:CreateAction": "RunInstances" }
+      }
+    },
+    {
+      "Sid": "TerminateOnlyOwnRunners",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "arn:aws:ec2:us-east-1:*:instance/*",
+      "Condition": {
+        "StringEquals": { "ec2:ResourceTag/Project": "pg-strom-ci" }
+      }
+    }
+  ]
+}

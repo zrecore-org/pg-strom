@@ -58,7 +58,7 @@ SQL-level definitions live in `src/sql/pg_strom--<ver>.sql` (base) and `pg_strom
 - `spike/`: the Apple Silicon feasibility experiments (see the appendix of the plan).
 - `doc/`: user documentation for the Vulkan port (install, parameters, features, troubleshooting; Markdown). `man/*.md` is the MkDocs source of the generated HTML site in `docs/` and still describes the CUDA product (not hand-edited `docs/`; folding `doc/` into `man/` is open, A9).
 - `deadcode/`: retired code kept for reference; not built.
-- `fluentd/`, `files/`: fluentd plugin, systemd/spec/deb packaging templates. The templates were updated for Vulkan (vulkan-loader/libvulkan1, `pgstrom-gpuserv` in the file list, `WITH_GPUSERV=1`, slangc via `SLANGC`) but **never built** (A9 status in the plan). CI: `.github/workflows/vulkan-check.yml` (lavapipe on Linux, macOS build only, a manual self-hosted Apple Silicon job; the NVIDIA T4 CI job was retired on 2026-11-18, see `doc/ci-gpu-runners.md`); `build-check.yml` is the CUDA line's.
+- `fluentd/`, `files/`: fluentd plugin, systemd/spec/deb packaging templates. The templates were updated for Vulkan (vulkan-loader/libvulkan1, `pgstrom-gpuserv` in the file list, `WITH_GPUSERV=1`, slangc via `SLANGC`) but **never built** (A9 status in the plan). CI: `.github/workflows/vulkan-check.yml` (lavapipe on Linux, macOS build only, a manual self-hosted Apple Silicon job; an opt-in NVIDIA job (`run_gpu_t4`, hosted T4 or an AWS spot T4 from `test/gpuserv/t4_spot_runner.sh`) is left for others to set up and is not enabled by this project: `GPU_RUNNER_LABEL` is unset, see `doc/ci-gpu-runners.md`); `build-check.yml` is the CUDA line's.
 - `test/ssbm`, `test/tpch`, `test/pydatagen`: data generators for tests and benchmarks.
 
 ## Conventions
