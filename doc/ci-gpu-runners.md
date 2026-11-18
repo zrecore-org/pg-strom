@@ -1,5 +1,12 @@
 # GPU runners for CI
 
+> **Decision (2026-11-18): the NVIDIA T4 CI is retired.** The `linux-gpu` job, its inputs (`run_gpu_t4`, `gpu_runner_aws`,
+> `gpu_runner_label`, `bench_gpu`, `skip_gpu_job`) and the AWS spot runner script were removed from the repository. The hosted T4 ran
+> out of budget, spot capacity for a g4dn.xlarge was not available when tried (`InsufficientInstanceCapacity` in every zone), and
+> macOS, Linux and Windows machines are available for testing: Apple Silicon (MoltenVK) locally, lavapipe in CI, an RTX 4060 Ti on
+> the Windows box (compile and run checks through `test/gpuserv/win_gpu_lock.sh`). The sections below are kept as history and as
+> a recipe if a hosted or cloud NVIDIA runner is wanted again (the git history has the workflow job and `t4_spot_runner.sh`).
+
 The lavapipe jobs of `.github/workflows/vulkan-check.yml` run on a CPU implementation of Vulkan. Real GPU coverage comes from
 three places:
 
@@ -114,30 +121,3 @@ The hosted T4 has a monthly budget, so `vulkan-check.yml` no longer starts the N
 (Actions > vulkan-check > Run workflow, `run_gpu_t4` = true, or `gh workflow run vulkan-check.yml -f run_gpu_t4=true --ref vulkan-gpu`),
 after joining the shared T4 queue (`t4_ci_turn.sh` in the mongo checkout) and after telling the user the running T4 total. The lavapipe and
 macOS-build jobs still run on every push. A skipped job counts as success for branch protection.
-
-## Own spot runner, no RunsOn (2026-11-17)
-
-A lighter alternative to the RunsOn stack: `test/gpuserv/t4_spot_runner.sh` launches one g4dn.xlarge spot instance (the AWS Deep Learning
-Base OSS Nvidia Driver GPU AMI, Ubuntu 24.04) that registers a one-job (ephemeral) GitHub runner labelled `pgstrom-t4-aws`, and the job
-is started with `gpu_runner_label=pgstrom-t4-aws`. No CloudFormation, no GitHub App, no instance IAM role. The instance powers off after
-the job and after `MAX_MIN` (150) minutes regardless; one instance at a time. Not run on a real instance yet: whether the Deep Learning
-AMI ships the NVIDIA Vulkan ICD, and whether the workflow's apt steps behave on it, are first-run questions.
-
-```
-sh test/gpuserv/t4_spot_runner.sh up --dry-run     # needs the policy below; creates nothing
-sh test/gpuserv/t4_spot_runner.sh up               # launch (costs about $0.0036 per minute of spot time)
-gh workflow run vulkan-check.yml --ref vulkan-gpu -f run_gpu_t4=true -f gpu_runner_label=pgstrom-t4-aws
-sh test/gpuserv/t4_spot_runner.sh status | down
-```
-
-**AWS changes (once, by an administrator of the `zrecore-ci` account)**
-1. IAM Identity Center > Permission sets > `CIOperator` > Inline policy: paste `doc/aws-t4-runner-policy.json`, save, then "Provision
-   access" to re-apply the permission set to the account (users must sign in again with `aws sso login --profile zrecore-ci`).
-   The policy allows `RunInstances` only for g4dn.xlarge, spot, us-east-1, tagged `Project=pg-strom-ci`, root volume up to 150 GB;
-   `TerminateInstances` only for instances with that tag; `CreateTags` only at launch.
-2. The spot service-linked role must exist once per account: `aws iam create-service-linked-role --aws-service-name spot.amazonaws.com`
-   (an error "has been taken" means it exists). This needs an administrator, not `CIOperator`.
-3. Quota: All G and VT Spot Instance Requests = 8 vCPUs (the live value is 8; two g4dn.xlarge fit, the script starts one).
-4. `gh` on the machine running the script needs admin rights on the repository (to request a runner registration token).
-
-The registration token travels in the instance user-data (single use, expires within an hour; the instance requires IMDSv2).
