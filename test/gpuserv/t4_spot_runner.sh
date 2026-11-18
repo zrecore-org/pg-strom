@@ -66,14 +66,11 @@ $have"
 	case $ami in ami-*) ;; *) die "no AMI found ($ami)" ;; esac
 	root=$(aws_ ec2 describe-images --image-ids "$ami" --query 'Images[0].RootDeviceName' --output text) || die "AMI lookup failed"
 
-	# the cheapest zone right now (spot price differs by zone), mapped to the default subnet of that zone
-	az=$(aws_ ec2 describe-spot-price-history --instance-types $TYPE --product-descriptions Linux/UNIX \
+	# the zones, cheapest spot price first (the price differs by zone); a zone without capacity is skipped below
+	azs=$(aws_ ec2 describe-spot-price-history --instance-types $TYPE --product-descriptions Linux/UNIX \
 		--start-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --query 'SpotPriceHistory[].[SpotPrice,AvailabilityZone]' --output text |
-		sort -n | head -n 1 | awk '{print $2}')
-	[ -n "$az" ] || die "no spot price for $TYPE"
-	subnet=$(aws_ ec2 describe-subnets --filters "Name=availability-zone,Values=$az" Name=default-for-az,Values=true \
-		--query 'Subnets[0].SubnetId' --output text)
-	case $subnet in subnet-*) ;; *) die "no default subnet in $az" ;; esac
+		sort -n | awk '{print $2}')
+	[ -n "$azs" ] || die "no spot price for $TYPE"
 
 	if [ -n "$dry" ]; then
 		token=DRYRUN
@@ -104,16 +101,26 @@ chown ubuntu:ubuntu /home/ubuntu/start-runner.sh
 su - ubuntu -c 'nohup bash /home/ubuntu/start-runner.sh > /home/ubuntu/runner.log 2>&1 &'
 EOF
 
-	echo "launching $TYPE spot in $az ($subnet), ami $ami, volume ${VOLUME_GB} GB, power-off after ${MAX_MIN} min"
-	out=$(aws_ ec2 run-instances $dry --image-id "$ami" --instance-type $TYPE --count 1 --subnet-id "$subnet" \
-		--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}' \
-		--instance-initiated-shutdown-behavior terminate \
-		--metadata-options 'HttpTokens=required,HttpEndpoint=enabled' \
-		--block-device-mappings "DeviceName=$root,Ebs={VolumeSize=$VOLUME_GB,VolumeType=gp3,DeleteOnTermination=true}" \
-		--tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=$TAG},{Key=Name,Value=pgstrom-t4-runner}]" \
-		"ResourceType=volume,Tags=[{Key=Project,Value=$TAG}]" \
-		--user-data "file://$ud" --query 'Instances[0].InstanceId' --output text 2>&1)
-	rc=$?
+	out=; rc=1
+	for az in $azs; do
+		subnet=$(aws_ ec2 describe-subnets --filters "Name=availability-zone,Values=$az" Name=default-for-az,Values=true \
+			--query 'Subnets[0].SubnetId' --output text)
+		case $subnet in subnet-*) ;; *) continue ;; esac
+		echo "launching $TYPE spot in $az ($subnet), ami $ami, volume ${VOLUME_GB} GB, power-off after ${MAX_MIN} min"
+		out=$(aws_ ec2 run-instances $dry --image-id "$ami" --instance-type $TYPE --count 1 --subnet-id "$subnet" \
+			--instance-market-options 'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}' \
+			--instance-initiated-shutdown-behavior terminate \
+			--metadata-options 'HttpTokens=required,HttpEndpoint=enabled' \
+			--block-device-mappings "DeviceName=$root,Ebs={VolumeSize=$VOLUME_GB,VolumeType=gp3,DeleteOnTermination=true}" \
+			--tag-specifications "ResourceType=instance,Tags=[{Key=Project,Value=$TAG},{Key=Name,Value=pgstrom-t4-runner}]" \
+			"ResourceType=volume,Tags=[{Key=Project,Value=$TAG}]" \
+			--user-data "file://$ud" --query 'Instances[0].InstanceId' --output text 2>&1)
+		rc=$?
+		case $out in
+			*InsufficientInstanceCapacity*|*SpotMaxPriceTooLow*|*MaxSpotInstanceCountExceeded*) echo "  no capacity in $az, trying the next zone" ;;
+			*) break ;;
+		esac
+	done
 	if [ -n "$dry" ]; then
 		case $out in
 			*DryRunOperation*) echo "dry run OK: the policy allows the launch"; return 0 ;;
