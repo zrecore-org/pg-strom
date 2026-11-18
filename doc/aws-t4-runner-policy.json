@@ -9,7 +9,7 @@
       "Condition": {
         "StringEquals": {
           "ec2:InstanceType": "g4dn.xlarge",
-          "ec2:MarketType": "spot",
+          "ec2:InstanceMarketType": "spot",
           "aws:RequestTag/Project": "pg-strom-ci",
           "aws:RequestedRegion": "us-east-1"
         }
