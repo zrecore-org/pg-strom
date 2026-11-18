@@ -65,6 +65,10 @@ on:
         description: "Run the GPU job on an AWS spot g4dn.xlarge through RunsOn instead of the hosted T4 (needs the RunsOn stack and the GPU quota in the AWS account, doc/ci-gpu-runners.md)"
         type: boolean
         default: false
+      gpu_runner_label:
+        description: "Run the GPU job on a self-hosted runner with this label (for example pgstrom-t4-aws from test/gpuserv/t4_spot_runner.sh up) instead of the hosted T4; empty = hosted T4 / gpu_runner_aws"
+        type: string
+        default: ""
       bench_gpu:
         description: "Run perf_bench.sh on the NVIDIA T4 after the tests (informational; adds the benchmark minutes to the billed job)"
         type: boolean
@@ -442,7 +446,7 @@ jobs:
     # The hosted T4 (repository variable GPU_RUNNER_LABEL) unless a manual run asks for AWS: a RunsOn label for an AWS spot g4dn.xlarge
     # (one T4, 4 vCPU) with RunsOn's official GPU image (ubuntu24-gpu-x64, NVIDIA driver preinstalled; whether it ships the NVIDIA Vulkan
     # ICD has to be checked in the first run: see the "NVIDIA Vulkan driver" step). An AWS run needs no place in the shared T4 queue.
-    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.gpu_runner_aws) && format('runs-on={0}/family=g4dn.xlarge/image=ubuntu24-gpu-x64/spot=true', github.run_id) || vars.GPU_RUNNER_LABEL }}
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && inputs.gpu_runner_label != '') && inputs.gpu_runner_label || (github.event_name == 'workflow_dispatch' && inputs.gpu_runner_aws) && format('runs-on={0}/family=g4dn.xlarge/image=ubuntu24-gpu-x64/spot=true', github.run_id) || vars.GPU_RUNNER_LABEL }}
     timeout-minutes: 150
     steps:
       - name: Checkout
