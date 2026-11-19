@@ -46,6 +46,7 @@
 - L1459: A16 engine selection
 - L1500: Licensing
 - A17 discrete-GPU performance (T4 benchmark, 2026-11-14)
+- A19 GPU concurrency investigation (2026-11-18)
 
 
 > The branch was created as `apple-silicon` and renamed `vulkan-gpu` after A2 (it is the Vulkan port, validated on Apple Silicon only). Older text below keeps the old name where it describes history.
@@ -1665,3 +1666,36 @@ The GPU engine wins Q9 (5.1x), Q18 (1.8x), Q14 (3.5x), Q8 (1.8x), Q10 (1.3x), Q3
 - **A18 own-account spot T4 runner (2026-11-17):** `test/gpuserv/t4_spot_runner.sh` (up/down/status), IAM policy `doc/aws-t4-runner-policy.json` (inline policy of the CIOperator permission set; the first version tested `ec2:MarketType`, which a request never carries: the key is `ec2:InstanceMarketType`, found with `sts decode-authorization-message`), workflow input `gpu_runner_label`; `up --dry-run` says OK, no instance launched yet. AWS spot quota for G/VT is 8 vCPUs (live value; the on-demand quota is still 0). Walkthrough in `doc/ci-gpu-runners.md` ("Own spot runner, no RunsOn").
 - **A18 full verification of the numeric decode change (2026-11-17, M1 Pro):** `verify_all.sh` stages installcheck/scan/fuzz: fuzz PASSED (0 failing, 141 ok, 134 same_error); installcheck was cut off by the 4200 s stage cap inside the 6338 s cold kernel prewarm (all 47 kernels compile after a `kernels_vm/` change: use TIMEOUT>=7200 once); scan_test 228 FAILED, all from sections s1-s3 where the service reported "kernel did not finish within 10000 ms (device marked lost)" and the plan checks saw GpuScan=0; rerun on the warm cache pending (see the next note for the result).
 - **A18 numeric decode change verified (2026-11-18, M1 Pro, warm cache):** installcheck 23/23 (209 s); scan 4424 ok / 0 fail (3050 s); fuzz 0 failing; float8 312, postgis 1028, arrow 485, gpucache 232 ok, regen clean (no expected-file change). A first scan rerun had one failure (`nm_li` Q1 GROUP BY integer keys, empty GPU result) that did not recur in a numeric-only run or the full rerun: treated as a flake, watch. The 170 failures of a first numeric-only run were a harness bug (`numeric_test.sh` / `jsonb_test.sh` ran a copy from TMPDIR without its helper files, so no service started), fixed in a877a69b. Logs: `test-data/logs/20261118-161812/`. NVIDIA (RTX/T4) check of the numeric kernels still not done.
+
+## A19 GPU concurrency investigation (2026-11-18, M1 Pro, warm page cache; measurement only, nothing built)
+
+**Question.** Can more parallelism on the GPU side raise throughput? Scripts: `test/gpuserv/perf_bench.sh` (trace) and `test/gpuserv/par_sweep.sh` (workers x async tasks x chunk size x concurrent clients); logs `test-data/par_bench1.log`, `par_sweep.log`, `par_sweep_chunks.log`; 16.8M-row heap table, 17 tasks of 8,187 pages (64 MB) per query.
+
+**Code baseline (read from the sources).** One `poll()` thread serves every session (`wire.c`); one Vulkan queue (`queueCount = 1`, `gpu_vk.c`), one fence, and each dispatch is `vkQueueSubmit` then a blocking `vkWaitForFences`, so while a kernel runs no other session is served and no socket is read. The backend already keeps up to `pg_strom.max_async_tasks` tasks in flight (`executor.c`): the service is the serializer.
+
+**Per-task stages (service trace, `perf_bench.sh`; early runs mix the generic VM kernel and the specialized one, which compiles during the first runs, so these overstate the GPU stage).** Service busy 53-91% of wall on scan/aggregate shapes; the GPU stage 42-87% of wall; setup + merge (serial CPU in the service) only 3-23% of the service's time; join aggregation spends about 80% of its wall outside the service (the backend builds the inner hash store). Pages-in is 0.1 ms per task when the file pages are cached (mapped, zero copy).
+
+**Steady state (`par_sweep.sh`, kernels cached; best of 3, ms):**
+
+| Query | workers 0, async 1 | async 2 (4, 8 equal) | workers 2 | workers 4 |
+|---|---|---|---|---|
+| agg, no qual | 48.5 | 39.0 | 42-43 | 42-43 |
+| scan, arithmetic | 45.3 | 37.4 | 39 | 40-43 |
+| group by 100 | 85.2 | 77.9 | 122 | 165 |
+| join group by 20 | 146.5 | 140.0 | 304 | 466 |
+
+- Tasks in flight: 2 is enough (-20% against 1); 4 and 8 give nothing.
+- Parallel workers do not help and hurt grouped and join queries (each worker runs its own session and builds its own inner store; the single service serializes them and the partial results add a merge).
+- Concurrent client sessions (same query, 10 each; queries per second at 1 / 2 / 4 clients): agg 18.2 / 23.6 / 24.7, scan 18.8 / 24.2 / 26.0, group by 100 10.6 / 12.5 / 12.9, join group by 6.4 / 7.1 / 7.2. A second client adds about 30% (agg, scan), 18% (group), 11% (join), then it saturates: the service is near its single-thread limit.
+- Chunk size (`scan_chunk_blocks`, ms at 2048 / 4096 / 8192 / 16384 / 32768 blocks): agg 49.9 / 39.6 / 43.0 / 48.0 / 46.4; scan 50.8 / 40.7 / 37.5 / 38.6 / 37.4; group 76.6 / 72.5 / 77.3 / 77.8 / 77.5; join group 127 / 101 / 140 / 140 / 140. Bigger tasks do not help, so a fixed per-dispatch cost is not the lever; 4096 is slightly better for the join (-28%, one run, to be repeated).
+- Memory-bandwidth reading: a 1.2 GB table in about 39 ms is about 31 GB/s; the hand-written row-format kernels reached about 120 GB/s on this chip (notes above), so the heap-page decode kernels (item pointers, tuple deform, variable-length columns) are the lever inside the kernel, not the number of tasks.
+
+**Ranked options (expected gain on the M1; none built).**
+1. *Heap-page decode kernel efficiency* (kernel-internal parallelism: workgroup-per-page layout, coalescing the page walk, fewer dependent loads). Up to 2-4x on the GPU stage if the 120 GB/s kernels are a fair ceiling; needs a roofline of the page-walk kernel first.
+2. *In-service async dispatch* (submit task N+1 before waiting on N; per-task fences or a timeline semaphore; double-buffered staging and result buffers; keep reading sockets during a kernel). Bound from the numbers above: about +25-30% on scan/aggregate, +10% on joins; the second-client test measures the same ceiling.
+3. *Stage overlap on a worker thread* (merge/form of task N while N+1 runs): at most the 3-23% serial CPU share.
+4. *Chunk size*: retune only the join case (4096) after repeating; a planner/GUC detail, not parallelism.
+5. *Multi-queue / separate transfer queue*: relevant for discrete GPUs (A17: upload 70-80% of a task on a T4); cannot be verified here (no NVIDIA Vulkan on Linux, Windows harness only); record as gated.
+6. *Do not*: more PostgreSQL parallel workers over the GPU path (measured slower); make the planner prefer Gather under a GPU node only when the GPU is not the bottleneck.
+
+**Risks to carry into any build.** Base tier (MoltenVK, lavapipe: one queue; timeline semaphores need a probe in `devcaps.c`); the 10 s dispatch timeout and device-lost handling assume one dispatch in flight; `PGSTROM_GPUSERV_SPECIALIZE=check` runs VM and specialized per dispatch; NVIDIA returned VK_ERROR_UNKNOWN for pipelines created while other threads created pipelines (A17), so keep pipeline creation serialized; macOS killed Metal command buffers with three services ("Impacting Interactivity"), so more overlapped GPU load may trip it; any concurrency must be env-switchable and default off until an NVIDIA run is possible.
