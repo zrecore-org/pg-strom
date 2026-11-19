@@ -7,6 +7,8 @@
 # Per query: best of 3 (EXPLAIN ANALYZE execution time) for max_parallel_workers_per_gather in WORKERS, max_async_tasks in ASYNCS,
 # and scan_chunk_blocks in CHUNKS, and the wall time of K concurrent client sessions running the same query (CLIENTS), reported as queries per second.
 #   LABEL_RE=<regex>   only the queries whose label matches
+#   WORKERS=, ASYNCS=, CLIENTS=, CHUNKS=  the sweeps (a list in quotes; CLIENTS=0 skips the client test)
+#   SPEC=<mode>        PGSTROM_GPUSERV_SPECIALIZE of the service; KEEPLOG=<file> keeps the service trace
 PGBIN=${PGBIN:-/opt/homebrew/opt/postgresql@17/bin}
 GPUSERV_BIN=${GPUSERV_BIN:?set GPUSERV_BIN to the pgstrom-gpuserv binary}
 ROOT=${ROOT:-/tmp/sp_bench}
@@ -21,8 +23,9 @@ stop() { $PGBIN/pg_ctl -D "$ROOT/data" -m fast -w stop >/dev/null 2>&1; }
 stop
 grep -v "^pg_strom.gpuserv_path" "$ROOT/data/postgresql.conf" > "$ROOT/conf.tmp" && cp "$ROOT/conf.tmp" "$ROOT/data/postgresql.conf"
 echo "pg_strom.gpuserv_path = '$GPUSERV_BIN'" >> "$ROOT/data/postgresql.conf"
-trap stop EXIT INT TERM
+trap 'stop; [ -n "$KEEPLOG" ] && cp "$ROOT/log" "$KEEPLOG"' EXIT INT TERM
 export PGSTROM_GPUSERV_TRACE=1
+[ -n "$SPEC" ] && export PGSTROM_GPUSERV_SPECIALIZE=$SPEC	# e.g. SPEC=force: every session uses the specialized kernels from its first task
 : > "$ROOT/log"
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; tail -20 "$ROOT/log"; exit 1; }
 n=0; while [ $n -lt 600 ]; do
@@ -59,7 +62,7 @@ sweep() { # label query
 		line="$line  $c: $(best3 "set max_parallel_workers_per_gather=0; set pg_strom.max_async_tasks=2; set pg_strom.scan_chunk_blocks=$c;" "$qry") ms"
 	done
 	echo "$line"
-	for k in $CLIENTS; do
+	for k in $([ "$CLIENTS" = 0 ] && echo "" || echo $CLIENTS); do
 		t0=$(perl -MTime::HiRes=time -e 'printf "%.0f", time()*1000')
 		i=0
 		while [ $i -lt $k ]; do

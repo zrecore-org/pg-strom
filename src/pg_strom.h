@@ -741,7 +741,9 @@ extern Path	   *pgstromTryFindGistIndex(PlannerInfo *root,
 /*
  * relscan.c
  */
+#ifndef PGSTROM_CHUNK_SIZE				/* experiments: -DPGSTROM_CHUNK_SIZE=<bytes> (A19 task-size sweep) */
 #define PGSTROM_CHUNK_SIZE		((size_t)(65534UL << 10))
+#endif
 
 extern Bitmapset *pickup_outer_referenced(PlannerInfo *root,
 										  RelOptInfo *baserel);
