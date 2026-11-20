@@ -1213,7 +1213,7 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	recheck_buf	rck = {0};
 	form_ctx	fc;
 	int			variant;
-	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0, t4 = 0;
+	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0, t4 = 0, dev0 = vk->dev_ms_total;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -1492,8 +1492,8 @@ scan_exec_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *prog,
 	}
 	t4 = now_ms();
 	if (eng->trace)
-		fprintf(stderr, "pgstrom-gpuserv: scan task: %u pages (%u from file) pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms, results %.1f ms (%u rows)\n",
-				npages, npages - nloaded, t1 - t0, mapped ? " (mapped)" : "", t2 - t1, t3 - t2, t4 - t3, nmatch);
+		fprintf(stderr, "pgstrom-gpuserv: scan task: %u pages (%u from file) pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms (device %.1f), results %.1f ms (%u rows)\n",
+				npages, npages - nloaded, t1 - t0, mapped ? " (mapped)" : "", t2 - t1, t3 - t2, vk->dev_ms_total - dev0, t4 - t3, nmatch);
 	free(lp_base);
 	free(rck.buf);
 	gpu_vk_buffer_destroy(vk, &bprog);
@@ -1942,7 +1942,7 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	size_t		out_words;
 	const uint32_t *out;
 	int			rv = -1;
-	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0;
+	double		t0 = now_ms(), t1 = 0, t2 = 0, t3 = 0, dev0 = vk->dev_ms_total;
 
 	memset(&ps, 0, sizeof(ps));
 	err[0] = '\0';
@@ -2104,8 +2104,8 @@ scan_exec_agg_task(scan_engine *eng, const XpuCommand *session_cmd, scan_prog *p
 	}
 	st->npages_vfs_read += (npages - nloaded) * PAGES_PER_BLOCK;
 	if (eng->trace)
-		fprintf(stderr, "pgstrom-gpuserv: agg task: %u pages, pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms, merge %.1f ms\n",
-				npages, t1 - t0, mapped ? " (mapped)" : "", t2 - t1, t3 - t2, now_ms() - t3);
+		fprintf(stderr, "pgstrom-gpuserv: agg task: %u pages, pages-in %.1f ms%s, setup %.1f ms, gpu %.1f ms (device %.1f), merge %.1f ms\n",
+				npages, t1 - t0, mapped ? " (mapped)" : "", t2 - t1, t3 - t2, vk->dev_ms_total - dev0, now_ms() - t3);
 	rv = 0;
 done:
 	free(lp_base);

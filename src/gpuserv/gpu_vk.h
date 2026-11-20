@@ -70,6 +70,10 @@ typedef struct gpu_vk_ctx
 	VkCommandPool		cmd_pool;
 	VkCommandBuffer		cmd;
 	VkFence				fence;
+	VkQueryPool			qpool;					/* A19: two timestamps around a dispatch, or VK_NULL_HANDLE */
+	uint32_t			ts_valid_bits;
+	double				last_dev_ms;			/* device time of the last gpu_vk_dispatch(), -1 if unknown */
+	double				dev_ms_total;			/* sum over all dispatches since open (a task prints the difference; only with PGSTROM_GPUSERV_TIMESTAMPS) */
 	VkPipelineCache		pcache;					/* persisted compiled pipelines, or VK_NULL_HANDLE */
 	size_t				pcache_saved;			/* size of the data last written to pcache_path */
 	char				pcache_path[768];

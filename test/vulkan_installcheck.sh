@@ -52,11 +52,11 @@ fi
 # the expected outputs assume the GPU plans of small data: no per-row scan floor in the planner (A18, default 0.05)
 grep -q '^pg_strom.gpu_scan_tuple_cost' "$ROOT/data/postgresql.conf" || echo 'pg_strom.gpu_scan_tuple_cost = 0' >> "$ROOT/data/postgresql.conf"
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w -o "-p $PORT -k $ROOT" start >/dev/null 2>&1 || { echo "start failed (see $ROOT/log)"; exit 1; }
-n=0; while [ $n -lt 60 ]; do
+n=0; while [ $n -lt ${READY_WAIT:-60} ]; do
 	[ "$($PSQL -d postgres -c 'create extension if not exists pg_strom; select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
 	n=$((n+1)); sleep 1
 done
-if [ $n -ge 60 ]; then echo "GPU service is not ready"; stop; exit 1; fi
+if [ $n -ge ${READY_WAIT:-60} ]; then echo "GPU service is not ready"; stop; exit 1; fi
 
 if [ "${HOLD:-0}" = 1 ]; then
 	# interactive session: keep the cluster (and, under locked_test.sh, the test lock) until $ROOT/release exists

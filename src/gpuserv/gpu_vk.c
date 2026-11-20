@@ -529,6 +529,7 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 			if (!(qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
 				break;
 		}
+	ctx->ts_valid_bits = (qf >= 0) ? qfp[qf].timestampValidBits : 0;
 	free(qfp);
 	if (qf < 0)
 	{
@@ -663,6 +664,18 @@ gpu_vk_open(gpu_vk_ctx *ctx, int index)
 			CTX_ERR(ctx, "vkCreateFence failed: %s", vkr_str(rc));
 			gpu_vk_close(ctx);
 			return -1;
+		}
+		/* A19: device time of a dispatch (two timestamps); optional, the dispatch works without it */
+		if (getenv("PGSTROM_GPUSERV_TIMESTAMPS") && ctx->ts_valid_bits >= 32 && ctx->limits.timestampPeriod > 0)
+		{
+			VkQueryPoolCreateInfo qci;
+
+			memset(&qci, 0, sizeof(qci));
+			qci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+			qci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+			qci.queryCount = 2;
+			if (vkCreateQueryPool(ctx->dev, &qci, NULL, &ctx->qpool) != VK_SUCCESS)
+				ctx->qpool = VK_NULL_HANDLE;
 		}
 	}
 
@@ -953,6 +966,8 @@ gpu_vk_close(gpu_vk_ctx *ctx)
 			vkDeviceWaitIdle(ctx->dev);
 		if (ctx->fence)
 			vkDestroyFence(ctx->dev, ctx->fence, NULL);
+		if (ctx->qpool)
+			vkDestroyQueryPool(ctx->dev, ctx->qpool, NULL);
 		if (ctx->pcache)
 			vkDestroyPipelineCache(ctx->dev, ctx->pcache, NULL);
 		if (ctx->pcache_sp)
@@ -1601,6 +1616,11 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 		CTX_ERR(ctx, "vkBeginCommandBuffer failed: %s", vkr_str(rc));
 		return -1;
 	}
+	if (ctx->qpool)
+	{
+		vkCmdResetQueryPool(ctx->cmd, ctx->qpool, 0, 2);
+		vkCmdWriteTimestamp(ctx->cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, ctx->qpool, 0);
+	}
 	vkCmdBindPipeline(ctx->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p->pipeline);
 	if (p->nbind > 0)
 		vkCmdBindDescriptorSets(ctx->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p->layout,
@@ -1609,6 +1629,8 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 		vkCmdPushConstants(ctx->cmd, p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
 						   p->pc_size, pc);
 	vkCmdDispatch(ctx->cmd, gx, gy, gz);
+	if (ctx->qpool)
+		vkCmdWriteTimestamp(ctx->cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, ctx->qpool, 1);
 	memset(&mb, 0, sizeof(mb));
 	mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 	mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -1653,6 +1675,17 @@ gpu_vk_dispatch(gpu_vk_ctx *ctx, gpu_vk_pipeline *p, gpu_vk_buffer *const *bufs,
 			ctx->lost = 1;
 		CTX_ERR(ctx, "vkWaitForFences failed: %s", vkr_str(rc));
 		return -1;
+	}
+	ctx->last_dev_ms = -1.0;
+	if (ctx->qpool)
+	{
+		uint64_t	ts[2];
+
+		if (vkGetQueryPoolResults(ctx->dev, ctx->qpool, 0, 2, sizeof(ts), ts, sizeof(uint64_t),
+								  VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && ts[1] >= ts[0])
+			ctx->last_dev_ms = (double) (ts[1] - ts[0]) * ctx->limits.timestampPeriod / 1e6;
+		if (ctx->last_dev_ms >= 0)
+			ctx->dev_ms_total += ctx->last_dev_ms;
 	}
 	rc = vkResetFences(ctx->dev, 1, &ctx->fence);
 	if (rc != VK_SUCCESS)

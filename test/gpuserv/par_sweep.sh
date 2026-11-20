@@ -8,6 +8,7 @@
 # and scan_chunk_blocks in CHUNKS, and the wall time of K concurrent client sessions running the same query (CLIENTS), reported as queries per second.
 #   LABEL_RE=<regex>   only the queries whose label matches
 #   WORKERS=, ASYNCS=, CLIENTS=, CHUNKS=  the sweeps (a list in quotes; CLIENTS=0 skips the client test)
+#   READY_WAIT=<s>     seconds to wait for the service (default 600; a cold start loads the 1.6 GB pipeline cache through Metal, slow on a loaded machine)
 #   SPEC=<mode>        PGSTROM_GPUSERV_SPECIALIZE of the service; KEEPLOG=<file> keeps the service trace
 PGBIN=${PGBIN:-/opt/homebrew/opt/postgresql@17/bin}
 GPUSERV_BIN=${GPUSERV_BIN:?set GPUSERV_BIN to the pgstrom-gpuserv binary}
@@ -28,11 +29,11 @@ export PGSTROM_GPUSERV_TRACE=1
 [ -n "$SPEC" ] && export PGSTROM_GPUSERV_SPECIALIZE=$SPEC	# e.g. SPEC=force: every session uses the specialized kernels from its first task
 : > "$ROOT/log"
 $PGBIN/pg_ctl -D "$ROOT/data" -l "$ROOT/log" -w start >/dev/null 2>&1 || { echo "start failed"; tail -20 "$ROOT/log"; exit 1; }
-n=0; while [ $n -lt 600 ]; do
+n=0; while [ $n -lt ${READY_WAIT:-600} ]; do
 	[ "$($PSQL -d postgres -c 'select state from pgstrom.gpu_service_state()' 2>/dev/null | tail -1)" = ready ] && break
 	n=$((n+1)); sleep 1
 done
-[ $n -lt 600 ] || { echo "service not ready"; tail -20 "$ROOT/log"; exit 1; }
+[ $n -lt ${READY_WAIT:-600} ] || { echo "service not ready"; tail -20 "$ROOT/log"; exit 1; }
 
 BASE="set pg_strom.gpu_setup_cost=0; set pg_strom.gpu_tuple_cost=0; set pg_strom.gpu_scan_tuple_cost=0; set pg_strom.gpupreagg_max_groups=100000; set parallel_setup_cost=0; set parallel_tuple_cost=0; set min_parallel_table_scan_size=0;"
 best3() { # settings query -> best execution time of three runs
